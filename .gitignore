@@ -1,0 +1,10 @@
+# Repo-wide housekeeping. Per-project ignores live in each project's subfolder.
+
+# Rust build output, wherever a project puts it
+target/
+
+# Serena MCP local state
+.serena/
+
+# macOS
+.DS_Store

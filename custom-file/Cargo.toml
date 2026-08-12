@@ -1,0 +1,19 @@
+[workspace]
+members = ["ctf-format"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+# Matches the GPL-3 text in LICENSE. `-only` rather than `-or-later` because a
+# bare LICENSE file grants no "any later version" permission on its own.
+license = "GPL-3.0-only"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+indexing_slicing = "warn"
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
