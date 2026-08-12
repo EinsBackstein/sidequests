@@ -9,21 +9,20 @@ Cold-start context for whoever picks this up. Read this, then
 ## Where this lives
 
 `sidequests` is a collection repo for unrelated side projects. This project owns
-the `custom-file/` subfolder and nothing outside it. Do not add files to the repo
+the `ctf-format/` subfolder and nothing outside it. Do not add files to the repo
 root except shared housekeeping like `.gitignore`.
 
 ```
-custom-file/
-  Cargo.toml           workspace root — members = ["ctf-format"]
+ctf-format/
+  Cargo.toml           workspace root — members = ["crates/ctf-format"]
   rust-toolchain.toml   pinned 1.97.1 — load-bearing, see below
-  ctf-format/           the only crate today
+  crates/ctf-format/    the only crate today
     src/{lib,error,header,section}.rs
     tests/container.rs  44 tests
   docs/FORMAT-DESIGN.md design + normative spec text
   docs/ROADMAP.md       phased plan, checkboxes reflect reality
   CHANGELOG.md
   HANDOFF.md            this file
-  LICENSE               GPL-3.0
 ```
 
 ## What the project is
@@ -167,26 +166,14 @@ serving-layer checks:
 
 ## Open questions for the user
 
-1. **GPL-3.0 for a format reference implementation?** `Cargo.toml` now declares
-   `GPL-3.0-only` to match `LICENSE`. Design §13 wants an independent second
-   implementation, and GPL on the reference library means anyone implementing the
-   format against it inherits GPL obligations. A permissive licence for the format
-   crate specifically may be what is actually wanted.
-2. **`custom-file/docs/FORMAT-DESIGN.md` has a stale duplicate** at
-   `custom-file/file-format/docs/FORMAT-DESIGN.md` — a pre-edit copy, still naming
-   the platform "p4ssive" and missing the scope boundary and layout sections. It
-   was offered for deletion twice and left in place, so it is committed as-is. It
-   will mislead a reader who finds it first.
-3. **Folder name `custom-file/`** does not describe the project. Renaming later
-   costs nothing but breaks the release tag's path association.
-4. **`.ctf` collides with Compact C Type Format** (`libctf`, `ctfdump`, magic
+1. **`.ctf` collides with Compact C Type Format** (`libctf`, `ctfdump`, magic
    `0xcff1`). Different magic bytes, so `file`/libmagic disambiguates cleanly, but
    the extension is shared. Accepted, not blocking.
 
 ## Commands
 
 ```bash
-cd custom-file
+cd ctf-format
 cargo test                    # 44 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all

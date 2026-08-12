@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Reader and writer for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 
 # No dependencies yet, deliberately. Header and section table are pure std;
 # BLAKE3 arrives with phase 1's hashing work. See docs/ROADMAP.md.
