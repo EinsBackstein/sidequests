@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! off  size  field
-//!   0     2  kind
-//!   2     2  name_id           index into the manifest's name table
+//!   0     2  kind              >8 only with OPTIONAL
+//!   2     2  name_id           name table index; the section's crypto identity
 //!   4     2  flags
 //!   6     1  enc
 //!   7     1  comp
@@ -19,22 +19,29 @@
 //!  80    48  reserved          MUST be zero
 //! ```
 //!
-//! # Divergence from design §6
+//! Normative: `spec/SPEC.md` §5 (record rules R1–R18) and §6 (table rules
+//! T1–T5), which this module implements one-for-one. Rationale is design §6.
 //!
-//! The design doc lists `external` as both a section *kind* and a section *flag*.
-//! It is only a flag here. A section's kind says what it semantically is; whether
-//! its bytes live inline or elsewhere is orthogonal — an external artifact and an
-//! external forensics image are both sensible, so folding "external" into the kind
-//! enum would make those unrepresentable. `SectionKind::External` is therefore
-//! gone and `SectionFlags::EXTERNAL` is the single source of truth.
+//! # Why unknown kinds are a separate type
 //!
-//! # Layout freedom
+//! A reader must be able to carry a section whose `kind` a later version of the
+//! format defines (spec §5.2), so [`SectionKind`] needs a variant holding a
+//! discriminant this build does not name. The obvious spelling, `Unknown(u16)`,
+//! admits a state the format does not have: `Unknown(1)` is a perfectly good Rust
+//! value, and [`SectionRecord::to_bytes`] would write it as `kind = 1`, emitting a
+//! section that claims to be the manifest. Nothing in the file caused that — it is
+//! a writer building a record wrong — but a bundle is signed and long-lived, and a
+//! mislabelled section is not the kind of bug that surfaces quickly.
 //!
-//! Sections may live anywhere in `[HEADER_LEN, footer_off)`. The design doc's
-//! layout diagram is illustrative, not normative: a writer streaming a multi-GB
-//! payload does not know final sizes until it is done, so forcing a fixed region
-//! order would force it to buffer. The only structural rules are the ones
-//! [`validate_layout`] enforces — no overlaps, everything in bounds.
+//! [`FutureKind`] closes it by construction: a newtype whose field is private to
+//! this module, reachable only through [`SectionKind::unknown`], which rejects
+//! every discriminant this version defines. The invalid pairing stops being
+//! something callers are trusted not to write and starts being something they
+//! cannot write, which is the property worth having in a format implementation that
+//! a second language will be checked against.
+//!
+//! The cost is one accessor: match on [`SectionKind::Unknown`] and call
+//! [`FutureKind::get`] for the raw discriminant.
 
 use crate::{
     Error, HEADER_LEN, Header, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, PAYLOAD_ALIGN, Result,
@@ -58,32 +65,71 @@ const ROOT_LEN: usize = 32;
 const OFF_RESERVED_B: usize = 80;
 const RESERVED_B_LEN: usize = 48;
 
-/// What a section semantically is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
-pub enum SectionKind {
-    /// Canonical CBOR manifest. Exactly one per bundle.
-    Manifest = 1,
-    /// A challenge artifact, whether player-facing or generator-internal.
-    Artifact = 2,
-    /// `gen.wasm`.
-    Generator = 3,
-    /// `solver.wasm`. Always sealed.
-    Solver = 4,
-    /// Author writeup. Always sealed.
-    Writeup = 5,
-    /// Entitlement chain records (design §9).
-    Entitlement = 6,
-    /// Hybrid KEM key envelopes.
-    Keys = 7,
-    /// Sealed per-holder progress blob.
-    Progress = 8,
+/// A section kind defined by some later version of the format.
+///
+/// The inner value is private, and that is the entire point of the type. It exists
+/// so that [`SectionKind::Unknown`] cannot be built holding a discriminant this
+/// version *does* define — `Unknown(1)` would otherwise be constructible, and
+/// [`SectionRecord::to_bytes`] would write it as `kind = 1`, silently producing a
+/// file whose section claims to be the manifest.
+///
+/// The invariant is therefore that the value always exceeds the largest kind this
+/// version defines, and it is held by construction rather than by assertion:
+/// inside this module only the record parser builds one, having already
+/// range-checked the value it read from the file; outside it,
+/// [`SectionKind::unknown`] is the only door and it range-checks too. A caller that
+/// wants the invalid pairing cannot write it, which is the difference between an
+/// invariant and a convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FutureKind(u16);
+
+impl FutureKind {
+    /// The on-disk discriminant. Always greater than the largest kind this version
+    /// defines.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
 }
+
+/// What a section semantically is.
+///
+/// [`SectionKind::Unknown`] carries a kind this build does not implement, which
+/// only [`SectionFlags::OPTIONAL`] sections may use (spec §5.2, R18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionKind {
+    /// `1` — canonical CBOR manifest. Exactly one per bundle.
+    Manifest,
+    /// `2` — a challenge artifact, whether player-facing or generator-internal.
+    Artifact,
+    /// `3` — `gen.wasm`.
+    Generator,
+    /// `4` — `solver.wasm`. Always sealed.
+    Solver,
+    /// `5` — author writeup. Always sealed.
+    Writeup,
+    /// `6` — entitlement chain records (design §9).
+    Entitlement,
+    /// `7` — hybrid KEM key envelopes.
+    Keys,
+    /// `8` — sealed per-holder progress blob.
+    Progress,
+    /// A kind defined by a later version of the format. Only ever produced for a
+    /// section marked [`SectionFlags::OPTIONAL`]; see [`FutureKind`] for why the
+    /// payload is opaque.
+    Unknown(FutureKind),
+}
+
+/// Largest kind this version defines. A value above it is a future kind.
+const MAX_KNOWN_KIND: u16 = 8;
 
 impl SectionKind {
     /// Kind 0 is never valid, which is what makes a zero-filled record a reject
     /// rather than a plausible manifest section.
-    fn from_u16(v: u16) -> Result<Self> {
+    ///
+    /// An undefined kind is an error *unless* the writer marked the section
+    /// optional, which is the promise that skipping it cannot change the meaning of
+    /// the rest of the file.
+    fn from_u16(v: u16, flags: SectionFlags) -> Result<Self> {
         Ok(match v {
             1 => Self::Manifest,
             2 => Self::Artifact,
@@ -93,8 +139,46 @@ impl SectionKind {
             6 => Self::Entitlement,
             7 => Self::Keys,
             8 => Self::Progress,
+            got if got > MAX_KNOWN_KIND && flags.optional() => Self::Unknown(FutureKind(got)),
             got => return Err(Error::InvalidSectionKind { got }),
         })
+    }
+
+    /// The kind for a discriminant this version does not define, for a writer that
+    /// carries a section from a newer format version.
+    ///
+    /// `None` when `v` names a kind this version *does* define, including `0`:
+    /// those have their own variants, and letting them through here would put a
+    /// known discriminant inside `Unknown`, where it would serialize as the kind it
+    /// names rather than as the unknown one the caller meant.
+    ///
+    /// Returning `Option` rather than [`Error`] on purpose — [`Error`] describes
+    /// what can be wrong with a byte stream, and this is a caller passing the wrong
+    /// number, which no file can cause.
+    pub fn unknown(v: u16) -> Option<Self> {
+        (v > MAX_KNOWN_KIND).then_some(Self::Unknown(FutureKind(v)))
+    }
+
+    /// The on-disk discriminant.
+    pub fn to_u16(self) -> u16 {
+        match self {
+            Self::Manifest => 1,
+            Self::Artifact => 2,
+            Self::Generator => 3,
+            Self::Solver => 4,
+            Self::Writeup => 5,
+            Self::Entitlement => 6,
+            Self::Keys => 7,
+            Self::Progress => 8,
+            // No assertion needed: `FutureKind` cannot hold a known discriminant.
+            Self::Unknown(v) => v.get(),
+        }
+    }
+
+    /// Whether this build understands what the section contains. A section it does
+    /// not understand may be carried and committed to, never served or executed.
+    pub fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown(_))
     }
 
     /// Kinds that must never be readable during the event.
@@ -151,16 +235,30 @@ impl Compression {
 pub struct SectionFlags(pub u16);
 
 impl SectionFlags {
-    /// Encrypted to the seal recipient, which the platform does not hold during
-    /// the event (design §4).
+    /// The plaintext requires a key the platform does not hold during the event.
+    ///
+    /// Defined by who *cannot* open the section rather than by which recipient can,
+    /// so it covers both a writeup encrypted to the offline seal recipient and a
+    /// `progress` blob encrypted to a player's holder key (design §4, §9). A
+    /// stage-gated section is *not* sealed: it is served as ciphertext, and
+    /// [`SectionFlags::PLAYER_VISIBLE`] excludes this bit.
     pub const SEALED: u16 = 1 << 0;
     /// Eligible to be served to players. An allowlist, never a blocklist.
     pub const PLAYER_VISIBLE: u16 = 1 << 1;
     /// Bytes live outside the file; `offset` and `len_stored` are 0 and the
     /// manifest carries the mirror list.
     pub const EXTERNAL: u16 = 1 << 2;
+    /// A reader that does not know this section's `kind` MUST skip it rather than
+    /// reject the file. The writer's promise is that skipping cannot cause a reader
+    /// to serve, execute, or mis-locate anything — anything stronger than that is an
+    /// incompatible feature, not an optional section.
+    ///
+    /// On a *known* kind the bit is legal and means nothing, which it must be: a
+    /// kind that is unknown today becomes known tomorrow, and files written in
+    /// between have to stay valid.
+    pub const OPTIONAL: u16 = 1 << 3;
 
-    const KNOWN: u16 = Self::SEALED | Self::PLAYER_VISIBLE | Self::EXTERNAL;
+    const KNOWN: u16 = Self::SEALED | Self::PLAYER_VISIBLE | Self::EXTERNAL | Self::OPTIONAL;
 
     pub const fn empty() -> Self {
         Self(0)
@@ -176,6 +274,9 @@ impl SectionFlags {
     }
     pub const fn external(self) -> bool {
         self.contains(Self::EXTERNAL)
+    }
+    pub const fn optional(self) -> bool {
+        self.contains(Self::OPTIONAL)
     }
 
     fn validate(self) -> Result<()> {
@@ -201,6 +302,10 @@ impl SectionFlags {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SectionRecord {
     pub kind: SectionKind,
+    /// Index into the manifest's name table, and the section's stable cryptographic
+    /// identity: phase 2 binds it into the AEAD nonce and AAD (design §7). That is
+    /// why it must be unique, and why a rewriter MUST NOT reassign it — reusing a
+    /// `name_id` under an unchanged content key would repeat a nonce.
     pub name_id: u16,
     pub flags: SectionFlags,
     pub enc: Encryption,
@@ -241,9 +346,12 @@ impl SectionRecord {
             return Err(Error::ReservedNotZero { at: "section" });
         }
 
-        let kind = SectionKind::from_u16(u16_at(b, OFF_KIND).ok_or_else(trunc)?)?;
+        // Flags before kind: whether an undefined kind is a reject or a skippable
+        // section is decided by SectionFlags::OPTIONAL, so the flags have to be
+        // validated first.
         let flags = SectionFlags(u16_at(b, OFF_FLAGS).ok_or_else(trunc)?);
         flags.validate()?;
+        let kind = SectionKind::from_u16(u16_at(b, OFF_KIND).ok_or_else(trunc)?, flags)?;
 
         if kind.must_be_sealed() && !flags.sealed() {
             return Err(Error::Inconsistent {
@@ -385,7 +493,7 @@ impl SectionRecord {
                 dst.copy_from_slice(src);
             }
         };
-        put(OFF_KIND, &(self.kind as u16).to_le_bytes());
+        put(OFF_KIND, &self.kind.to_u16().to_le_bytes());
         put(OFF_NAME_ID, &self.name_id.to_le_bytes());
         put(OFF_FLAGS, &self.flags.0.to_le_bytes());
         put(OFF_ENC, &[self.enc as u8]);
@@ -458,9 +566,11 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64
         });
     }
 
-    // (start, end, name_id) for every inline section, plus the table itself so a
-    // section cannot be laid over it.
-    let mut ranges: Vec<(u64, u64, u16)> = Vec::with_capacity(records.len() + 1);
+    // (start, end, owner) for every inline section, plus the table itself so a
+    // section cannot be laid over it. `None` is the table: an explicit owner rather
+    // than a sentinel `name_id`, so a real section numbered 65535 stays
+    // distinguishable from the table in a diagnostic.
+    let mut ranges: Vec<(u64, u64, Option<u16>)> = Vec::with_capacity(records.len() + 1);
     for r in records {
         let Some((start, end)) = r.stored_range() else {
             continue;
@@ -473,11 +583,11 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64
             });
         }
         if end > start {
-            ranges.push((start, end, r.name_id));
+            ranges.push((start, end, Some(r.name_id)));
         }
     }
     if table_end > table_start {
-        ranges.push((table_start, table_end, u16::MAX));
+        ranges.push((table_start, table_end, None));
     }
 
     ranges.sort_unstable();
@@ -486,7 +596,17 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64
             continue;
         };
         if b.0 < a.1 {
-            return Err(Error::OverlappingSections { a: a.2, b: b.2 });
+            return Err(match (a.2, b.2) {
+                (Some(a), Some(b)) => Error::OverlappingSections { a, b },
+                (None, Some(name_id)) | (Some(name_id), None) => {
+                    Error::OverlapsSectionTable { name_id }
+                }
+                // Unreachable: the table is pushed once, so two `None` ranges
+                // cannot exist. Reported rather than panicked on, per design §14.
+                (None, None) => Error::Inconsistent {
+                    what: "section table listed twice in layout validation",
+                },
+            });
         }
     }
     Ok(())

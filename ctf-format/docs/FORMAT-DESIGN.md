@@ -1,6 +1,9 @@
 # `.ctf` — Challenge Transport Format
 
-**Status:** design draft. Not a spec yet. Nothing here is implemented.
+**Status:** design rationale and threat model. The normative specification is
+[`spec/SPEC.md`](../spec/SPEC.md), which wins wherever the two disagree; this
+document explains *why* the bytes are what they are, and specifies the phases not
+yet frozen there.
 
 ## 1. What this is
 
@@ -98,6 +101,14 @@ offline half (implemented here) and a live half (specified here, implemented the
   guarantee.
 - Malicious challenge authors (R10 puts them out of scope). Ingest still sandboxes.
 - Players attacking each other's instances (platform network policy, not format).
+- **Metadata leakage from a sealed section.** Its length, and its compression
+  ratio if `comp = 1`, are visible in the clear section record before release.
+  That is an entropy bound on a writeup or solver, not its contents, but a bundle
+  published pre-event does leak it. Pad or leave sealed sections uncompressed if
+  that matters for a particular challenge.
+- **Brute force against a stage gate.** Stage *N*'s key derives from the 80-bit
+  flag of stage *N-1*, so an attacker holding the bundle offline faces 2^80, not
+  2^128. Inherent to deriving the key from what the player types; see §7.
 
 ## 5. Archetype coverage (R2)
 
@@ -111,8 +122,11 @@ The dynamic range is roughly 2 KB → 40 GB. Three mechanisms cover it:
 | Networked pwn/web | manifest + digest-pinned image ref + sealed solver | ~50 KB |
 
 - **External sections** keep a 40 GB image out of the file while keeping it inside
-  the commitment: the manifest carries its BLAKE3 root, length, and mirror list.
-  A `.ctf` stays mailable regardless of payload size.
+  the commitment: the section record carries its BLAKE3 root and length, and the
+  manifest carries the mirror list. Where the manifest repeats the root or the
+  length, **the record wins and a mismatch rejects the file** — two carriers of one
+  fact with no precedence is how two implementations end up verifying against
+  different values (spec §5.7). A `.ctf` stays mailable regardless of payload size.
 - **Chunked verified streaming** lets a 40 GB payload be verified incrementally,
   resumed after a broken transfer, and streamed to a player while still unverified
   bytes are in flight.
@@ -129,7 +143,7 @@ The dynamic range is roughly 2 KB → 40 GB. Three mechanisms cover it:
 │   header_len u32                                             │
 │   suite_id u16          crypto suite (§7)                    │
 │   flags u16                                                  │
-│   section_table_off u64 | section_table_count u32            │
+│   section_table_count u32 | section_table_off u64            │
 │   footer_off u64                                             │
 │   reserved[…]           MUST be zero, validated              │
 ├──────────────────────────────────────────────────────────────┤
@@ -142,12 +156,41 @@ The dynamic range is roughly 2 KB → 40 GB. Three mechanisms cover it:
 │ Entitlement chain — append-only signed records (§9)          │
 ├──────────────────────────────────────────────────────────────┤
 │ Footer                                                       │
-│   root[32]              BLAKE3 over table + all section roots │
+│   root[32]              BLAKE3 over header + section table   │
 │   sig_classical[64]     Ed25519                              │
 │   sig_pq[3309]          ML-DSA-65                            │
 │   total_len u64 | magic[8] repeated                          │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### What the commitment covers
+
+```
+root      = BLAKE3("ctf/root/v1" ‖ header[0,64) ‖ section_table_bytes)
+sig_input = "ctf/footer-sig/v1" ‖ u16_le(suite_id) ‖ root ‖ u64_le(total_len)
+```
+
+Both signatures cover the identical `sig_input`. Four properties, each of which
+was a gap worth closing before anything depends on the bytes:
+
+- **The header is inside the root.** Otherwise the feature words (spec §4.1) are
+  strippable: an attacker clears the bits that tell an old reader to refuse the
+  file, and the refusal becomes a misparse. A compatibility signal outside the
+  commitment is not a signal.
+- **The section table is hashed as bytes, once.** Every section's own `root` field
+  already lives inside those bytes, so hashing the table covers all of them; the
+  earlier wording ("table + all section roots") implied a second pass and left the
+  order of that pass undefined, which is enough for two conforming writers to
+  produce different roots for the same bundle.
+- **`suite_id` is in the signed transcript**, so a signature cannot be replayed
+  under a downgraded suite, and the domain label stops it being replayed against
+  an entitlement record — those share the same keys.
+- **`total_len` is signed**, which is what makes the no-trailing-bytes rule
+  (spec §3) enforceable rather than advisory.
+
+The chunk index must also be committed; how is settled when its format is, in
+phase 1. Nothing else may be added to the root without a format version bump —
+the root definition is as load-bearing as the byte layout.
 
 ### Header (64 B, normative offsets)
 
@@ -165,8 +208,15 @@ off  size  field
  20     4  section_table_count  capped before it can size an allocation
  24     8  section_table_off    ≥ 64, 8-byte aligned
  32     8  footer_off           ≥ section table end
- 40    24  reserved             MUST be zero
+ 40     4  feat_incompat        unsupported bit ⇒ reject the file
+ 44     4  feat_ro_compat       unsupported bit ⇒ readable, never rewritable
+ 48    16  reserved             MUST be zero
 ```
+
+The two feature words are the format's forward-compatibility mechanism, specified
+in spec §2.3 and §11. They cost nothing today — both are zero — and could not have
+been added later, because a reader of the previous version enforces zero across
+everything after `footer_off`.
 
 The signature is exactly PNG's construction with `CTF` as the three-character tag,
 which is why it is 8 bytes and why every byte is load-bearing:
@@ -190,8 +240,11 @@ off  size  field
   0     2  kind             1=manifest 2=artifact 3=generator 4=solver
                             5=writeup 6=entitlement 7=keys 8=progress
                             0 is never valid — a zero-filled record must reject
-  2     2  name_id          index into the manifest name table
-  4     2  flags            bit0 SEALED, bit1 PLAYER_VISIBLE, bit2 EXTERNAL
+                            >8 is a future kind; legal only with OPTIONAL
+  2     2  name_id          manifest name table index, and the section's
+                            cryptographic identity (§7) — never renumber it
+  4     2  flags            bit0 SEALED, bit1 PLAYER_VISIBLE, bit2 EXTERNAL,
+                            bit3 OPTIONAL (skippable if kind is unknown)
   6     1  enc              0=none 1=AEAD-STREAM
   7     1  comp             0=none 1=zstd (frame-aligned to chunks)
   8     8  offset           0 when EXTERNAL; else 4096-aligned
@@ -209,8 +262,24 @@ is; whether its bytes live inline or elsewhere is orthogonal, and an external
 artifact and an external writeup are both sensible. Folding `external` into the
 kind enum would make those unrepresentable.
 
-`public` is likewise not a flag — it is the absence of `SEALED`. Encoding both
-would create a fourth state that means nothing.
+`SEALED` says **who cannot open the section**, not which recipient can: it means
+the plaintext needs a key the platform does not hold while the event runs. That
+covers a writeup encrypted to the offline seal recipient and a `progress` blob
+encrypted to a player's holder key (§9) alike — defining it as "encrypted to the
+seal recipient" would contradict the rule that `progress` sections must carry it.
+
+A **stage-gated** section is not sealed. It is `enc = 1` to a `stage:N` recipient
+and `PLAYER_VISIBLE`, because it is served as ciphertext to whoever earned stage
+*N-1*; since `SEALED` and `PLAYER_VISIBLE` are mutually exclusive, marking it
+sealed would make it permanently unservable. Which key opens a section is manifest
+data, never a flag.
+
+There is no `public` flag: publicly *readable* is simply the absence of `SEALED`,
+and encoding both would create a state that means nothing. `PLAYER_VISIBLE` is a
+different question and is not the complement of `SEALED` — it is an allowlist for
+*serving*. Three states exist and all three are used: sealed; player-visible; and
+neither, meaning readable by the platform but never handed to a player. Spec §5.3
+is normative for this.
 
 ### Layout freedom
 
@@ -278,6 +347,23 @@ Adds SLH-DSA (FIPS 205) alongside. Hash-based, conservative, large signatures.
 Worth it for the permanent archive copy where ML-DSA's relative youth is a real
 consideration; not worth it for in-event bundles.
 
+### Encoding rule for every derivation input — read first
+
+Every `‖` in this section joins **fixed-width fields only**. Any variable-length
+input is length-prefixed first:
+
+```
+LP(x) = u32_le(len(x)) ‖ x
+```
+
+Without it, concatenation is ambiguous and the ambiguity is exploitable: in
+`chal_id ‖ subject_id`, the pairs `("ab","c")` and `("a","bc")` produce identical
+bytes, so two different subjects derive the same seed and therefore the same flag.
+That silently destroys per-subject attribution — the whole point of derived flags —
+and it fails open, with no error anywhere. Every derivation below also carries a
+versioned domain label, so that no two constructions can ever be fed the same
+input.
+
 ### Hybrid KEM combiner
 
 The combiner MUST be a KDF over both shared secrets **and the full transcript** —
@@ -286,9 +372,18 @@ never XOR, never plain concatenation of secrets alone:
 ```
 ss = HKDF-SHA-256(
        ikm  = ss_x25519 ‖ ss_mlkem,
-       salt = suite_id ‖ format_version,
-       info = ct_x25519 ‖ ct_mlkem ‖ pk_x25519 ‖ pk_mlkem ‖ context_label )
+       salt = "ctf/kem/v1" ‖ u16_le(suite_id) ‖ u16_le(version_major),
+       info = LP(ct_x25519) ‖ LP(ct_mlkem) ‖ LP(pk_x25519) ‖ LP(pk_mlkem)
+              ‖ LP(context_label) )
 ```
+
+`context_label` is one of `storage`, `seal`, `stage:N`, `holder`, matching the
+recipient roles in the key hierarchy below.
+
+The salt binds **`version_major` only**, never the minor. Key derivation must not
+change when the spec gains a field: binding the full version would mean every
+minor bump silently re-keys every bundle, so a 0.2 tool could not open a 0.1
+bundle it had just written correctly.
 
 Transcript binding prevents an attacker who controls one component's ciphertext
 from steering the derived key. This mirrors TLS `X25519MLKEM768` and the hybrid
@@ -300,8 +395,11 @@ Naive per-chunk AEAD is reorderable and truncatable. Use the STREAM construction
 (Hoang–Reyhanitabar–Rogaway–Vizár):
 
 ```
-nonce = nonce_prefix(section_id, key_epoch) ‖ u32_be(chunk_index) ‖ final_flag
-aad   = section_id ‖ chunk_index ‖ len_plain ‖ suite_id
+section_id = name_id           # the u16 from the section record, never the
+                               # record's position in the table
+nonce = nonce_prefix(section_id) ‖ u32_be(chunk_index) ‖ final_flag
+aad   = "ctf/stream/v1" ‖ u16_le(section_id) ‖ u32_le(chunk_index)
+        ‖ u64_le(len_plain) ‖ u16_le(suite_id)
 ```
 
 `final_flag` on the last chunk only — this is what makes truncation detectable.
@@ -309,26 +407,59 @@ aad   = section_id ‖ chunk_index ‖ len_plain ‖ suite_id
 splicing detectable. For a 40 GB forensics image this is the difference between
 integrity and the appearance of integrity.
 
+Two rules make the nonce safe, and both are load-bearing:
+
+- **`section_id` is `name_id`.** It is unique per file (spec T2), stable across a
+  rewrite, and covered by the commitment. It is emphatically *not* the record's
+  index in the section table: record order is free (spec §3), so an index-derived
+  nonce would change every time a bundle was re-emitted, and re-emitting under the
+  same content key would then repeat a nonce under a different plaintext — a total
+  break for GCM, not a degradation. A rewriter therefore MUST NOT renumber
+  sections.
+- **Every encryption draws a fresh random `content_key`.** This is what removes
+  the need for a `key_epoch` in the nonce: with a per-encryption key, re-encrypting
+  the same section under the same `name_id` is safe, because it is a different
+  keystream. Re-encrypting under a *reused* key is forbidden, and there is no field
+  that would make it safe.
+
 ### Key hierarchy
 
 ```
 event_secret (32 B — KMS/HSM, never in a bundle, never in git)
-└── seed(challenge, subject) = HKDF(event_secret, chal_id ‖ version ‖ subject_id)
-    ├── flag(subject)     = base32(HMAC(seed,"flag")[:10])   # 80 bits
+└── seed(challenge, subject) = HKDF(
+        ikm  = event_secret,
+        salt = "ctf/seed/v1",
+        info = LP(chal_id) ‖ LP(chal_version) ‖ LP(subject_id) )
+    ├── flag(subject)     = base32(HMAC(seed,"ctf/flag/v1")[:10])   # 80 bits
     └── artifact_key      # per-subject generated artifacts
 
-content_key (random, per section)
+content_key (random per encryption — never reused, see STREAM above)
 └── wrapped per recipient via hybrid KEM envelope:
     ├── storage   — platform KMS key. Gives R1 at rest.
     ├── seal      — offline/HSM, released at event end. NOT on the platform (§4).
-    └── stage:N   — HKDF(flag(N-1), "stage" ‖ N)
+    └── stage:N   — HKDF(ikm = flag(N-1), salt = "ctf/stage/v1", info = u32_le(N))
 
 holder_key(player) — X25519 + ML-KEM keypair, for entitlement and progress (§9)
 ```
 
+Every variable-length component is length-prefixed and every derivation is domain
+separated, per the encoding rule above. `u32_le(N)` rather than a decimal string,
+so `stage:1` followed by `stage:11` cannot collide with `stage:11` followed by
+`stage:1`.
+
 Stage gating requires **derived** flags. The validator MUST reject `stage_gate` on
 a static flag: an 80-bit derived flag is an acceptable key, a guessable static
 string is not.
+
+**The 80-bit ceiling is real and inherent.** A stage key must be derivable from
+the flag the player submits and nothing else — that is what "enforced by math, not
+by dashboard logic" means — so the strength of stage gating is exactly the entropy
+of the flag: 2^80 against an attacker who holds the bundle offline and wants to
+open stage *N* without solving stage *N-1*. That is far out of reach for a 48-hour
+event and far short of the 128-bit floor the rest of the stack targets. Stated
+here rather than papered over. A challenge that needs a real cryptographic
+boundary should use a 128-bit derived flag (26 base32 characters, still typable);
+the length is a per-challenge choice, not a format constant.
 
 **Write zero crypto primitives.** Providers, with maturity noted honestly:
 
@@ -358,8 +489,12 @@ capability-free WASM module cannot observe any of them.
 
 Determinism traps that the host MUST close:
 
-- Pin the enabled WASM feature set in the format version. Determinism is only
-  guaranteed relative to a pinned feature set.
+- Pin the enabled WASM feature set to an explicit `wasm_profile` number carried in
+  the manifest — **not** to the format version. Determinism is only guaranteed
+  relative to a pinned feature set, and tying that set to `version_minor` would
+  mean a spec bump that touches nothing about WASM silently changes what a
+  generator is allowed to do. A profile is retired by number, the way `suite_id`
+  retires a crypto suite.
 - `relaxed-simd` is nondeterministic by specification, but it does not have to be
   banned: Wasmtime's `Config::relaxed_simd_deterministic(true)` forces one defined
   behaviour on every architecture, trading some performance for determinism. Set it
@@ -426,6 +561,10 @@ record {
   handoff mid-multi-stage challenge does not reset progress.
 - Ordering is by `seq`, never by `timestamp`. Clocks drift and clients lie; the
   timestamp is for humans and audit display only.
+- The genesis record MUST bind the **bundle commitment root**, not just
+  `challenge_id`. A challenge is re-packed whenever its `version` increments, and a
+  chain that names only the challenge would validate against a bundle it was never
+  issued for — letting a grant for version 3 be replayed as one for version 4.
 
 Why this belongs in the format rather than a database table: on-site CTFs run
 air-gapped forensics workstations off USB media. The chain has to validate with no
@@ -508,6 +647,17 @@ Never implement this as "serve everything except…".
 Reject unknown keys rather than ignoring them. A typo'd `visibility` silently
 publishing a hidden challenge mid-event is a real incident, not a hypothetical.
 
+That strictness has to leave the manifest a way to grow, or the CBOR manifest
+becomes the one unextendable part of an otherwise extensible format (spec §11).
+The mechanism is an explicit criticality list, COSE-style: a `crit` array naming
+the keys a reader must understand, with unknown keys *not* listed being ignorable
+and unknown keys that *are* listed rejected. A typo is still rejected, because a
+typo appears in neither place.
+
+The manifest's own `spec:` number versions this schema and is independent of the
+container's `version_major.minor`, which versions the bytes. Neither implies the
+other, and a reader must not infer one from the other.
+
 ### CLI
 
 | Command | Purpose |
@@ -546,7 +696,7 @@ seal-release, entitlement/handoff audit log, verification status per challenge
 
 | Layer | Choice | Note |
 |---|---|---|
-| Core library | **Rust** | Zero-copy fixed tables via `zerocopy`, `memmap2`, `cargo-fuzz`, and the best crypto ecosystem for §7 |
+| Core library | **Rust** | Zero-copy fixed tables via `zerocopy` (little-endian typed fields only — a native-endian cast is right on x86 by luck and wrong elsewhere), `memmap2`, `cargo-fuzz`, and the best crypto ecosystem for §7 |
 | WASM host | **Wasmtime** | Only engine exposing all of §8's determinism knobs; pooling allocator for sub-ms instantiation |
 | Determinism cross-check | `wasmi` | Second engine in the conformance suite. Two engines agreeing is a far stronger signal than one engine run twice |
 | Generator interface | WIT + `wit-bindgen` | One interface definition, guest bindings for Rust/Go/C/Python free. Buys R6 with standard-side complexity, which R6 explicitly authorizes |
@@ -616,6 +766,10 @@ a CVE in some real format:
   bytes.** This is the single most common format-parser bug.
 - Bounds-check every offset before dereference. Reject offsets that point
   backwards, into the header, or that overlap another section.
+- **Reject trailing bytes.** The file ends at the footer and `total_len` must equal
+  its real length. Data appended after a valid container, sitting outside the
+  commitment while leaving the file parseable, is the ambiguity behind a long line
+  of archive-format CVEs.
 - Depth cap on nested CBOR. Unbounded recursion is a stack-overflow DoS.
 - Absolute output cap and ratio cap on zstd decompression.
 - Reject duplicate section IDs and duplicate manifest keys. Ambiguity becomes a

@@ -1,8 +1,9 @@
 //! Reader and writer for the `.ctf` challenge transport format.
 //!
-//! See `docs/FORMAT-DESIGN.md` for the design rationale and `docs/ROADMAP.md` for
-//! what is implemented. Currently: the header and the section table (phase 0 and
-//! the container half of phase 1).
+//! `spec/SPEC.md` is normative for every byte and every rule below; this crate is
+//! its reference implementation. `docs/FORMAT-DESIGN.md` carries the rationale and
+//! `docs/ROADMAP.md` what is implemented. Currently: the header and the section
+//! table (phase 0 and the container half of phase 1).
 //!
 //! # Reading order
 //!
@@ -28,16 +29,32 @@ pub mod section;
 
 pub use error::{Error, Result};
 pub use header::Header;
-pub use section::{Compression, Encryption, SectionFlags, SectionKind, SectionRecord};
+pub use section::{Compression, Encryption, FutureKind, SectionFlags, SectionKind, SectionRecord};
 
 /// File signature: PNG's construction with `CTF` as the tag. Every byte earns its
 /// place — see design §6 for the per-byte rationale.
 pub const MAGIC: [u8; 8] = [0x89, b'C', b'T', b'F', 0x0d, 0x0a, 0x1a, 0x0a];
 
 /// Format version. Major 0 means the byte layout is not yet frozen; a reader MUST
-/// reject any major it does not implement.
+/// reject any major it does not implement. Minors are always accepted: what a newer
+/// minor may rely on is negotiated through the feature words below, not the number.
 pub const VERSION_MAJOR: u16 = 0;
-pub const VERSION_MINOR: u16 = 1;
+pub const VERSION_MINOR: u16 = 2;
+
+/// Incompatible features this build implements. A file requesting any bit outside
+/// this mask cannot be read at all — the reader would be guessing at bytes whose
+/// meaning changed.
+///
+/// This is the one place a future capability is switched on. Adding a feature means
+/// setting its bit here *and* implementing it; the two cannot drift apart, because
+/// a file that sets the bit is rejected until the bit is listed.
+pub const SUPPORTED_INCOMPAT: u32 = 0;
+
+/// Read-only-compatible features this build implements. A file requesting a bit
+/// outside this mask is still readable — nothing about the bytes a reader already
+/// understands has changed — but it MUST NOT be rewritten, because a rewrite would
+/// drop whatever the unknown feature added. See [`Header::may_rewrite`].
+pub const SUPPORTED_RO_COMPAT: u32 = 0;
 
 /// Header size in bytes. Fixed for this major version.
 pub const HEADER_LEN: u32 = 64;

@@ -44,9 +44,17 @@ pub enum Error {
         end: u64,
         file_len: u64,
     },
+    /// The file requires a feature this build does not implement. Carries the
+    /// unsupported bits so a diagnostic can name what is missing rather than
+    /// reporting the confusing structural error the unknown bytes would cause.
+    UnsupportedFeature { class: &'static str, bits: u32 },
     /// Two sections claim overlapping byte ranges. Ambiguity here becomes a
     /// parser-differential exploit.
     OverlappingSections { a: u16, b: u16 },
+    /// A section's payload lies over the section table. Distinct from
+    /// [`Error::OverlappingSections`] so that a real section with
+    /// `name_id == u16::MAX` cannot be confused with the table in a diagnostic.
+    OverlapsSectionTable { name_id: u16 },
     /// Two sections share a `name_id`.
     DuplicateSectionName { name_id: u16 },
     /// Exactly one manifest section is required.
@@ -90,8 +98,17 @@ impl fmt::Display for Error {
             Self::ExceedsFile { at, end, file_len } => {
                 write!(f, "{at} ends at {end}, past file length {file_len}")
             }
+            Self::UnsupportedFeature { class, bits } => {
+                write!(
+                    f,
+                    "file requires unsupported {class} feature bits {bits:#010x}"
+                )
+            }
             Self::OverlappingSections { a, b } => {
                 write!(f, "sections {a} and {b} overlap")
+            }
+            Self::OverlapsSectionTable { name_id } => {
+                write!(f, "section {name_id} overlaps the section table")
             }
             Self::DuplicateSectionName { name_id } => {
                 write!(f, "duplicate section name_id {name_id}")

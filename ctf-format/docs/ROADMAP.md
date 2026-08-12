@@ -25,7 +25,7 @@ before.
 
 ---
 
-## Phase 0 — Byte layout frozen ▸ *done except the spec extract*
+## Phase 0 — Byte layout frozen ▸ *done*
 
 Byte layout is cheapest to change before any code depends on it.
 
@@ -36,10 +36,15 @@ Byte layout is cheapest to change before any code depends on it.
 - [x] Endianness stated normatively: **little-endian throughout**
 - [x] Golden vector for the header: exact 64 bytes asserted in
       `tests/container.rs::header_golden_vector`
-- [ ] Golden vector for a whole minimal `.ctf` — blocked on the manifest and
-      footer, so it lands with phase 1
-- [ ] `spec/SPEC.md` skeleton with the normative offset tables (currently they live
-      in module docs and design §6)
+- [x] Golden vector for a section record: exact 128 bytes asserted in
+      `tests/container.rs::record_golden_vector`
+- [x] `spec/SPEC.md` — normative, RFC-style: numbered rules H1–H14, R1–R18,
+      T1–T5, golden vectors, reader conformance procedure, security
+      considerations, and an explicit list of what is *not* yet specified
+- [x] **Compatibility model frozen at 0.2** — `feat_incompat` / `feat_ro_compat`
+      words in the header, `OPTIONAL` section flag, extension policy binding
+      future editors, and a compatibility matrix. No field moved, so the 0.1
+      header stays valid and is kept as a regression test
 
 ---
 
@@ -60,7 +65,11 @@ BLAKE3.
       `len_stored == len_plain` when neither compressed nor encrypted
 - [x] Layout validator: exactly one manifest, unique `name_id`, no section overlaps
       another or the section table, everything inside `[HEADER_LEN, footer_off)`
-- [x] 44 tests, one per rule, each mutating a known-good fixture by one field
+- [x] 54 tests, one per rule, each mutating a known-good fixture by one field
+- [ ] Footer + commitment root as fixed in design §6: `BLAKE3("ctf/root/v1" ‖
+      header ‖ section table)`, the signed transcript, and the no-trailing-bytes
+      rule
+- [ ] Golden vector for a whole minimal `.ctf` (requires the manifest and footer)
 - [ ] Canonical CBOR manifest encode/decode (RFC 8949 §4.2 — deterministic
       encoding is mandatory, not a preference)
 - [ ] BLAKE3 section roots + footer commitment root
@@ -186,6 +195,11 @@ deliberately disabled in the test.
 - [ ] Fuzzing in CI, corpus committed
 - [ ] Hostile-input vector corpus: one fixture per §14 bullet, each with its
       expected error
+- [ ] **Synthetic "future file" vectors** — files that set an invented
+      `feat_incompat` bit, an invented `feat_ro_compat` bit, and an `OPTIONAL`
+      section of an undefined kind. The only way to test forward compatibility
+      before a real extension exists, and the check that spec §12's compatibility
+      matrix is true rather than aspirational
 - [ ] `wasmi` as a second engine in the determinism cross-check
 - [ ] **Go second implementation written from `spec/SPEC.md` alone**, no peeking at
       the Rust source

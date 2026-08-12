@@ -13,12 +13,17 @@
 //!  20     4  section_table_count
 //!  24     8  section_table_off
 //!  32     8  footer_off
-//!  40    24  reserved             MUST be zero
+//!  40     4  feat_incompat        unsupported bit => reject the file
+//!  44     4  feat_ro_compat       unsupported bit => read-only
+//!  48    16  reserved             MUST be zero
 //! ```
+//!
+//! Normative: `spec/SPEC.md` §4, whose rules H1–H14 this module implements
+//! one-for-one.
 
 use crate::{
-    Error, HEADER_LEN, MAGIC, MAX_SECTIONS, Result, SECTION_RECORD_LEN, TABLE_ALIGN, VERSION_MAJOR,
-    all_zero, u16_at, u32_at, u64_at,
+    Error, HEADER_LEN, MAGIC, MAX_SECTIONS, Result, SECTION_RECORD_LEN, SUPPORTED_INCOMPAT,
+    SUPPORTED_RO_COMPAT, TABLE_ALIGN, VERSION_MAJOR, all_zero, u16_at, u32_at, u64_at,
 };
 
 const OFF_MAGIC: usize = 0;
@@ -30,8 +35,10 @@ const OFF_FLAGS: usize = 18;
 const OFF_SECTION_TABLE_COUNT: usize = 20;
 const OFF_SECTION_TABLE_OFF: usize = 24;
 const OFF_FOOTER_OFF: usize = 32;
-const OFF_RESERVED: usize = 40;
-const RESERVED_LEN: usize = 24;
+const OFF_FEAT_INCOMPAT: usize = 40;
+const OFF_FEAT_RO_COMPAT: usize = 44;
+const OFF_RESERVED: usize = 48;
+const RESERVED_LEN: usize = 16;
 
 /// No header flag bits are assigned in this version, so any set bit is a reject.
 const KNOWN_HEADER_FLAGS: u16 = 0;
@@ -48,6 +55,12 @@ pub struct Header {
     pub section_table_count: u32,
     pub section_table_off: u64,
     pub footer_off: u64,
+    /// Features a reader must implement to read the file at all. Any bit outside
+    /// [`crate::SUPPORTED_INCOMPAT`] is a reject.
+    pub feat_incompat: u32,
+    /// Features a reader must implement to *rewrite* the file. Unknown bits leave
+    /// the file readable; see [`Header::may_rewrite`].
+    pub feat_ro_compat: u32,
 }
 
 impl Header {
@@ -87,6 +100,24 @@ impl Header {
         if header_len != HEADER_LEN {
             return Err(Error::BadHeaderLen { got: header_len });
         }
+
+        // Feature negotiation comes before every structural check, and before the
+        // reserved-zero check in particular. A file built for a future minor may
+        // legitimately put data where this version sees reserved space, so asking
+        // "do I implement what this file needs" first is what turns a confusing
+        // `ReservedNotZero` into an accurate "unsupported feature".
+        let feat_incompat = u32_at(b, OFF_FEAT_INCOMPAT).ok_or_else(trunc)?;
+        let unsupported = feat_incompat & !SUPPORTED_INCOMPAT;
+        if unsupported != 0 {
+            return Err(Error::UnsupportedFeature {
+                class: "incompat",
+                bits: unsupported,
+            });
+        }
+        // Unknown ro_compat bits are deliberately *not* an error: everything this
+        // reader understands is still true of the file. Only rewriting is unsafe,
+        // which `may_rewrite` reports.
+        let feat_ro_compat = u32_at(b, OFF_FEAT_RO_COMPAT).ok_or_else(trunc)?;
 
         if !all_zero(b, OFF_RESERVED, RESERVED_LEN).ok_or_else(trunc)? {
             return Err(Error::ReservedNotZero { at: "header" });
@@ -141,7 +172,20 @@ impl Header {
             section_table_count,
             section_table_off,
             footer_off,
+            feat_incompat,
+            feat_ro_compat,
         })
+    }
+
+    /// Whether this build may rewrite the file without losing data.
+    ///
+    /// False when the file carries a read-only-compatible feature this build does
+    /// not implement: the bytes are readable, but re-emitting them would silently
+    /// drop whatever that feature added — and since the footer commits to the whole
+    /// file, "silently drop" means the rewritten bundle no longer says what the
+    /// author signed.
+    pub fn may_rewrite(&self) -> bool {
+        self.feat_ro_compat & !SUPPORTED_RO_COMPAT == 0
     }
 
     /// Byte range of the section table: `[off, off + count * 128)`.
@@ -201,6 +245,8 @@ impl Header {
         );
         put(OFF_SECTION_TABLE_OFF, &self.section_table_off.to_le_bytes());
         put(OFF_FOOTER_OFF, &self.footer_off.to_le_bytes());
+        put(OFF_FEAT_INCOMPAT, &self.feat_incompat.to_le_bytes());
+        put(OFF_FEAT_RO_COMPAT, &self.feat_ro_compat.to_le_bytes());
         // Reserved bytes stay zero from initialization.
         b
     }

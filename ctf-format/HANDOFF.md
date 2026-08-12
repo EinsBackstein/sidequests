@@ -18,8 +18,9 @@ ctf-format/
   rust-toolchain.toml   pinned 1.97.1 — load-bearing, see below
   crates/ctf-format/    the only crate today
     src/{lib,error,header,section}.rs
-    tests/container.rs  44 tests
-  docs/FORMAT-DESIGN.md design + normative spec text
+    tests/container.rs  54 tests
+  spec/SPEC.md          normative byte-level spec — wins over the design doc
+  docs/FORMAT-DESIGN.md design rationale and threat model
   docs/ROADMAP.md       phased plan, checkboxes reflect reality
   CHANGELOG.md
   HANDOFF.md            this file
@@ -96,11 +97,16 @@ Confirmed against current docs, not from memory. Re-verify before changing:
   stack — keep it behind its own trait so `suite_id` can retire a suite without a
   format change.
 
-## Current state — release 0.1.0
+## Current state — format version 0.2
 
 Implemented and green: the header and section table, with the full design §14
-hardening list. 44 tests, 0 clippy warnings, zero dependencies,
+hardening list and the 0.2 compatibility model — `feat_incompat` / `feat_ro_compat`
+in the header, `OPTIONAL` sections, and the extension policy that binds future
+spec edits (spec §2.3, §11). 54 tests, 0 clippy warnings, zero dependencies,
 `unsafe_code = "forbid"`.
+
+0.1 files stay readable and are kept as a golden-vector regression test; no field
+moved between 0.1 and 0.2.
 
 Not implemented: **everything cryptographic.** No manifest parsing, no BLAKE3, no
 footer, no signatures, no encryption, no generator, no solver gate. A parsed bundle
@@ -115,7 +121,11 @@ is *structurally* valid and nothing more.
 1. **Canonical CBOR manifest** encode/decode, RFC 8949 §4.2. Deterministic encoding
    is mandatory — the commitment in pillar 3 is byte-exact, so a non-canonical
    encoder silently breaks it. Depth cap on nesting; reject duplicate map keys.
-2. **BLAKE3 section roots + footer commitment.** Audit `bao` maturity before
+2. **BLAKE3 section roots + footer commitment**, whose shape is already fixed in
+   design §6 and spec §10.1: `root = BLAKE3("ctf/root/v1" ‖ header[0,64) ‖ section
+   table)`, a signed transcript binding `suite_id` and `total_len`, and no bytes
+   after the footer. Hashing the header is what keeps the feature words
+   unstrippable, so it is not optional. Audit `bao` maturity before
    committing to it for verified streaming; fall back to an explicit chunk index
    with per-chunk BLAKE3 if it is not solid. Then the chunk index's own length can
    finally be bounds-checked — see the `ponytail:` comment in `section.rs`.
@@ -141,6 +151,18 @@ is *structurally* valid and nothing more.
   than merely absent. Tests opt out via a file-level `allow`.
 - **Little-endian, normatively.** Every integer is read and written explicitly, so
   a big-endian host produces identical bytes. Do not reach for `to_ne_bytes`.
+- **Unknown section kinds go through `SectionKind::unknown(v) -> Option`, and the
+  payload is opaque.** `SectionKind::Unknown` carries a `FutureKind`, not a bare
+  `u16`, so a known discriminant cannot be wrapped as an unknown one — `Unknown(1)`
+  would otherwise serialize as `kind = 1` and produce a section falsely claiming to
+  be the manifest. Get the raw value with `FutureKind::get()`. When phase 1 gains a
+  writer, this is the difference between a mislabelled section being impossible and
+  being merely unlikely.
+- **Invariants belong in types, not in comments**, wherever the cost is a newtype.
+  The rule above started as a `debug_assert` plus a doc comment, which is a
+  convention a release build does not enforce. Prefer the version a caller cannot
+  get wrong: the format outlives any single implementation of it, and a second
+  language will be checked against this one.
 - Rust was installed with rustup `--no-modify-path`; `~/.cargo/bin` has since been
   appended to `~/.zshrc`.
 
@@ -174,7 +196,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 44 tests
+cargo test                    # 54 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 ```
