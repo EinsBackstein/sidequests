@@ -476,22 +476,57 @@ The security and spec-conformance roles are the two worth re-running first.
 1. ~~Commit 0.3 as-is before fixing, or fold Tier 1 into the 0.3 commit?~~
    **Answered 2026-08-16: committed as-is, `9f50d84`.** The reviewed tree is now a
    fixed point every finding below is measured against.
-2. Does R21 (`SEALED` ⇒ `enc ≠ 0`) need a `feat_incompat` bit? It narrows what is
-   legal, and spec §15 says narrowings need a bit — **but** no 0.3 file has been
-   published yet, so there is nothing in the wild to invalidate. Cheapest honest
-   answer: fold R21 into 0.3 before release and treat it as never having existed
-   otherwise. Decide before the first tagged release, not after.
-   **Now covers three narrowings, not one:** R21 (B1), T8 (B4), and — if it is taken
-   at the format boundary rather than the display layer — rejecting bidi controls in
-   `check_name` (L1). One decision, three rules, and they all want the same answer
-   for the same reason. Deciding them separately is how one of them ends up
-   published and unfixable.
+2. ~~Do the narrowings need their own feature bit, or do they fold into 0.3?~~
+   **Answered 2026-08-16: fold all three into 0.3, before it is ever tagged.**
+
+   Covers R21 (B1), T8 (B4), and the `check_name` bidi rejection (question 4). One
+   decision, three rules, taken together on purpose — deciding them separately is how
+   one of them ends up published and unfixable.
+
+   The reasoning, so it is not relitigated: spec §15 says a narrowing needs a bit,
+   and that rule exists to protect files already in the wild. There are none. 0.3 is
+   committed but untagged and unpublished, `feat_ro_compat` bit 0 (`CONTAINER_V1`)
+   already stops a 0.2 rewriter, and a *narrower* file still satisfies every rule a
+   0.3-without-these reader would check — so the only hazard a new bit could address
+   is a 0.3-without-these **writer**, which has never produced an artifact. Spending
+   `feat_ro_compat` bit 1 here would defend against readers that do not exist and set
+   the precedent that every narrowing costs a bit, which is how a 32-bit word runs
+   out on bookkeeping rather than on features.
+
+   **Consequence:** `9f50d84` is now a version that was committed but is not the 0.3
+   anyone should implement. The 0.3.0 changelog entry must be rewritten rather than
+   appended to, `spec/SPEC.md` §17's version history must describe 0.3 as containing
+   R21, T8, and the name rule from the start, and the *Known issues* section added in
+   `b1e265c` shrinks to the findings that remain unfixed. **Do not tag anything until
+   Tier 1 lands.** A tag is the moment this option stops being available.
 3. Should `ctf inspect --verify` exit non-zero when it skips an unverifiable
    section (H1), or just report it? Non-zero is safer for CI; report-only is
    friendlier for humans.
-4. Reject U+202E and the other Unicode bidi/formatting controls in `check_name`
-   (format boundary, matches the module's stated reasoning, narrows what is legal),
-   or escape at every display site (no format change, but every future
-   consumer — TUI, web, logs — has to remember)? See *L1 in detail*. This is the
-   only one of the four that is a genuine design choice rather than a timing
-   question.
+4. ~~Reject bidi controls at the format boundary, or escape at every display site?~~
+   **Answered 2026-08-16: both.** The two halves close different holes, and neither
+   subsumes the other.
+
+   - **`check_name` rejects the nine explicit bidi formatting characters**,
+     U+202A–U+202E and U+2066–U+2069. Add them to the existing reject list in
+     `manifest.rs:478`; this is the narrowing folded into 0.3 under question 2.
+     Legitimate right-to-left *script* is unaffected — Arabic and Hebrew challenge
+     names stay legal, because only the explicit override and isolate controls are
+     rejected, never the characters that actually spell a word.
+   - **The CLI escapes on output.** `category`, `description`, and mirror URLs go
+     through `Display` today and are free-form text that can never get a
+     `check_name`-style rule — a description may legitimately contain anything. Switch
+     them to `{:?}` to match the title line at `main.rs:106`, which is already safe.
+
+   **Why both, and why this is not defensive over-building:** a name becomes a
+   filename on extraction, so a bidi-carrying name is a filename-spoofing vector
+   (`…gnp.exe` rendering as `…exe.png`) that exists with no terminal in the picture
+   at all — display escaping cannot reach it. Conversely, boundary rejection cannot
+   reach `description`, which is not name-shaped. Two holes, two fixes. This is the
+   same two-independent-checks pattern the container already uses for
+   `SEALED`/`PLAYER_VISIBLE`, applied for the same reason.
+
+   **Not in scope of this answer:** whether `description` and `category` should also
+   reject ASCII control characters at the format boundary. They currently accept any
+   text CBOR admits. Escaping makes that safe to *print*; it does not make it
+   sensible to *store*. Left open deliberately — decide it with `ctf pack` in phase 3,
+   where authoring-time validation belongs.
