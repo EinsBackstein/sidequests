@@ -52,7 +52,9 @@ pub use error::{Error, Result};
 pub use footer::{Footer, Signing};
 pub use header::Header;
 pub use manifest::Manifest;
-pub use section::{Compression, Encryption, FutureKind, SectionFlags, SectionKind, SectionRecord};
+pub use section::{
+    Compression, Encryption, FutureKind, RuleSet, SectionFlags, SectionKind, SectionRecord,
+};
 
 /// File signature: PNG's construction with `CTF` as the tag. Every byte earns its
 /// place — see design §6 for the per-byte rationale.

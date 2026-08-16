@@ -324,10 +324,67 @@ pub struct SectionRecord {
     pub root: [u8; ROOT_LEN],
 }
 
+/// Which version's rules a file is read under.
+///
+/// 0.3 narrowed two rules that a 0.1 or 0.2 file could legally violate: **R21**
+/// (`SEALED` requires `enc ≠ 0`) and **T8** (unclaimed bytes must be zero). Both
+/// narrowings are announced by `feat_ro_compat` bit 0, [`CONTAINER_V1`], so a file
+/// that does not set the bit is read under the rules it was actually written to —
+/// which is what the §16 compatibility matrix promises, and what a feature bit is
+/// for.
+///
+/// Derive this with [`RuleSet::of`] rather than choosing it. The header is the
+/// authority on which rules a file claims, and a caller that picks by hand can pick
+/// wrong.
+///
+/// [`CONTAINER_V1`]: crate::FEAT_RO_COMPAT_CONTAINER_V1
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSet {
+    /// The file declares `CONTAINER_V1`. Every rule in spec §5.6 and §6 applies.
+    Container,
+    /// A 0.1 or 0.2 file, predating `CONTAINER_V1`.
+    ///
+    /// R21 and T8 are not applied. Neither is a concession:
+    ///
+    /// - **R21** exists because a `SEALED` section with `enc = 0` is a claim nothing
+    ///   backs. 0.2 implemented no encryption at all, so *every* sealed section a
+    ///   0.2 writer could produce carried `enc = 0` — applying R21 would reject not
+    ///   an edge case but the only form those kinds could take.
+    /// - **T8** exists to stop a padding byte being changed without changing the
+    ///   file's identity, which is a statement about the commitment root and the
+    ///   signature transcript. A 0.2 file has no footer, no root, and no signature,
+    ///   so the rule protects nothing there.
+    ///
+    /// Nothing is served on this path regardless: [`crate::Bundle::parse`] refuses a
+    /// file without `CONTAINER_V1` before it can return a `Bundle`, so
+    /// `section_bytes` is unreachable for such a file and a record describing a lie
+    /// is something no API will act on.
+    Legacy,
+}
+
+impl RuleSet {
+    /// The rules this header's file is entitled to be read under.
+    pub fn of(header: &Header) -> Self {
+        if header.feat_ro_compat & crate::FEAT_RO_COMPAT_CONTAINER_V1 == 0 {
+            Self::Legacy
+        } else {
+            Self::Container
+        }
+    }
+}
+
 impl SectionRecord {
-    /// Parse and validate one record for self-consistency. Whole-table invariants
-    /// are [`validate_layout`]'s job.
+    /// Parse and validate one record under the current version's rules.
+    ///
+    /// Equivalent to [`SectionRecord::parse_with`] with [`RuleSet::Container`]. Use
+    /// that when reading a file that may predate `CONTAINER_V1`. Whole-table
+    /// invariants are [`validate_layout`]'s job.
     pub fn parse(b: &[u8]) -> Result<Self> {
+        Self::parse_with(b, RuleSet::Container)
+    }
+
+    /// Parse and validate one record for self-consistency under `rules`.
+    pub fn parse_with(b: &[u8], rules: RuleSet) -> Result<Self> {
         if b.len() < SECTION_RECORD_LEN {
             return Err(Error::Truncated {
                 need: SECTION_RECORD_LEN,
@@ -403,7 +460,12 @@ impl SectionRecord {
         // `progress` to carry `SEALED`, and this version has no encryption, so a
         // phase 1 writer can no longer emit those kinds at all. Refusing is honest;
         // emitting a fake-sealed section is strictly worse.
-        if flags.sealed() && enc == Encryption::None {
+        //
+        // Not applied to a `Legacy` file: 0.2 implemented no encryption, so every
+        // sealed section it could write carried `enc = 0`, and enforcing R21 there
+        // would reject the only form those kinds could take rather than an abuse of
+        // it. See [`RuleSet::Legacy`].
+        if rules == RuleSet::Container && flags.sealed() && enc == Encryption::None {
             return Err(Error::Inconsistent {
                 what: "SEALED section must be encrypted",
             });
@@ -586,6 +648,13 @@ enum Region {
 /// `count` comes from the header, which has already capped it at
 /// [`crate::MAX_SECTIONS`] — so the `Vec` below cannot be sized by an attacker.
 pub fn parse_table(b: &[u8], count: u32) -> Result<Vec<SectionRecord>> {
+    parse_table_with(b, count, RuleSet::Container)
+}
+
+/// Parse the whole section table under `rules`.
+///
+/// Use [`RuleSet::of`] on the file's header rather than choosing by hand.
+pub fn parse_table_with(b: &[u8], count: u32, rules: RuleSet) -> Result<Vec<SectionRecord>> {
     let count = count as usize;
     let need = count
         .checked_mul(SECTION_RECORD_LEN)
@@ -601,7 +670,7 @@ pub fn parse_table(b: &[u8], count: u32) -> Result<Vec<SectionRecord>> {
         let rec = b
             .get(start..start + SECTION_RECORD_LEN)
             .ok_or(Error::Truncated { need, got: b.len() })?;
-        out.push(SectionRecord::parse(rec)?);
+        out.push(SectionRecord::parse_with(rec, rules)?);
     }
     Ok(out)
 }
@@ -673,7 +742,15 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file: &[u8]) 
         }
     }
 
-    check_padding(file, header, &ranges)
+    // T8 applies only to a file that declares `CONTAINER_V1`. The header is asked
+    // directly rather than taking a `RuleSet` argument, because the header is the
+    // authority on what rules its file claims and a caller cannot then disagree
+    // with it. See [`RuleSet::Legacy`] for why a 0.2 file is exempt: T8 protects a
+    // commitment root and a signature transcript that such a file does not have.
+    if RuleSet::of(header) == RuleSet::Container {
+        check_padding(file, header, &ranges)?;
+    }
+    Ok(())
 }
 
 /// T8: every byte in `[HEADER_LEN, footer_off)` that no region claims MUST be zero.

@@ -10,7 +10,7 @@ L2–L7. Checkboxes below are accurate; each closed item keeps its original text
 gains a note saying what actually shipped, because in two cases what shipped is not
 what the entry proposed.
 
-Current tree: `cargo test` 137 pass (was 124 at `9f50d84`), `cargo clippy
+Current tree: `cargo test` 139 pass (was 124 at `9f50d84`), `cargo clippy
 --all-targets` 0 warnings, `cargo fmt --check` clean.
 
 ---

@@ -102,11 +102,20 @@ region is never read. The 0.2 reader fails to **account** for bytes it never
 touches, which is under-checking, not misreading. A valid 0.3 file also satisfies
 every 0.2 rule, because R19, R20, R21, T6, T7 and T8 only narrow.
 
-R21 and T8 differ from the others in that they constrain structures 0.2 already
-defined, rather than ones it declared unspecified. They ride the same
-`CONTAINER_V1` bit instead of taking one of their own because both were folded in
-before 0.3 was ever tagged, so no file they would invalidate has ever existed —
-spec §15's requirement exists to protect published files, and there were none.
+**Backward compatibility runs on the same bit, and R21 and T8 are conditional on
+it.** Those two differ from the rest: they constrain structures 0.2 already defined,
+so applying them unconditionally would make a 0.3 reader reject files 0.2 called
+valid. A reader determines the rule set from the file's own header
+(`RuleSet::of`), and neither rule touches a file that does not set `CONTAINER_V1`.
+
+Neither exemption is a concession. R21 rejects `SEALED` with `enc = 0` because the
+flag claims a key that does not exist — but 0.2 specified no encryption at all, so
+every sealed section a 0.2 writer could produce carried `enc = 0`, and enforcing it
+would reject the only form `solver`, `writeup` and `progress` could take. T8 is a
+statement about the commitment root and the signature transcript, and a 0.2 file has
+neither, so there is nothing there for it to protect. Nothing is served on that path
+either way: `Bundle::parse` refuses a file without the bit before it can return a
+`Bundle`, so `section_bytes` is unreachable for one.
 
 The hazard is entirely on the **rewriter** side, and it is severe: a 0.2 tool
 re-emitting a 0.3 file drops the footer, the manifest, and every chunk index,

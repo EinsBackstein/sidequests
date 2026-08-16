@@ -586,7 +586,7 @@ A reader MUST reject the file if any of the following holds for any record.
 | R8 | `kind` is `manifest` and `PLAYER_VISIBLE` is set. |
 | R9 | `kind` is `manifest` and `EXTERNAL` is set. |
 | R20 | `kind` is `manifest` and `enc ≠ 0`, or `kind` is `manifest` and `comp ≠ 0`. |
-| R21 | `SEALED` is set and `enc = 0`. |
+| R21 | `SEALED` is set and `enc = 0`. **Applies only when `CONTAINER_V1` is set** (§16). |
 | R10 | `enc` is not `0` or `1`; or `comp` is not `0` or `1`. |
 | R11 | `EXTERNAL` is set and `offset ≠ 0`, or `EXTERNAL` is set and `len_stored ≠ 0`. |
 | R12 | `EXTERNAL` is not set and: `offset < 64`, or `offset` is not aligned to 4096, or `offset + len_stored` overflows `u64`. |
@@ -679,7 +679,7 @@ the file if any holds.
 | T5 | A non-empty inline payload range overlaps the section table's own range, `[section_table_off, section_table_off + section_table_count × 128)`. |
 | T6 | A chunk index range extends beyond `footer_off`, or its end overflows `u64`. |
 | T7 | A chunk index range overlaps another chunk index range, any non-empty inline payload range, or the section table. |
-| T8 | Any byte in `[64, footer_off)` that lies in no inline payload range, no chunk index range, and not in the section table's own range is non-zero. |
+| T8 | Any byte in `[64, footer_off)` that lies in no inline payload range, no chunk index range, and not in the section table's own range is non-zero. **Applies only when `CONTAINER_V1` is set** (§16). |
 
 Definitions and notes, all normative:
 
@@ -1157,7 +1157,8 @@ MAY NOT, because each depends on values the previous one validated.
    step 4.
 3. Record whether the file is rewritable (§4.4).
 4. Read `section_table_count × 128` bytes at `section_table_off` and apply
-   R1–R21 to every record; then apply T1–T8.
+   R1–R21 to every record; then apply T1–T8. **R21 and T8 are applied only if the
+   header sets `CONTAINER_V1`** (§16); every other rule applies to every file.
 5. Parse the footer and apply F1–F7 and F9.
 6. Recompute the commitment root per §8.3 and apply F8.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
@@ -1465,7 +1466,7 @@ Rules for the editor, all normative:
 |---|---|---|
 | 0.1 | 0.2+ | Header and table accepted. `[40, 64)` reads as "no features in use", which is what 0.1 wrote |
 | 0.2, no features, no unknown kinds | 0.1 | Header and table accepted. `version_minor` is not validated and the feature words are zero |
-| 0.2 | 0.3 | Header and table accepted in full; a whole-container read is refused at §10 step 2, because a 0.2 file has no footer or manifest to read |
+| 0.2 | 0.3 | Header and table accepted in full; a whole-container read is refused at §10 step 2, because a 0.2 file has no footer or manifest to read. R21 and T8 are **not** applied — see below |
 | **0.3** | **0.2** | **Accepted, read-only.** `feat_incompat` is zero, so nothing stops the read; `CONTAINER_V1` is an unimplemented `ro_compat` bit, so the file MUST NOT be rewritten (§4.4) |
 | 0.3 | 0.1 | Rejected, as `reserved not zero`. 0.1 predates the feature words entirely; see below |
 | 0.3, plus a `ro_compat` bit from a later version | 0.3 | Accepted, read-only (§4.4) |
@@ -1474,6 +1475,29 @@ Rules for the editor, all normative:
 | 0.4+, `OPTIONAL` unknown kind | 0.3 | Accepted; the section is carried, never interpreted |
 | Manifest `spec` 2+, no `crit` | 0.3 | Accepted; unknown keys carried byte-for-byte |
 | Manifest `spec` 2+, unknown key in `crit` | 0.3 | Rejected, naming the key (M7) |
+
+**R21 and T8 are conditional on `CONTAINER_V1`, and this is what the bit is for.**
+Both narrow rules a 0.1 or 0.2 file could satisfy legally, so applying them
+unconditionally would make a 0.3 reader reject files its predecessors called valid —
+breaking the row above rather than honouring it. A reader MUST determine the rule set
+from the file's own header and MUST NOT apply either rule to a file that does not set
+the bit.
+
+Neither exemption weakens a 0.3 file, and neither is a concession:
+
+- **R21** rejects `SEALED` with `enc = 0` because the flag then claims a key that
+  does not exist. 0.2 specified no encryption at all, so *every* sealed section a 0.2
+  writer could produce carried `enc = 0`. Enforcing R21 on such a file would reject
+  the only form `solver`, `writeup`, and `progress` could take, not an abuse of it.
+- **T8** requires unclaimed bytes to be zero because a mutable padding byte is a
+  channel that survives signing. It is a statement about the commitment root of §8.3
+  and the transcript of §8.4. A 0.2 file has no footer, no root, and no signature, so
+  there is nothing for the rule to protect.
+
+Nothing is served on the legacy path regardless. §10 step 2 refuses a whole-container
+read of a file without `CONTAINER_V1`, so a reader never reaches the point of
+returning section bytes from one; the most a legacy parse yields is a record
+describing a section, and §10 already forbids acting on it.
 
 Readers older than 0.2 are conservative in every case: they reject files they
 could not have understood, and never accept one they would misread. **Graceful
@@ -1493,4 +1517,4 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 |---|---|
 | 0.1 | Initial specification: header and section table frozen. |
 | 0.2 | Compatibility model (§2.3): `feat_incompat` and `feat_ro_compat` carved from header reserved space, `OPTIONAL` section flag, extension policy (§15), compatibility matrix (§16). Adds H14, R18; narrows R3 to `kind = 0` and R4 to bits above 3. Redefines `SEALED` by who cannot open a section. Names `name_id` the section's cryptographic identity. Fixes the commitment root, the signature transcript, the no-trailing-bytes rule, and record-over-manifest precedence. No field moved; the section-record golden vector is unchanged and the 0.1 header remains valid. |
-| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; narrows the `names` shape rule (§7.2) to reject the explicit Unicode bidi formatting characters; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
+| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; narrows the `names` shape rule (§7.2) to reject the explicit Unicode bidi formatting characters (a manifest-level rule, so no 0.1 or 0.2 file is affected — neither version defined a manifest); R21 and T8 apply only to files setting `CONTAINER_V1`, so the §16 guarantee to 0.2 files is preserved rather than narrowed; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |

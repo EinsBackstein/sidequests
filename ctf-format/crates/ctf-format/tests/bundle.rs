@@ -13,7 +13,8 @@
 
 use ctf_format::{
     Bundle, Error, FEAT_RO_COMPAT_CONTAINER_V1, Footer, HEADER_LEN, Header, MAGIC, Manifest,
-    Payload, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionSpec, Signing,
+    Payload, RuleSet, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionRecord, SectionSpec,
+    Signing,
     cbor::Value,
     chunk::ChunkIndex,
     footer::{MAX_SIG_LEN, MIN_FOOTER_LEN, commitment_root, sig_input},
@@ -230,9 +231,16 @@ fn a_0_3_reader_reads_a_0_2_file_and_names_what_is_missing() {
 
     let h = Header::parse(&file).unwrap();
     assert!(h.may_rewrite(), "no unknown ro_compat bit is set");
+    // The rules a file is entitled to be read under come from its own header, never
+    // from the reader's preference.
+    assert_eq!(RuleSet::of(&h), RuleSet::Legacy);
     let (start, end) = h.table_range().unwrap();
-    let records =
-        section::parse_table(&file[start as usize..end as usize], h.section_table_count).unwrap();
+    let records = section::parse_table_with(
+        &file[start as usize..end as usize],
+        h.section_table_count,
+        RuleSet::of(&h),
+    )
+    .unwrap();
     section::validate_layout(&records, &h, &file).unwrap();
 
     // Only the whole-container read needs a container. Note the direction: the bit
@@ -1185,4 +1193,82 @@ fn t8_does_not_reach_into_claimed_regions() {
 
     // And the untouched bundle still opens.
     assert!(Bundle::parse(&good).is_ok());
+}
+
+/// §16 promises a 0.3 reader accepts a 0.2 file's header and table **in full**.
+/// R21 and T8 both narrowed rules a 0.2 file could legally break, so without gating
+/// them on `CONTAINER_V1` that promise would have been quietly false.
+///
+/// This is the test that would have caught it, and it is written from the two
+/// concrete shapes rather than from the rule numbers.
+#[test]
+fn a_0_2_file_keeps_its_own_rules() {
+    // Non-zero padding. 0.2 §3 made zeroing a writer's SHOULD with no reader rule,
+    // so this file was legal. T8 must not reach it: T8 protects a commitment root
+    // and a signature transcript, and a 0.2 file has neither.
+    let mut file = minimal_bundle();
+    file[44..48].copy_from_slice(&0u32.to_le_bytes()); // clear CONTAINER_V1
+    file[3000] = 0x41;
+
+    let h = Header::parse(&file).unwrap();
+    assert_eq!(RuleSet::of(&h), RuleSet::Legacy);
+    let (start, end) = h.table_range().unwrap();
+    let records = section::parse_table_with(
+        &file[start as usize..end as usize],
+        h.section_table_count,
+        RuleSet::of(&h),
+    )
+    .unwrap();
+    section::validate_layout(&records, &h, &file)
+        .expect("a 0.2 file's padding was never constrained");
+
+    // The same bytes with the bit set are a 0.3 file, and T8 does apply.
+    let mut as_0_3 = file.clone();
+    as_0_3[44..48].copy_from_slice(&FEAT_RO_COMPAT_CONTAINER_V1.to_le_bytes());
+    let h3 = Header::parse(&as_0_3).unwrap();
+    assert_eq!(RuleSet::of(&h3), RuleSet::Container);
+    assert!(matches!(
+        section::validate_layout(&records, &h3, &as_0_3),
+        Err(Error::PaddingNotZero { at: 3000 })
+    ));
+}
+
+/// The R21 half. 0.2 implemented no encryption at all, so *every* sealed section a
+/// 0.2 writer could produce carried `enc = 0` — applying R21 to a legacy file would
+/// reject the only form `writeup`, `solver` and `progress` could take, not an abuse
+/// of it.
+#[test]
+fn a_0_2_sealed_section_is_not_judged_by_r21() {
+    let mut r = SectionRecord {
+        kind: SectionKind::Writeup,
+        name_id: 1,
+        flags: SectionFlags(SectionFlags::SEALED),
+        enc: ctf_format::Encryption::None,
+        comp: ctf_format::Compression::None,
+        offset: 4096,
+        len_stored: 100,
+        len_plain: 100,
+        chunk_size: 0,
+        chunk_index_off: 0,
+        root: [0xab; 32],
+    };
+    let bytes = r.to_bytes();
+
+    assert_eq!(
+        SectionRecord::parse_with(&bytes, RuleSet::Legacy).unwrap(),
+        r,
+        "a 0.2 writeup is exactly what 0.2 could write"
+    );
+    assert!(
+        matches!(
+            SectionRecord::parse_with(&bytes, RuleSet::Container),
+            Err(Error::Inconsistent { .. })
+        ),
+        "the same record in a 0.3 file is a claim nothing backs"
+    );
+
+    // R6 still applies on both paths: 0.2 had it, and dropping it would let a
+    // legacy file carry an unsealed writeup, which was never legal.
+    r.flags = SectionFlags::empty();
+    assert!(SectionRecord::parse_with(&r.to_bytes(), RuleSet::Legacy).is_err());
 }
