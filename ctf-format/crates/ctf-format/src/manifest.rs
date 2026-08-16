@@ -471,17 +471,40 @@ fn check_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The explicit Unicode bidirectional formatting characters: U+202A–U+202E, the
+/// embeddings and overrides, and U+2066–U+2069, the isolates.
+///
+/// **Not right-to-left script.** Arabic and Hebrew names remain legal, because the
+/// characters that spell a word carry their direction implicitly. These nine carry
+/// no content at all: they reorder how the text *around* them is displayed, which is
+/// how `chal-gnp.exe` renders as `chal-exe.png` in a terminal, a file manager, and a
+/// TUI alike.
+///
+/// The byte tests in [`check_name`] cannot catch them — every byte of their UTF-8 is
+/// `≥ 0x80`, so `c < 0x20` and `c == 0x7f` both miss — which is why this is a `char`
+/// test and not another byte in that list.
+const fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 /// A name may become a filename when a section is extracted, so every shape that
-/// could escape a directory is rejected here — separators outright, rather than
-/// after normalization, because a name with a separator has no legitimate use and
-/// a rejected name cannot be normalized wrong.
+/// could escape a directory *or misrepresent itself* is rejected here — separators
+/// outright, rather than after normalization, because a name with a separator has no
+/// legitimate use and a rejected name cannot be normalized wrong.
+///
+/// Bidi controls are rejected for the same reason at one remove: display escaping in
+/// one tool does not help when the name is written to disk, and a filename that
+/// renders as a different extension than it has is the classic version of this
+/// attack. Rejecting at the format boundary covers every consumer, including the
+/// ones not written yet.
 fn check_name(n: &str) -> Result<()> {
     let bad = n.is_empty()
         || n.len() > MAX_NAME_LEN
         || n == "."
         || n == ".."
         || n.bytes()
-            .any(|c| c == b'/' || c == b'\\' || c < 0x20 || c == 0x7f);
+            .any(|c| c == b'/' || c == b'\\' || c < 0x20 || c == 0x7f)
+        || n.chars().any(is_bidi_control);
     if bad {
         return Err(Error::Manifest {
             what: "manifest name is empty, too long, path-like, or contains a control character",

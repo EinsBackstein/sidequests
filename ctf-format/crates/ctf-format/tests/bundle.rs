@@ -670,6 +670,66 @@ fn manifest_rejects_path_like_names() {
     }
 }
 
+/// The byte tests above cannot see a bidi override: every byte of U+202E's UTF-8 is
+/// `≥ 0x80`, so `c < 0x20` and `c == 0x7f` both miss it.
+///
+/// A name becomes a filename on extraction, and `chal\u{202e}gnp.exe` renders as
+/// `chal-exe.png` in a terminal, a file manager, and the phase 5 TUI alike. Escaping
+/// at a display site does not help once the name is on disk, so it is rejected here.
+#[test]
+fn manifest_rejects_bidi_controls_in_names() {
+    // U+202A–U+202E embeddings and overrides, U+2066–U+2069 isolates.
+    for bad in [
+        "chal\u{202e}gnp.exe",
+        "\u{202a}lead",
+        "\u{202b}x",
+        "x\u{202c}",
+        "\u{202d}x",
+        "\u{2066}x",
+        "\u{2067}x",
+        "\u{2068}x",
+        "x\u{2069}",
+    ] {
+        let v = Value::Map(vec![
+            (Value::Text("spec".into()), Value::Uint(1)),
+            (Value::Text("id".into()), Value::Text("x".into())),
+            (Value::Text("name".into()), Value::Text("X".into())),
+            (
+                Value::Text("names".into()),
+                Value::Array(vec![Value::Text(bad.into())]),
+            ),
+        ]);
+        assert!(
+            matches!(
+                Manifest::decode(&v.encode().unwrap()),
+                Err(Error::Manifest { .. })
+            ),
+            "accepted the name {bad:?}"
+        );
+    }
+}
+
+/// The rule targets the nine explicit formatting characters, not right-to-left
+/// script. Rejecting Arabic or Hebrew names would be a bug, not extra safety.
+#[test]
+fn manifest_accepts_right_to_left_script_in_names() {
+    for good in ["تحدي", "אתגר", "flag.txt", "日本語", "café"] {
+        let v = Value::Map(vec![
+            (Value::Text("spec".into()), Value::Uint(1)),
+            (Value::Text("id".into()), Value::Text("x".into())),
+            (Value::Text("name".into()), Value::Text("X".into())),
+            (
+                Value::Text("names".into()),
+                Value::Array(vec![Value::Text(good.into())]),
+            ),
+        ]);
+        assert!(
+            Manifest::decode(&v.encode().unwrap()).is_ok(),
+            "rejected the legitimate name {good:?}"
+        );
+    }
+}
+
 #[test]
 fn manifest_rejects_a_bad_id() {
     for bad in ["", "-lead", "trail-", "Upper", "sp ace", "under_score"] {

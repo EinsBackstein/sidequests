@@ -285,6 +285,36 @@ unimplemented section less checked than an implemented one for no gain in safety
 The carve-out is stated normatively so an independent implementation cannot guess
 the other way.
 
+### Changed — attacker-controlled text is handled at both ends
+
+Manifest text is attacker-controlled, and the two halves of the problem need
+different mechanisms — which is why both shipped rather than either alone.
+
+- **`names` rejects the nine explicit Unicode bidi formatting characters**
+  (U+202A–U+202E, U+2066–U+2069) at the format boundary. A name becomes a filename on
+  extraction, and those characters reorder how surrounding text displays without
+  changing it, so `chal\u{202e}gnp.exe` renders as `chal-exe.png` in a terminal, a
+  file manager, and the phase 5 TUI alike. Display escaping cannot reach a name
+  already written to disk. The byte tests already there could not see them either:
+  every byte of their UTF-8 is `≥ 0x80`, so `c < 0x20` and `c == 0x7f` both miss.
+
+  **Right-to-left script is unaffected.** Arabic and Hebrew names remain legal,
+  because the characters that spell a word carry their direction implicitly; the nine
+  rejected ones carry no content at all. Asserted in both directions.
+- **`ctf inspect` escapes `category` and mirror URLs**, printing them through `{:?}`
+  to match the challenge title on the adjacent line, which was already safe. These
+  are free-form text that can never take a `check_name`-style rule — a description
+  may legitimately contain anything — so escaping is the only mechanism available,
+  and without it a crafted bundle could inject terminal escape sequences and spoof
+  the tool's own output, including the lines stating what was verified.
+- **`ctf inspect` errors on a second positional argument.** It previously assigned
+  `path` on every one, so `ctf inspect a.ctf b.ctf` silently reported on `b.ctf`
+  while the operator read the output as being about `a.ctf`.
+
+Spec §7.2 states the name rule with its RTL carve-out and notes that a conforming
+implementation must decode before checking; §13 states the display-escaping
+requirement and why the two mechanisms are not alternatives.
+
 ### Fixed
 
 - **`chunk_cv` panicked on public input.** Its guard checked that `chunk_size` was a
@@ -343,13 +373,6 @@ know before depending on it.
   `VerifiedChunkIndex` that `verify_root` returns and that owns the chunk size.
 - **`ChunkIndex::parse` accepts trailing bytes** past `count × 32` while `to_bytes`
   drops them, so the documented byte-for-byte round trip does not hold.
-- **`ctf inspect` prints `category`, `description`, and mirror URLs unescaped**, so a
-  crafted bundle can inject terminal escape sequences and spoof the tool's output.
-  The challenge title on the adjacent line is already safe because it goes out
-  through `{:?}`; the fix is to make the others match. Separately, `check_name`
-  rejects ASCII control characters but not U+202E, whose UTF-8 bytes are all
-  `≥ 0x80`, so a section name can visually reorder the flags column.
-- **`ctf inspect` takes the last path argument silently** when given more than one.
 - **`ctf inspect` never prints a section's `root`**, so an operator fetching a 40 GB
   external payload cannot get the expected digest from the tool that describes it.
 - **Manifest errors carry no index or `name_id`**, so "names entry is not text"

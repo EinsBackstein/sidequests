@@ -47,6 +47,13 @@ fn main() -> ExitCode {
                 eprintln!("ctf: unknown option `{other}`");
                 return ExitCode::FAILURE;
             }
+            // Not `path = Some(...)` unconditionally: that silently inspected the
+            // last of several paths, so `ctf inspect a.ctf b.ctf` reported on
+            // `b.ctf` while the operator read the output as being about `a.ctf`.
+            _ if path.is_some() => {
+                eprintln!("ctf: inspect takes one file; got `{a}` as well");
+                return ExitCode::FAILURE;
+            }
             other => path = Some(other.to_owned()),
         }
     }
@@ -107,8 +114,14 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
         b.manifest.id()
     );
     println!("              {:?}", b.manifest.name());
+    // `{:?}` rather than `{}`, matching the title line above. `category`,
+    // `description` and the mirror URLs are free-form text straight out of an
+    // attacker-controllable manifest, and unlike `names` they can never take a
+    // `check_name`-style rule — a description may legitimately contain anything.
+    // Debug formatting escapes control characters, which is what stops a crafted
+    // bundle from injecting terminal escape sequences and spoofing this output.
     if let Some(c) = b.manifest.category() {
-        println!("              category {c}");
+        println!("              category {c:?}");
     }
     if b.manifest.version() != 0 {
         println!("              version {}", b.manifest.version());
@@ -137,7 +150,7 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
         );
         if let Some(ext) = b.manifest.external(r.name_id) {
             for m in &ext.mirrors {
-                println!("      mirror  {m}");
+                println!("      mirror  {m:?}");
             }
         }
         if r.chunk_size != 0 {

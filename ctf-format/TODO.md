@@ -5,12 +5,12 @@
 **Read first:** [`HANDOFF.md`](HANDOFF.md) for what the project is, then this file for
 what is outstanding.
 
-**Progress:** Tier 1 complete — H1, B1, B2, B3, B4 all done. The bidi work is next,
-then the rest of Tier 2 and Tier 3. Checkboxes below are accurate; each closed item keeps its original text and
+**Progress:** Tier 1 complete (B1–B4), plus H1, L1 and L8. Outstanding: H2–H6 and
+L2–L7. Checkboxes below are accurate; each closed item keeps its original text and
 gains a note saying what actually shipped, because in two cases what shipped is not
 what the entry proposed.
 
-Current tree: `cargo test` 135 pass (was 124 at `9f50d84`), `cargo clippy
+Current tree: `cargo test` 137 pass (was 124 at `9f50d84`), `cargo clippy
 --all-targets` 0 warnings, `cargo fmt --check` clean.
 
 ---
@@ -436,14 +436,25 @@ non-zero when `unverifiable != 0`.
 
 | # | Finding | Where |
 |---|---|---|
-| [ ] L1 | CLI prints `category` and mirror URLs unescaped — a crafted bundle can inject terminal escape sequences and spoof output. See the note below; the fix is already sitting two lines away | `crates/ctf-cli/src/main.rs:106-108`, `137` |
+| [x] L1 | CLI prints `category` and mirror URLs unescaped — a crafted bundle can inject terminal escape sequences and spoof output. See the note below; the fix is already sitting two lines away | `crates/ctf-cli/src/main.rs:106-108`, `137` |
 | [ ] L2 | `ctf inspect` never prints a section's `root`; an operator fetching a 40 GB external payload cannot get the expected digest from the tool | `crates/ctf-cli/src/main.rs` |
 | [ ] L3 | Manifest errors carry no index or `name_id`, so "names entry is not text" means hand-decoding CBOR on a 50-artifact bundle. An index is a number, not attacker text, so this does not violate the no-oracle rule | `src/manifest.rs`, `src/error.rs` |
 | [ ] L4 | §8.2 note says "R1 mandates hybrid signing" — collides with *record rule* R1. It means *design requirement* R1. Cite **F4** instead | `spec/SPEC.md` §8.2 |
 | [ ] L5 | §8.2 says key distribution "is specified with the suite registry (§14)" while §14 says the registry is unspecified. State plainly that it is not specified in this version | `spec/SPEC.md` §8.2, §14 |
 | [ ] L6 | `ChunkIndex::parse` accepts trailing bytes past `count × 32` but `to_bytes` drops them, breaking the documented byte-for-byte round trip. Require `b.len() == need` | `src/chunk.rs` |
 | [ ] L7 | `Manifest::validate_against` is O(records × external entries) — 4096 records against many entries is a lot of comparisons before rejection. Build a lookup set once | `src/manifest.rs:347-386` |
-| [ ] L8 | `ctf inspect a.ctf b.ctf` silently inspects `b.ctf` — the arg loop assigns `path` on every positional, so the last one wins with no warning. Error on a second positional | `crates/ctf-cli/src/main.rs:47` |
+| [x] L8 | `ctf inspect a.ctf b.ctf` silently inspects `b.ctf` — the arg loop assigns `path` on every positional, so the last one wins with no warning. Error on a second positional | `crates/ctf-cli/src/main.rs:47` |
+
+### [x] L1 and L8 — done 2026-08-16
+
+`check_name` rejects the nine explicit bidi formatting characters; the CLI prints
+`category` and mirror URLs through `{:?}`, matching the title line that was already
+safe; `ctf inspect` errors on a second positional argument instead of taking the last
+one. Spec §7.2 gained the bidi rule with its RTL-is-still-legal carve-out, and §13
+gained the output-encoding paragraph that says why the two halves are not
+alternatives. Verified: `تحدي` and `אתגר` still parse, `chal\u{202e}gnp.exe` does not.
+
+Original analysis below, kept because the reasoning is what generalises.
 
 ### L1 in detail — the fix is an asymmetry, not a new escaping layer
 

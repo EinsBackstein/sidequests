@@ -815,13 +815,33 @@ and MUST NOT begin or end with a hyphen. It is an input to the seed derivation
 that is unambiguous in both.
 
 **The name table.** `names[name_id]` is the section's human name. Every entry MUST
-be 1 to 255 bytes, MUST NOT be `.` or `..`, and MUST NOT contain `/`, `\`, a byte
-below `0x20`, or `0x7f`. Entries MUST be unique.
+be 1 to 255 bytes, MUST NOT be `.` or `..`, MUST NOT contain `/`, `\`, a byte
+below `0x20`, or `0x7f`, and MUST NOT contain any of the nine explicit Unicode
+bidirectional formatting characters U+202A–U+202E and U+2066–U+2069. Entries MUST be
+unique.
 
 Names are checked for path shapes here rather than wherever a section is later
 written to disk. A name containing a separator has no legitimate use, and one
 extraction path forgetting to re-check is all it takes; separators are therefore
 rejected outright at the format boundary rather than normalized (design §14).
+
+The bidi rule follows from the same reasoning at one remove. A name becomes a
+filename when a section is extracted, and those nine characters reorder how
+surrounding text is displayed without changing it — so `chal\u{202e}gnp.exe` renders
+as `chal-exe.png` in a terminal, a file manager, and an operator TUI alike. Escaping
+at one display site does not help once the name is on disk, so the check belongs
+here, where it covers every consumer including the ones not yet written.
+
+**This rule does not restrict right-to-left script.** Arabic, Hebrew, and every
+other RTL writing system remain legal, because the characters that spell a word
+carry their direction implicitly. The nine forbidden characters carry no content at
+all. Note also that a byte-level check cannot find them: every byte of their UTF-8
+encoding is `≥ 0x80`, so the `< 0x20` and `0x7f` tests above do not apply and a
+conforming implementation MUST decode before checking.
+
+A reader MUST NOT apply this rule to `name`, `category`, or `description`. Those are
+free-form human text where the characters may be legitimate, and a reader that
+displays them MUST escape rather than reject (§13).
 
 `names` MAY be longer than the number of sections — a generator declares output
 names for artifacts that do not exist yet — but MUST NOT exceed 65536 entries,
@@ -1299,6 +1319,16 @@ The customary filename extension is `.ctf`. No media type is registered.
   signatures distinguish the author's bundle from anyone else's, and verifying
   them is not specified here (§14). Every field in this document is
   attacker-controlled input until that step exists.
+- **Manifest text is attacker-controlled, and displaying it is an output-encoding
+  problem.** `name`, `category`, `description`, and every mirror URL are free-form
+  text that no schema rule constrains, because a description may legitimately
+  contain anything. A tool that writes them to a terminal MUST escape control
+  characters; otherwise a crafted bundle injects escape sequences and spoofs the
+  tool's own output, including the parts stating what was and was not verified. The
+  name table is handled at the other end — §7.2 rejects path shapes, control bytes,
+  and bidi controls outright — because a name becomes a filename, where no amount of
+  display escaping reaches. The two mechanisms are not alternatives: each covers a
+  case the other cannot.
 - **The verification chain has an order, and skipping a link breaks it.**
   `payload → section root → table bytes → commitment root → signature`. In
   particular a chunk index MUST be reduced to its section's root before any chunk
@@ -1463,4 +1493,4 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 |---|---|
 | 0.1 | Initial specification: header and section table frozen. |
 | 0.2 | Compatibility model (§2.3): `feat_incompat` and `feat_ro_compat` carved from header reserved space, `OPTIONAL` section flag, extension policy (§15), compatibility matrix (§16). Adds H14, R18; narrows R3 to `kind = 0` and R4 to bits above 3. Redefines `SEALED` by who cannot open a section. Names `name_id` the section's cryptographic identity. Fixes the commitment root, the signature transcript, the no-trailing-bytes rule, and record-over-manifest precedence. No field moved; the section-record golden vector is unchanged and the 0.1 header remains valid. |
-| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
+| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; narrows the `names` shape rule (§7.2) to reject the explicit Unicode bidi formatting characters; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
