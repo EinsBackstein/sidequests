@@ -45,7 +45,7 @@
 //! Random access into a 40 GB payload without the full index is what `bao` would
 //! buy, and it is not something ingest or serving needs.
 
-use crate::{Error, Result, footer::ROOT_LEN};
+use crate::{Error, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, Result, footer::ROOT_LEN};
 use blake3::hazmat::{HasherExt, Mode, merge_subtrees_non_root, merge_subtrees_root};
 
 /// One index entry: a BLAKE3 chaining value.
@@ -83,7 +83,14 @@ pub fn index_len(len_plain: u64, chunk_size: u32) -> Result<u64> {
 /// shape that cannot occur — and a panic on hostile input is what design §14
 /// forbids.
 pub fn chunk_cv(data: &[u8], index: u64, chunk_size: u32) -> Result<ChainingValue> {
-    if chunk_size == 0 || !chunk_size.is_power_of_two() {
+    // The range is load-bearing, not a tidiness check, and leaving it out was a
+    // reachable panic. A power of two alone admits `chunk_size = 1`, which makes
+    // `offset = index` and hands `set_input_offset` a value that is not a multiple
+    // of BLAKE3's 1024-byte chunk — which asserts. `Bundle::parse` never gets here
+    // with such a value because R14 range-checks the record first, but this function
+    // is `pub` and reachable directly, and `fuzz/fuzz_targets/chunk_index.rs`
+    // generates exactly that input.
+    if !chunk_size.is_power_of_two() || !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
         return Err(Error::BadChunkSize { got: chunk_size });
     }
     if data.is_empty() {

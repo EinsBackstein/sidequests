@@ -16,8 +16,8 @@
 )]
 
 use ctf_format::{
-    Error,
-    chunk::{ChunkIndex, chunk_count, index_len, root_from_cvs, verify_stream},
+    Error, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
+    chunk::{ChunkIndex, chunk_count, chunk_cv, index_len, root_from_cvs, verify_stream},
 };
 
 /// Deterministic filler with no short period.
@@ -248,4 +248,57 @@ fn stream_rejects_a_flipped_byte() {
         &mut buf,
     );
     assert!(matches!(r, Err(Error::RootMismatch { at: "payload" })));
+}
+
+/// `chunk_cv` is `pub`, so its guard is a trust boundary and not an internal
+/// assertion.
+///
+/// The guard used to check only that `chunk_size` was a power of two. That admits
+/// `1`, which makes `offset = index` and hands `blake3::hazmat::set_input_offset` a
+/// value that is not a multiple of BLAKE3's 1024-byte chunk — and it asserts:
+///
+/// ```text
+/// panicked at blake3-1.8.6/src/hazmat.rs:232:
+///   assertion `left == right` failed: offset (1) must be a chunk boundary
+/// ```
+///
+/// `Bundle::parse` never reached it, because R14 range-checks the record first, but
+/// the function is reachable directly and `fuzz/fuzz_targets/chunk_index.rs`
+/// generates exactly this input. The crate's stated posture is that a panic on
+/// hostile input is *unrepresentable*, not merely unreached, and clippy's `panic`
+/// lint cannot see into `blake3`.
+#[test]
+fn chunk_cv_rejects_sizes_outside_the_legal_range() {
+    // The exact input that panicked.
+    assert!(matches!(
+        chunk_cv(&[0], 1, 1),
+        Err(Error::BadChunkSize { got: 1 })
+    ));
+    // Powers of two are not enough on their own: both ends of the range matter.
+    for bad in [0, 1, 2, 2048, MIN_CHUNK_SIZE / 2, MAX_CHUNK_SIZE * 2] {
+        assert!(
+            matches!(chunk_cv(&[0], 1, bad), Err(Error::BadChunkSize { .. })),
+            "chunk_size {bad} must be rejected"
+        );
+    }
+    // In range but not a power of two: still rejected, since a non-power-of-two
+    // boundary is not a BLAKE3 subtree boundary and the merge would not reduce.
+    assert!(matches!(
+        chunk_cv(&[0], 1, MIN_CHUNK_SIZE + 1),
+        Err(Error::BadChunkSize { .. })
+    ));
+    // The smallest legal size still works, so the guard rejects rather than blocks.
+    assert!(chunk_cv(&[0], 1, MIN_CHUNK_SIZE).is_ok());
+}
+
+/// The same guard through the public verification path, so a caller cannot reach
+/// the panic by going one level up.
+#[test]
+fn verify_chunk_rejects_sizes_outside_the_legal_range() {
+    let d = data(MIN_CHUNK_SIZE as usize * 2);
+    let index = ChunkIndex::build(&d, MIN_CHUNK_SIZE).unwrap();
+    assert!(matches!(
+        index.verify_chunk(1, &[0], 1),
+        Err(Error::BadChunkSize { got: 1 })
+    ));
 }

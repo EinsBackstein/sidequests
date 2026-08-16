@@ -477,6 +477,19 @@ design §9) — in both cases the platform cannot read it while the event runs, 
 is the property the flag exists to assert. Defining it as "encrypted to the seal
 recipient" would contradict R6, which requires `progress` sections to carry it.
 
+**`SEALED` requires `enc ≠ 0` (R21).** The definition above is a statement about a
+key, so with `enc = 0` there is no key and the flag asserts something the container
+does not carry. A reader that trusted the bit would then serve the plaintext of a
+section labelled unservable — the failure R5 exists to make unrepresentable, arriving
+by a different route. R21 closes it: a sealed-yet-readable section cannot be
+expressed, just as a sealed-yet-servable one cannot.
+
+R21 has a consequence a writer meets immediately. R6 requires `solver`, `writeup`,
+and `progress` to carry `SEALED`, so a writer that implements no encryption cannot
+emit those kinds at all. That is the intended outcome. The alternative is a section
+that claims to be sealed and is not, which is worse than its absence, because the
+claim is what a downstream serving layer reads.
+
 **`PLAYER_VISIBLE`** is an allowlist bit, not the complement of `SEALED`. Three
 states exist and all three are meaningful: sealed; player-visible; and neither,
 meaning readable by the platform but never served. A section is never both sealed
@@ -564,6 +577,7 @@ A reader MUST reject the file if any of the following holds for any record.
 | R8 | `kind` is `manifest` and `PLAYER_VISIBLE` is set. |
 | R9 | `kind` is `manifest` and `EXTERNAL` is set. |
 | R20 | `kind` is `manifest` and `enc ≠ 0`, or `kind` is `manifest` and `comp ≠ 0`. |
+| R21 | `SEALED` is set and `enc = 0`. |
 | R10 | `enc` is not `0` or `1`; or `comp` is not `0` or `1`. |
 | R11 | `EXTERNAL` is set and `offset ≠ 0`, or `EXTERNAL` is set and `len_stored ≠ 0`. |
 | R12 | `EXTERNAL` is not set and: `offset < 64`, or `offset` is not aligned to 4096, or `offset + len_stored` overflows `u64`. |
@@ -1095,7 +1109,7 @@ MAY NOT, because each depends on values the previous one validated.
    step 4.
 3. Record whether the file is rewritable (§4.4).
 4. Read `section_table_count × 128` bytes at `section_table_off` and apply
-   R1–R20 to every record; then apply T1–T7.
+   R1–R21 to every record; then apply T1–T7.
 5. Parse the footer and apply F1–F7 and F9.
 6. Recompute the commitment root per §8.3 and apply F8.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
@@ -1115,7 +1129,16 @@ Further requirements, all normative:
 - A reader MUST NOT return any section's bytes to a caller before that section's
   `root` verifies for those bytes, whole or per chunk (§5.1, C7).
 - A reader MUST NOT serve, execute, decompress, or decrypt a section whose kind it
-  does not implement (§5.2).
+  does not implement (§5.2). This list is exhaustive and deliberately excludes
+  hashing: a reader MAY verify such a section's stored bytes against its `root`, and
+  SHOULD do so when verifying the file as a whole. Checking a commitment is not one
+  of the four prohibited acts, the section is committed whether or not it is
+  understood (§5.2), and treating verification as forbidden would leave an
+  unimplemented section less checked than an implemented one for no gain in safety.
+- A reader MUST NOT return a `SEALED` section's plaintext to a caller. R21 makes an
+  unencrypted sealed section unrepresentable, so a conforming file cannot reach this
+  case; the requirement is stated separately because the serving boundary must not
+  depend on a record rule having been applied upstream.
 - A reader MUST NOT rewrite a file when §4.4 forbids it, or when it cannot
   preserve every unimplemented section and every carried manifest key
   byte-for-byte.
@@ -1410,4 +1433,4 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 |---|---|
 | 0.1 | Initial specification: header and section table frozen. |
 | 0.2 | Compatibility model (§2.3): `feat_incompat` and `feat_ro_compat` carved from header reserved space, `OPTIONAL` section flag, extension policy (§15), compatibility matrix (§16). Adds H14, R18; narrows R3 to `kind = 0` and R4 to bits above 3. Redefines `SEALED` by who cannot open a section. Names `name_id` the section's cryptographic identity. Fixes the commitment root, the signature transcript, the no-trailing-bytes rule, and record-over-manifest precedence. No field moved; the section-record golden vector is unchanged and the 0.1 header remains valid. |
-| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, T6, T7; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
+| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 does narrow a structure 0.2 defined, and rides the same `CONTAINER_V1` bit rather than taking one of its own: it was folded in before 0.3 was ever tagged, so no file it would invalidate has ever existed. §15's requirement protects published files, and there were none. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |

@@ -910,3 +910,125 @@ fn chunk_index_matches_a_freshly_built_one() {
         ChunkIndex::build(bytes, record.chunk_size).unwrap()
     );
 }
+
+// ---------------------------------------------------------------------------
+// The serving boundary
+// ---------------------------------------------------------------------------
+
+/// Spec §10, normative: "A reader MUST NOT serve, execute, decompress, or decrypt a
+/// section whose kind it does not implement." §5.2 adds that `PLAYER_VISIBLE` on an
+/// unknown kind "confers nothing on a reader that does not understand it".
+///
+/// `SectionKind::is_known()` existed for exactly this and had no caller outside
+/// tests, so an `OPTIONAL` section with a future kind, plain inline bytes and a
+/// valid root came straight back out of `section_bytes`.
+#[test]
+fn an_unknown_kind_is_committed_and_verified_but_never_served() {
+    let manifest = Manifest::decode(
+        &Value::Map(vec![
+            (Value::Text("spec".into()), Value::Uint(1)),
+            (
+                Value::Text("id".into()),
+                Value::Text("from-the-future".into()),
+            ),
+            (
+                Value::Text("name".into()),
+                Value::Text("From The Future".into()),
+            ),
+            (
+                Value::Text("names".into()),
+                Value::Array(vec![
+                    Value::Text("manifest".into()),
+                    Value::Text("mystery".into()),
+                ]),
+            ),
+        ])
+        .encode()
+        .unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let payload = vec![0x77u8; 128];
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                // A kind from a later version. OPTIONAL is what makes it skippable
+                // rather than a hard reject.
+                SectionKind::unknown(9).unwrap(),
+                1,
+                SectionFlags(SectionFlags::OPTIONAL | SectionFlags::PLAYER_VISIBLE),
+                &payload,
+            ),
+        ],
+    )
+    .unwrap();
+
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert!(!record.kind.is_known());
+
+    // Not servable, even though it is PLAYER_VISIBLE, plain, and its root matches.
+    assert!(
+        matches!(b.section_bytes(&record), Err(Error::Inconsistent { .. })),
+        "an unimplemented kind must not come back from the serving API"
+    );
+
+    // But still *verified*. Hashing a section against the root the footer already
+    // commits to is not serving, executing, decompressing, or decrypting, and
+    // refusing to do it would leave the bundle less checked for no gain in safety.
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(
+        report.verified, 2,
+        "both sections are hashed against a root"
+    );
+    assert_eq!(report.unverifiable, 0);
+}
+
+/// Belt and braces behind R21: even if a sealed section somehow reached the serving
+/// boundary, a phase 1 reader has no business returning its plaintext.
+///
+/// R21 makes the input unreachable through `Bundle::parse` today, so this is built
+/// by hand — which is the point. The guard exists so that relaxing R21 later cannot
+/// silently turn this into a leak.
+#[test]
+fn a_sealed_section_is_never_served() {
+    let mut file = artifact_bundle();
+    let mut record = *Bundle::parse(&file).unwrap().section(1).unwrap();
+    mark_encrypted(&mut file, 1);
+    let b = Bundle::parse(&file).unwrap();
+    record.flags = SectionFlags(SectionFlags::SEALED);
+    assert!(matches!(
+        b.section_bytes(&record),
+        Err(Error::Inconsistent { .. })
+    ));
+}
+
+/// R21's deliberate consequence, asserted rather than left in a comment: R6 forces
+/// `writeup` to carry `SEALED`, this version has no encryption, so the writer cannot
+/// emit one at all. Today it can emit a *fake*-sealed section, which is worse.
+#[test]
+fn phase_1_cannot_write_a_kind_that_must_be_sealed() {
+    let manifest = Manifest::minimal("baby-rop", "Baby ROP", &["manifest", "writeup"])
+        .unwrap()
+        .encode()
+        .unwrap();
+    let result = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::Writeup,
+                1,
+                SectionFlags(SectionFlags::SEALED),
+                b"the flag was in the EXIF all along",
+            ),
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "a writer with no encryption must refuse to claim a section is sealed"
+    );
+}

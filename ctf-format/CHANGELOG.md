@@ -160,6 +160,21 @@ from the tree structure.
   chaining value carries no root finalization, so a one-entry index could not be
   checked against anything; zero entries describe an empty section.
   `chunk_index_off = 0` is how both say they have no index.
+- **R21**: `SEALED` with `enc = 0` is rejected. §5.3 defines `SEALED` as "the
+  plaintext requires a key the platform does not hold during the event" — a
+  statement about a key — so with no encryption there is no key and the flag asserts
+  something the container does not carry. A reader that trusted the bit would serve
+  the plaintext of a section labelled unservable, which is the failure R5 exists to
+  make unrepresentable arriving by a second route. Now a sealed-yet-*readable*
+  section cannot be expressed, just as a sealed-yet-*servable* one cannot.
+
+  **The consequence is intended, not a side effect.** R6 requires `solver`,
+  `writeup`, and `progress` to carry `SEALED`, and this version implements no
+  encryption, so **a 0.3 writer cannot emit those kinds at all**. Refusing is the
+  honest outcome; the alternative is a section that claims to be sealed and is not,
+  which is worse than its absence because the claim is what a downstream serving
+  layer reads. Asserted by
+  `tests/bundle.rs::phase_1_cannot_write_a_kind_that_must_be_sealed`.
 - **R20**: the manifest section must be neither encrypted nor compressed. It says
   which key opens every other section and where every external payload lives, so it
   has to be readable with no key and no codec — otherwise the file stops being
@@ -193,8 +208,46 @@ alignment-independent little-endian reads regardless — so the rule would buy
 nothing and cost a compatibility break. Recorded in the spec rather than left as an
 apparent oversight.
 
+### Changed — the serving boundary enforces §10
+
+`Bundle::section_bytes` is where bytes leave the crate, and it was enforcing fewer
+of its own spec rules than anything else in the container. It now refuses two things
+it previously returned.
+
+- **A section whose kind this build does not implement.** Spec §10 is normative —
+  "A reader MUST NOT serve, execute, decompress, or decrypt a section whose kind it
+  does not implement" — and §5.2 adds that `PLAYER_VISIBLE` on an unknown kind
+  "confers nothing on a reader that does not understand it". `SectionKind::is_known`
+  existed for precisely this and had no caller outside tests, so an `OPTIONAL`
+  section with a future kind, plain inline bytes and a matching root came straight
+  back out.
+- **A `SEALED` section**, as belt and braces behind R21. R21 makes the input
+  unreachable through `Bundle::parse`, which is what makes the guard cheap to keep:
+  it means a later relaxation of R21 cannot quietly turn this into a leak.
+
+**Verification is deliberately *not* restricted the same way, and §10 now says so.**
+The prohibition is a closed list of four acts, and hashing a section against the root
+the footer already commits to is none of them. §5.2's promise is that a skipped
+section is still bounds-checked, still overlap-checked, and still committed;
+confirming the commitment holds is the follow-through, not a violation. So
+`verify_inline_sections` verifies unknown-kind sections and counts them as verified,
+while `section_bytes` refuses to hand them over. Restricting both would have left an
+unimplemented section less checked than an implemented one for no gain in safety.
+The carve-out is stated normatively so an independent implementation cannot guess
+the other way.
+
 ### Fixed
 
+- **`chunk_cv` panicked on public input.** Its guard checked that `chunk_size` was a
+  power of two but never checked its range, so `chunk_size = 1` passed, `offset`
+  became `index`, and `blake3::hazmat::set_input_offset` asserted:
+  `offset (1) must be a chunk boundary (divisible by 1024)`. The function's own
+  safety comment claimed "a power of two of at least 4096", which the code did not
+  enforce — the comment is now true. `Bundle::parse` was never affected, because R14
+  range-checks the record first, but `chunk_cv` is `pub` and reachable directly and
+  `fuzz/fuzz_targets/chunk_index.rs` generates exactly that input. The crate's stated
+  posture is that a panic on hostile input is *unrepresentable* rather than merely
+  unreached, and clippy's `panic` lint cannot see into `blake3`.
 - **A verify pass could report success it had not earned.**
   `verify_inline_sections` returned a single `usize` — the number of sections it
   *had* checked — after silently `continue`ing past everything it could not. A
@@ -227,13 +280,12 @@ apparent oversight.
 
 Found by a six-role multi-agent review of this release (`docs/reviews/0.3-phase1/`,
 with the exact prompts committed alongside the reports) and a second verification
-pass on 2026-08-16. **None of it is fixed in 0.3.** The full reasoning, evidence,
-blast radius, and fix for each lives in [`TODO.md`](TODO.md); this section states
-what a reader of this release needs to know before depending on it.
-
-Four of them are the container failing to enforce an invariant this document
-already claims for it. That is the category, and it is why they are blockers rather
-than cleanups.
+pass on 2026-08-16. What remains unfixed is listed here; what has been fixed is
+described above, under *Changed* and *Fixed*, because 0.3 is not tagged and the
+narrowings were folded in rather than deferred to a version with a feature bit of
+its own. The full reasoning, evidence, blast radius, and fix for each lives in
+[`TODO.md`](TODO.md); this section states what a reader of this release needs to
+know before depending on it.
 
 - **A signed bundle will be malleable.** Padding between structures is covered by
   no commitment: the root is over the header and section table, each section's root
@@ -251,31 +303,6 @@ than cleanups.
   bytes in unclaimed regions, which `validate_layout` already has the range set to
   do. It narrows what is legal, so it wants a decision before the first tagged
   release rather than after.
-- **`SEALED` with `enc = 0` is representable, and its plaintext is served.** No rule
-  ties the flag to actual encryption, and `Bundle::verified_bytes` rejects only
-  `EXTERNAL` and non-plain records — never `SEALED`. Since §5.3 defines `SEALED` as
-  "the plaintext requires a key the platform does not hold during the event", a
-  section with `enc = 0` is making a claim the container does not back, and
-  `section_bytes` will hand the "sealed" writeup to any caller that trusts it. This
-  is precisely the class of bug 0.1 claimed to eliminate with "a sealed-yet-servable
-  section cannot be expressed". The fix has an honest consequence worth stating in
-  advance: with it, **phase 1 can no longer write a `solver`, `writeup`, or
-  `progress` section at all**, because R6 forces them `SEALED` and this release has
-  no encryption. Refusing is strictly better than emitting a fake-sealed section.
-- **`section_bytes` returns sections whose kind this reader does not implement**,
-  contrary to §10's normative "a reader MUST NOT serve, execute, decompress, or
-  decrypt a section whose kind it does not implement". `SectionKind::is_known()`
-  exists for exactly this check and has zero callers outside tests.
-- **`chunk_cv` panics on public input.** Its guard checks that `chunk_size` is a
-  power of two but never range-checks it, so `chunk_cv(&[0], 1, 1)` reaches
-  `blake3::hazmat::set_input_offset` and trips an assertion — despite the function's
-  own safety comment asserting the range check that is not there. `Bundle::parse` is
-  unaffected, because R14 range-checks first, but `chunk_cv` is `pub` and reachable
-  directly, and `fuzz/fuzz_targets/chunk_index.rs` already generates the input that
-  hits it. The crate's stated posture is that a panic on hostile input is
-  *unrepresentable* rather than merely absent; here it is merely absent, and clippy's
-  `panic` lint does not see into a dependency.
-
 Lower severity, all confirmed:
 
 - **`verify_chunk` is callable without `verify_root`**, ordered by a doc comment

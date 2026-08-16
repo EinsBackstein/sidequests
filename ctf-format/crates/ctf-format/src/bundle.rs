@@ -124,11 +124,37 @@ impl<'a> Bundle<'a> {
 
     /// A section's plaintext, verified against its `root` before it is returned.
     ///
+    /// This is the **serving boundary**, and the two guards below are here rather
+    /// than in [`Bundle::verified_bytes`] on purpose — see that function for why the
+    /// distinction is not pedantry.
+    ///
     /// `Err` for an external section (its bytes are not here — stream them through
-    /// [`chunk::verify_stream`]), and for an encrypted or compressed one, whose
+    /// [`chunk::verify_stream`]), for an encrypted or compressed one, whose
     /// transforms land in phase 2 along with the decompression limits that make
-    /// running them on untrusted input safe.
+    /// running them on untrusted input safe, for a section whose kind this build
+    /// does not implement, and for a sealed section.
     pub fn section_bytes(&self, record: &SectionRecord) -> Result<&'a [u8]> {
+        // Spec §10, normative: "A reader MUST NOT serve, execute, decompress, or
+        // decrypt a section whose kind it does not implement (§5.2)." §5.2 is
+        // equally explicit that `PLAYER_VISIBLE` on an unknown kind "confers nothing
+        // on a reader that does not understand it" — so an `OPTIONAL` section with
+        // a future kind, plain inline bytes and a valid root must not come back from
+        // here merely because it parses.
+        if !record.kind.is_known() {
+            return Err(Error::Inconsistent {
+                what: "a section of a kind this build does not implement is not servable",
+            });
+        }
+        // Belt and braces behind R21. R21 makes `SEALED` with `enc = 0`
+        // unrepresentable, so this is unreachable through `Bundle::parse` today —
+        // which is exactly why it is cheap to keep. A phase 1 reader can never
+        // legitimately return sealed plaintext, and stating that at the boundary
+        // means a future relaxation of R21 cannot silently turn this into a leak.
+        if record.flags.sealed() {
+            return Err(Error::Inconsistent {
+                what: "a SEALED section's plaintext is not readable in this version",
+            });
+        }
         Self::verified_bytes(self.file, record)
     }
 
@@ -174,6 +200,20 @@ impl<'a> Bundle<'a> {
         Ok(report)
     }
 
+    /// Hash a section's stored bytes and check them against its `root`.
+    ///
+    /// **Integrity only.** This deliberately does *not* refuse an unknown section
+    /// kind, and [`Bundle::section_bytes`] carries that guard instead. Spec §10
+    /// forbids serving, executing, decompressing, or decrypting a kind a reader does
+    /// not implement — hashing a section against the root the footer already commits
+    /// to is none of those four, and refusing to do it would make a bundle *less*
+    /// verified for no gain in safety. §5.2's whole point is that a skipped section
+    /// is still bounds-checked, still overlap-checked, and still committed; checking
+    /// that the commitment actually holds is the follow-through, not a violation.
+    ///
+    /// Consequence: [`Bundle::verify_inline_sections`] verifies unknown-kind
+    /// sections and counts them as verified, while [`Bundle::section_bytes`] refuses
+    /// to hand them to a caller.
     fn verified_bytes(file: &'a [u8], record: &SectionRecord) -> Result<&'a [u8]> {
         if record.flags.contains(SectionFlags::EXTERNAL) {
             return Err(Error::Inconsistent {

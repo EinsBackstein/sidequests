@@ -410,6 +410,35 @@ fn record_rejects_unknown_flag_bits() {
     ));
 }
 
+/// R21. `SEALED` means the plaintext needs a key the platform does not hold during
+/// the event (§5.3). With `enc = 0` there is no key, so the flag is a claim the
+/// container does not back — and a reader that trusts it serves the "sealed"
+/// plaintext to anyone who asks.
+///
+/// Trap check: `kind` is `Artifact` rather than `Writeup` on purpose. A sealed
+/// `Writeup` would satisfy R6 and reach R21 too, but a *plain* one would be rejected
+/// by R6 first, so the second half of this test could not distinguish the two rules.
+#[test]
+fn record_rejects_sealed_without_encryption() {
+    let mut r = good_manifest_record();
+    r.kind = SectionKind::Artifact;
+    r.flags = SectionFlags(SectionFlags::SEALED);
+    assert!(
+        matches!(
+            SectionRecord::parse(&r.to_bytes()),
+            Err(Error::Inconsistent { .. })
+        ),
+        "SEALED with enc = 0 is a claim nothing backs"
+    );
+
+    // The same record with real encryption is legal. R21 rejects the unbacked
+    // claim, not the flag — otherwise it would be a ban on sealing rather than a
+    // requirement to mean it.
+    r.enc = Encryption::AeadStream;
+    r.chunk_size = 4096; // STREAM is defined over a chunk sequence.
+    assert!(SectionRecord::parse(&r.to_bytes()).is_ok());
+}
+
 /// The invariant that stops the failure mode design §4 calls primary: a sealed
 /// section can never be eligible for serving to players.
 #[test]

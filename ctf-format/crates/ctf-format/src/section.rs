@@ -392,6 +392,23 @@ impl SectionRecord {
             });
         }
 
+        // R21. `SEALED` means the plaintext requires a key the platform does not
+        // hold during the event (§5.3). With `enc = 0` there is no key, so the flag
+        // is a claim the container does not back — and a reader that trusts it hands
+        // out the "sealed" writeup in cleartext. Making the pair unrepresentable is
+        // the same move as `SEALED`/`PLAYER_VISIBLE` being mutually exclusive: the
+        // invariant belongs in the container, where a caller cannot forget it.
+        //
+        // The consequence is deliberate. R6 forces `solver`, `writeup` and
+        // `progress` to carry `SEALED`, and this version has no encryption, so a
+        // phase 1 writer can no longer emit those kinds at all. Refusing is honest;
+        // emitting a fake-sealed section is strictly worse.
+        if flags.sealed() && enc == Encryption::None {
+            return Err(Error::Inconsistent {
+                what: "SEALED section must be encrypted",
+            });
+        }
+
         let offset = u64_at(b, OFF_OFFSET).ok_or_else(trunc)?;
         let len_stored = u64_at(b, OFF_LEN_STORED).ok_or_else(trunc)?;
         let len_plain = u64_at(b, OFF_LEN_PLAIN).ok_or_else(trunc)?;

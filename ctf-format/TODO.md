@@ -5,9 +5,13 @@
 **Read first:** [`HANDOFF.md`](HANDOFF.md) for what the project is, then this file for
 what is outstanding.
 
-Nothing in this file has been applied. The tree is exactly as the review found it:
-`cargo test` 124 pass, `cargo clippy --all-targets` 0 warnings, `cargo fmt --check`
-clean.
+**Progress:** H1, B1, B2, B3 done. B4 and the bidi work outstanding, then Tier 2 and
+Tier 3. Checkboxes below are accurate; each closed item keeps its original text and
+gains a note saying what actually shipped, because in two cases what shipped is not
+what the entry proposed.
+
+Current tree: `cargo test` 132 pass (was 124 at `9f50d84`), `cargo clippy
+--all-targets` 0 warnings, `cargo fmt --check` clean.
 
 ---
 
@@ -99,7 +103,12 @@ byte layout and ask what is not covered by anything.
 These four are the format failing to enforce its own stated invariants. Do these
 before phase 2 touches anything.
 
-### [ ] B1 — `SEALED` with `enc = 0` is representable, and its plaintext is served
+### [x] B1 — `SEALED` with `enc = 0` is representable, and its plaintext is served
+
+**Done 2026-08-16.** R21 added to `SectionRecord::parse`; `section_bytes` refuses a
+`SEALED` record outright as belt and braces. Spec §5.3, §5.6, §10, §17 updated. No
+existing test broke, exactly as the blast-radius note predicted.
+
 
 - **Source:** Security & Cryptography reviewer. **Status:** confirmed by reading
   `section.rs` record validation and `bundle.rs::verified_bytes`.
@@ -130,7 +139,11 @@ before phase 2 touches anything.
 - **Also update:** spec §5.6 rule table, §5.3 prose, §17 version history,
   `CHANGELOG.md`.
 
-### [ ] B2 — `section_bytes` returns sections whose kind this reader does not implement
+### [x] B2 — `section_bytes` returns sections whose kind this reader does not implement
+
+**Done 2026-08-16, but not where this entry said to put it** — see the correction
+below, which is the part worth reading.
+
 
 - **Source:** Spec-conformance reviewer. **Status:** confirmed —
   `grep -rn is_known crates/` returns its own definition at `section.rs:179` and
@@ -150,7 +163,35 @@ before phase 2 touches anything.
 - **Blast radius:** none expected; no test currently calls `section_bytes` on an
   unknown kind. Add one that does, asserting rejection.
 
-### [ ] B3 — `chunk_cv` panics on public input
+> **Correction, 2026-08-16 — the fix above is in the wrong place, and following it
+> would have made the bundle less verified.**
+>
+> `verified_bytes` has two callers with opposite jobs: `section_bytes`, which *serves*
+> bytes to a caller, and `verify_inline_sections`, which *hashes* them against a root.
+> Putting the guard in the shared helper applies it to both.
+>
+> §10's prohibition is a closed list — "serve, execute, decompress, or decrypt" — and
+> hashing a section against the root the footer already commits to is none of the
+> four. It is the opposite: §5.2's whole promise is that a skipped section is still
+> bounds-checked, still overlap-checked, and **still committed**, and verifying that
+> the commitment holds is the follow-through. Skipping unknown kinds during
+> verification would leave them less checked than implemented ones, buying no safety.
+>
+> **What shipped:** the guard lives in `section_bytes` (the serving boundary), and
+> `verified_bytes` stays a pure integrity helper. So an unknown-kind section is
+> verified and counted as `verified` in the `VerifyReport`, and is refused by the
+> serving API. Spec §10 now states the carve-out normatively, so the Go
+> implementation cannot guess the other way.
+>
+> This also means H1's "count unknown kinds as skipped" is withdrawn — there is
+> nothing to skip.
+
+### [x] B3 — `chunk_cv` panics on public input
+
+**Done 2026-08-16.** `chunk_cv` now range-checks
+`(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size)` as well as power-of-two,
+which also makes its own safety comment true for the first time.
+
 
 - **Source:** Rust correctness reviewer. **Status:** confirmed **by execution**, not
   by reading:
