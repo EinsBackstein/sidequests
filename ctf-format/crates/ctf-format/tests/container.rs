@@ -197,8 +197,12 @@ fn header_accepts_unsupported_ro_compat_feature_as_read_only() {
 /// order: bytes 40–47 are features, 48–63 are still reserved.
 #[test]
 fn header_feature_words_are_checked_before_reserved() {
+    // Bit 31 of `feat_incompat`. This version assigns no `incompat` bit at all —
+    // `CONTAINER_V1` lives in `feat_ro_compat`, precisely so that a 0.2 reader can
+    // still read a 0.3 file — so any bit here is unimplemented.
     let mut b = good_header().to_bytes();
-    b[40] = 1;
+    b[43] = 0x80;
+    b[48] = 1;
     assert!(matches!(
         Header::parse(&b),
         Err(Error::UnsupportedFeature { .. })
@@ -354,7 +358,9 @@ fn record_round_trips_sealed_chunked_artifact() {
         comp: Compression::Zstd,
         offset: PAYLOAD_OFF,
         len_stored: 9000,
-        len_plain: 12345,
+        // Spans three chunks. R19 rejects an index of fewer than two entries, so a
+        // fixture carrying `chunk_index_off` has to be big enough to need one.
+        len_plain: (2 << 20) + 12345,
         chunk_size: 1 << 20,
         chunk_index_off: 8192,
         root: [0x11; 32],

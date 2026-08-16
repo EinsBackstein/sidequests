@@ -45,7 +45,7 @@
 
 use crate::{
     Error, HEADER_LEN, Header, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE, PAYLOAD_ALIGN, Result,
-    SECTION_RECORD_LEN, TABLE_ALIGN, all_zero, u16_at, u32_at, u64_at,
+    SECTION_RECORD_LEN, TABLE_ALIGN, all_zero, chunk, footer::ROOT_LEN, u16_at, u32_at, u64_at,
 };
 
 const OFF_KIND: usize = 0;
@@ -61,7 +61,6 @@ const OFF_RESERVED_A: usize = 36;
 const RESERVED_A_LEN: usize = 4;
 const OFF_CHUNK_INDEX_OFF: usize = 40;
 const OFF_ROOT: usize = 48;
-const ROOT_LEN: usize = 32;
 const OFF_RESERVED_B: usize = 80;
 const RESERVED_B_LEN: usize = 48;
 
@@ -382,6 +381,17 @@ impl SectionRecord {
         let enc = Encryption::from_u8(*b.get(OFF_ENC).ok_or_else(trunc)?)?;
         let comp = Compression::from_u8(*b.get(OFF_COMP).ok_or_else(trunc)?)?;
 
+        // R20. The manifest says which key opens everything else and where every
+        // external payload lives, so it has to be readable with no key and no
+        // codec — otherwise the file stops being self-describing, and a reader
+        // would have to decompress untrusted input to learn the very limits that
+        // make decompressing it safe.
+        if kind == SectionKind::Manifest && (enc != Encryption::None || comp != Compression::None) {
+            return Err(Error::Inconsistent {
+                what: "manifest section must be neither encrypted nor compressed",
+            });
+        }
+
         let offset = u64_at(b, OFF_OFFSET).ok_or_else(trunc)?;
         let len_stored = u64_at(b, OFF_LEN_STORED).ok_or_else(trunc)?;
         let len_plain = u64_at(b, OFF_LEN_PLAIN).ok_or_else(trunc)?;
@@ -460,9 +470,15 @@ impl SectionRecord {
                     align: TABLE_ALIGN,
                 });
             }
-            // ponytail: the chunk index's own length is not checked yet — its
-            // record format lands with verified streaming in phase 1. Bound it
-            // against footer_off once the entry size is defined.
+            // R19. An index of fewer than two entries cannot be checked against
+            // anything: one chaining value carries no root finalization, and zero
+            // describe an empty section. `chunk_index_off = 0` is how a section
+            // that fits in a single chunk says it has no index.
+            if chunk::chunk_count(len_plain, chunk_size)? < 2 {
+                return Err(Error::Inconsistent {
+                    what: "chunk index on a section of fewer than two chunks",
+                });
+            }
         }
 
         let root: [u8; ROOT_LEN] = b
@@ -514,6 +530,38 @@ impl SectionRecord {
         }
         Some((self.offset, self.offset.saturating_add(self.len_stored)))
     }
+
+    /// Byte range of this section's chunk index, or `None` if it has none.
+    ///
+    /// The length is derived, never read from the file:
+    /// `ceil(len_plain / chunk_size) × 32`. That is what lets the index be bounds-
+    /// and overlap-checked like every other region — 0.2 had to exempt it,
+    /// because its entry size was undefined and so its length was unknowable.
+    ///
+    /// An `EXTERNAL` section may still have one. Its payload lives elsewhere; the
+    /// index that proves the payload does not.
+    pub fn index_range(&self) -> Result<Option<(u64, u64)>> {
+        if self.chunk_index_off == 0 {
+            return Ok(None);
+        }
+        let len = chunk::index_len(self.len_plain, self.chunk_size)?;
+        let end = self
+            .chunk_index_off
+            .checked_add(len)
+            .ok_or(Error::LengthOverflow { at: "chunk index" })?;
+        Ok(Some((self.chunk_index_off, end)))
+    }
+}
+
+/// What owns a byte range, for overlap diagnostics.
+///
+/// An explicit owner rather than a sentinel `name_id`, so a real section numbered
+/// 65535 stays distinguishable from the section table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Region {
+    Table,
+    Payload(u16),
+    Index(u16),
 }
 
 /// Parse the whole section table.
@@ -566,28 +614,35 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64
         });
     }
 
-    // (start, end, owner) for every inline section, plus the table itself so a
-    // section cannot be laid over it. `None` is the table: an explicit owner rather
-    // than a sentinel `name_id`, so a real section numbered 65535 stays
-    // distinguishable from the table in a diagnostic.
-    let mut ranges: Vec<(u64, u64, Option<u16>)> = Vec::with_capacity(records.len() + 1);
+    // Every region that owns bytes: inline payloads, chunk indices, and the table
+    // itself so nothing can be laid over it.
+    let mut ranges: Vec<(u64, u64, Region)> = Vec::with_capacity(records.len() * 2 + 1);
     for r in records {
-        let Some((start, end)) = r.stored_range() else {
-            continue;
-        };
-        if end > header.footer_off {
-            return Err(Error::ExceedsFile {
-                at: "section payload",
-                end,
-                file_len: header.footer_off,
-            });
+        if let Some((start, end)) = r.stored_range() {
+            if end > header.footer_off {
+                return Err(Error::ExceedsFile {
+                    at: "section payload",
+                    end,
+                    file_len: header.footer_off,
+                });
+            }
+            if end > start {
+                ranges.push((start, end, Region::Payload(r.name_id)));
+            }
         }
-        if end > start {
-            ranges.push((start, end, Some(r.name_id)));
+        if let Some((start, end)) = r.index_range()? {
+            if end > header.footer_off {
+                return Err(Error::ExceedsFile {
+                    at: "chunk index",
+                    end,
+                    file_len: header.footer_off,
+                });
+            }
+            ranges.push((start, end, Region::Index(r.name_id)));
         }
     }
     if table_end > table_start {
-        ranges.push((table_start, table_end, None));
+        ranges.push((table_start, table_end, Region::Table));
     }
 
     ranges.sort_unstable();
@@ -596,18 +651,34 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64
             continue;
         };
         if b.0 < a.1 {
-            return Err(match (a.2, b.2) {
-                (Some(a), Some(b)) => Error::OverlappingSections { a, b },
-                (None, Some(name_id)) | (Some(name_id), None) => {
-                    Error::OverlapsSectionTable { name_id }
-                }
-                // Unreachable: the table is pushed once, so two `None` ranges
-                // cannot exist. Reported rather than panicked on, per design §14.
-                (None, None) => Error::Inconsistent {
-                    what: "section table listed twice in layout validation",
-                },
-            });
+            return Err(overlap_error(a.2, b.2));
         }
     }
     Ok(())
+}
+
+fn overlap_error(a: Region, b: Region) -> Error {
+    match (a, b) {
+        (Region::Table, Region::Payload(name_id) | Region::Index(name_id))
+        | (Region::Payload(name_id) | Region::Index(name_id), Region::Table) => {
+            Error::OverlapsSectionTable { name_id }
+        }
+        // The same section's payload and index colliding is a writer laying one
+        // over the other, which reads as nonsense through the generic message.
+        (Region::Payload(x), Region::Index(y)) | (Region::Index(x), Region::Payload(y))
+            if x == y =>
+        {
+            Error::Inconsistent {
+                what: "a section's chunk index overlaps its own payload",
+            }
+        }
+        (Region::Payload(a) | Region::Index(a), Region::Payload(b) | Region::Index(b)) => {
+            Error::OverlappingSections { a, b }
+        }
+        // Unreachable: the table is pushed once, so two table ranges cannot exist.
+        // Reported rather than panicked on, per design §14.
+        (Region::Table, Region::Table) => Error::Inconsistent {
+            what: "section table listed twice in layout validation",
+        },
+    }
 }

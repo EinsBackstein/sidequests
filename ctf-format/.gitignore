@@ -1,2 +1,7 @@
 .serena/
 /target
+
+# cargo-fuzz build output and generated corpora. The seed corpus in
+# fuzz/corpus/<target>/ is committed on purpose; artifacts are not.
+/fuzz/target
+/fuzz/artifacts

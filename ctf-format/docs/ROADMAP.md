@@ -20,8 +20,8 @@ go/                       independent second implementation — phase 8
 docs/
 ```
 
-Only `ctf-format` exists today. Crates get created when their phase starts, not
-before.
+`ctf-format`, `ctf-cli`, and `fuzz/` exist today. Remaining crates get created
+when their phase starts, not before.
 
 ---
 
@@ -48,10 +48,15 @@ Byte layout is cheapest to change before any code depends on it.
 
 ---
 
-## Phase 1 — Container: read, write, verify ▸ *in progress*
+## Phase 1 — Container: read, write, verify ▸ *done*
 
 Covers OSINT + RE + forensics archetypes with hashing only. No crypto beyond
-BLAKE3.
+BLAKE3. Shipped as format version **0.3**, announced by `feat_ro_compat` bit 0
+(`CONTAINER_V1`) — the narrowings below constrain structures 0.2 declared
+unspecified, so the extension policy requires a bit rather than a silent bump.
+`ro_compat` rather than `incompat`: a 0.2 reader answers correctly about
+everything it checks, while a 0.2 *rewriter* would drop the footer. So 0.3 files
+stay readable by 0.2 readers and unrewritable by them.
 
 - [x] `Header` parse/write, hardened: magic, version, `header_len`, reserved-zero,
       unknown-flag reject, count cap before allocation, offset bounds, alignment,
@@ -65,23 +70,60 @@ BLAKE3.
       `len_stored == len_plain` when neither compressed nor encrypted
 - [x] Layout validator: exactly one manifest, unique `name_id`, no section overlaps
       another or the section table, everything inside `[HEADER_LEN, footer_off)`
-- [x] 54 tests, one per rule, each mutating a known-good fixture by one field
-- [ ] Footer + commitment root as fixed in design §6: `BLAKE3("ctf/root/v1" ‖
+- [x] Tests one per rule, each mutating a known-good fixture by one field
+- [x] Footer + commitment root as fixed in design §6: `BLAKE3("ctf/root/v1" ‖
       header ‖ section table)`, the signed transcript, and the no-trailing-bytes
-      rule
-- [ ] Golden vector for a whole minimal `.ctf` (requires the manifest and footer)
-- [ ] Canonical CBOR manifest encode/decode (RFC 8949 §4.2 — deterministic
-      encoding is mandatory, not a preference)
-- [ ] BLAKE3 section roots + footer commitment root
-- [ ] Chunked verified streaming (`bao`); audit `bao` maturity before committing
-      to it, fall back to an explicit chunk index + per-chunk BLAKE3 if it is not
-      solid
-- [ ] `external` sections: hash + size + mirror list, no bytes inline
-- [ ] `ctf inspect` — annotated hexdump, section table, commitment root
-- [ ] `cargo-fuzz` targets: header, section table, manifest, chunk index
+      rule. Footer is variable-width — a signature's size is a suite property —
+      and carries no padding at all, so slack cannot hide bytes outside the
+      commitment
+- [x] Golden vector for a whole minimal `.ctf`: 4344 bytes, every region pinned,
+      spec §11
+- [x] Canonical CBOR manifest encode/decode (RFC 8949 §4.2.1), **enforced on
+      decode as well as encode**, with duplicate keys unrepresentable, a depth
+      cap, and floats and tags excluded
+- [x] BLAKE3 section roots + footer commitment root
+- [x] Chunked verified streaming — **`bao` audited and rejected**, see below
+- [x] `external` sections: hash + size + mirror list, no bytes inline; record
+      outranks the manifest and a mismatch rejects
+- [x] `ctf inspect` — annotated hexdump, section table, commitment root
+- [x] `cargo-fuzz` targets: whole bundle, header, section table, manifest, chunk
+      index, with a seed corpus committed
+- [x] `tests/mutation.rs` — the same oracle on the pinned stable toolchain, so a
+      fixed finding stays fixed without needing nightly
 
-**Done when** a 40 GB external payload verifies incrementally and a truncated or
-byte-flipped file is rejected with a precise error.
+**Done:** a 40 GB external payload verifies incrementally, in bounded memory or
+per chunk, and a truncated or byte-flipped file is rejected with a precise error.
+
+### The `bao` audit, and what replaced it
+
+`bao` 0.13.1 is BLAKE3 verified streaming by BLAKE3's own author, with a written
+spec and test vectors. It was still the wrong dependency here, for a reason that
+has nothing to do with code quality: adopting it means adopting **its encoding**
+as a normative part of `.ctf`, which phase 8's independent Go implementation would
+then have to reproduce from a second document, with no Go `bao` to lean on. Being
+pre-1.0 with a single maintainer was the secondary concern.
+
+The replacement is better than the roadmap's stated fallback. Rather than an index
+of independent per-chunk hashes — which would not reduce to the section's `root`,
+and so would need a commitment of its own in a frozen record field — the index
+stores each chunk's BLAKE3 **chaining value**, via `blake3::hazmat`. Because
+`chunk_size` is a power of two of at least 4 KiB, every chunk boundary is a BLAKE3
+subtree boundary, so merging the entries reproduces `BLAKE3(plaintext)` exactly.
+
+Three consequences:
+
+- **The index is committed by construction.** A forged index cannot reduce to the
+  section root, which lives in the table, which the footer commits to. No new
+  field, no addition to the root definition.
+- **Its length is derived** — `ceil(len_plain / chunk_size) × 32` — so
+  `chunk_index_off` is finally bounds- and overlap-checked like every other
+  region. That closes the `ponytail:` comment 0.2 left in `section.rs`.
+- **The cost is stated**: no interior tree nodes, so verifying one chunk means
+  reading the whole index. Kilobytes against gigabytes, and not something ingest
+  or serving needs.
+
+The claim that the merge equals `blake3::hash` is checked against `blake3::hash`
+across 48 input shapes, not argued from the tree structure.
 
 ---
 
@@ -222,8 +264,23 @@ a `ponytail:` comment at its site in the code.
   has tens of sections, not millions; the hot path is BLAKE3 over gigabytes.
   Upgrade to `zerocopy` typed LE fields only if profiling shows table parsing on a
   flame graph.
-- **No external dependencies until phase 1 needs BLAKE3.** Header and section table
-  are pure `std`.
+- **Canonical CBOR is hand-written, not a dependency.** The subset is small — six
+  major types and three simple values — and the requirement that makes it worth
+  writing is one no mainstream CBOR crate offers: *rejecting* non-canonical input
+  on decode. A library that encodes canonically but decodes permissively would
+  leave the commitment's injectivity unenforced, which is the property the whole
+  of pillar 3 rests on. Revisit if a strict-decoding crate appears.
+- **No compression or encryption in the writer.** `write_bundle` emits `enc = 0`,
+  `comp = 0` only. zstd needs the output and ratio caps that are still unspecified,
+  and AEAD is phase 2. The reader parses both fields and refuses to act on them,
+  which is the honest state rather than a silent gap.
+- **`ctf` has no argument-parsing dependency.** `clap` is right at the roadmap's
+  eight subcommands with flags and completions; it is not right at one subcommand
+  and two flags. Add it when the second subcommand lands.
+- **The chunk index has no interior tree nodes**, so single-chunk random access
+  costs a full index read. See the `bao` note above.
+- **External dependencies: `blake3` only.** Header, section table, CBOR, manifest,
+  footer, and chunk index are otherwise pure `std`.
 
 ## Out of scope (see design §2)
 

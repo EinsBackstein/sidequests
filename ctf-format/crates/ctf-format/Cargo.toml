@@ -1,6 +1,6 @@
 [package]
 name = "ctf-format"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reader and writer for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ rust-version.workspace = true
 # No dependencies yet, deliberately. Header and section table are pure std;
 # BLAKE3 arrives with phase 1's hashing work. See docs/ROADMAP.md.
 [dependencies]
+blake3 = "1.8"
 
 [lints]
 workspace = true

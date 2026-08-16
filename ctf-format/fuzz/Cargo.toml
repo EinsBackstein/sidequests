@@ -1,0 +1,60 @@
+# Coverage-guided fuzzing. Deliberately outside the workspace: `cargo-fuzz`
+# requires a nightly toolchain and sanitizer instrumentation, and
+# `rust-toolchain.toml` pins stable 1.97.1 because generator determinism (design
+# §8) is only meaningful relative to a pinned toolchain. Fuzzing must not be a
+# reason to unpin it.
+#
+#     cargo +nightly fuzz run bundle
+#
+# The same oracle runs on the pinned toolchain in
+# `crates/ctf-format/tests/mutation.rs`, which is what keeps a fixed finding fixed.
+[package]
+name = "ctf-format-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+blake3 = "1.8"
+
+[dependencies.ctf-format]
+path = "../crates/ctf-format"
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header"
+path = "fuzz_targets/header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "section_table"
+path = "fuzz_targets/section_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk_index"
+path = "fuzz_targets/chunk_index.rs"
+test = false
+doc = false
+bench = false

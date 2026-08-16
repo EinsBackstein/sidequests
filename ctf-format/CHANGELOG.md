@@ -7,6 +7,200 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.3.0] — 2026-08-13
+
+Phase 1 complete: the container is whole. A `.ctf` now carries a manifest, commits
+to itself, and can be verified incrementally at forensics scale. No field moved.
+
+**A parse still establishes `intact`, never `authentic`.** The commitment root is
+computed and checked; the signatures are located and bounded but not verified,
+because the suite registry is phase 2. `Bundle::signing()` returns `Unsigned` or
+`Present` — never "valid" — and there is deliberately no API that says otherwise.
+
+### Added — the rest of the container
+
+- **Canonical CBOR manifest** (spec §7, rules M1–M21). RFC 8949 §4.2.1 core
+  deterministic encoding, restricted to six major types and three simple values,
+  and **enforced on decode as well as on encode** — which is the part a
+  general-purpose CBOR library will not do, and the reason `cbor.rs` is
+  hand-written rather than a dependency. The commitment is over bytes, so an
+  encoding a decoder tolerates but an encoder would never produce is a second
+  spelling of one manifest and therefore a second commitment root for one
+  challenge. Duplicate map keys are *unrepresentable* rather than resolved: keys
+  must be strictly increasing in encoded-byte order, so "which duplicate wins"
+  never becomes the policy difference that lets two conforming readers disagree
+  about a file both accepted. Floats and tags are excluded outright, nesting is
+  capped at 16, and a declared length never sizes an allocation before its bytes
+  are consumed.
+- **Manifest schema** with the name table `name_id` indexes, `id` shape rules, and
+  the `crit` criticality list from design §10 — unknown keys named in `crit` are
+  rejected, unknown keys not named are carried byte-for-byte so a rewriter cannot
+  destroy what it does not understand. Name entries are rejected for path shapes
+  at the format boundary rather than normalized later, because one extraction path
+  forgetting to re-check is all it takes.
+- **Footer** (spec §8, rules F1–F9): commitment root, two signature slots, a
+  `total_len` that must equal the real file length, and the repeated magic.
+  Variable-width, because a signature's size is a property of the crypto suite and
+  suite 3 roughly doubles it — so `footer_len` is *derived* from `file_len -
+  footer_off` rather than stored, and MUST equal `56 + N + M` **exactly**. Padding
+  inside the footer would be bytes covered by no commitment, which is §3's
+  trailing-data ambiguity moved eight bytes to the left. A footer carrying one
+  signature of the hybrid pair is rejected as a downgrade, not read as "classically
+  signed".
+- **Commitment root**, `BLAKE3("ctf/root/v1" ‖ header[0,64) ‖ section_table_bytes)`,
+  computed over the bytes as they appear in the file rather than over a
+  re-serialization of the parsed structs — which would make the check a tautology
+  for any field the reader normalizes.
+- **Signature transcript**, `"ctf/footer-sig/v1" ‖ u16_le(suite_id) ‖ root ‖
+  u64_le(total_len)`, exactly 59 bytes, produced and pinned by a test now so phase
+  2 has nothing left to decide.
+- **Chunk index** (spec §9, rules C1–C7): a flat array of 32-byte BLAKE3 chaining
+  values, one per chunk. See below.
+- **External sections** end to end: mirror metadata in the manifest, with the
+  record authoritative and a mismatch rejecting the file (M21). A bundle describing
+  a 40 GB forensics image is under 8 KB and asserted to be so.
+- **`Bundle::parse` and `write_bundle`** — the whole spec §10 conformance
+  procedure in one call, and a writer that parses its own output before returning
+  it. A writer that can emit a file its own reader rejects is a bug generator for
+  every other implementation, and the check costs one pass over a file already in
+  memory.
+- **`ctf inspect`** (`crates/ctf-cli`): header, manifest, section table, chunk
+  indices, mirrors, commitment root, `--verify` to re-hash every inline section,
+  `--hex` for the annotated dump. It prints "NOT VERIFIED" next to any signature on
+  every run, because one operator reading "signatures: 2" as "signed and checked"
+  is the whole risk. It will not dump a sealed section in any mode.
+- **Full-file golden vector** (spec §11): the minimal OSINT bundle, 4344 bytes,
+  every region pinned byte-for-byte plus `BLAKE3(file)`. This is now the primary
+  conformance target, because reproducing it from the spec text alone demonstrates
+  agreement on the layout, the canonical CBOR key order, the section `root`, and
+  the commitment construction at once.
+- **`cargo-fuzz` targets** for the whole bundle, header, section table, manifest,
+  and chunk index, with a seed corpus committed. Their oracle is round-trip
+  stability, not merely absence of panics: an accepted file's structures must
+  re-encode to exactly the bytes they came from.
+- **`tests/mutation.rs`** — the same oracle on the pinned stable toolchain: single
+  byte flips across every structure, truncation at every length, 40 000 randomly
+  corrupted bundles, and 70 000 arbitrary inputs through the sub-parsers. The
+  fuzzer finds things; this keeps them found without needing nightly.
+- **`tests/fuzzmirror.rs`** compiles and runs each fuzz target's body on the pinned
+  toolchain, so an API change cannot silently rot `fuzz/` between nightly runs.
+- 69 new tests (124 total), still zero clippy warnings, still `unsafe_code =
+  "forbid"`, one dependency.
+
+### Added — `feat_ro_compat` bit 0, `CONTAINER_V1`
+
+0.3 adds rules that reject files 0.2 would have accepted, so per the extension
+policy it ships with a feature bit, and every 0.3 writer sets it. It is a
+**read-only-compatible** bit, and the choice of word is the substance.
+
+The criticality test decides it, clause by clause, for a 0.2 reader meeting a 0.3
+file. It serves nothing new — no flag, kind, or record rule changed meaning. It
+trusts nothing, because 0.2 forbids treating a parse as authentic. It reports
+nothing as verified, having no verification. And it does not *mis-locate* the
+chunk index: 0.2 §5.5 forbids dereferencing `chunk_index_off` at all, so the
+region is never read. The 0.2 reader fails to **account** for bytes it never
+touches, which is under-checking, not misreading. A valid 0.3 file also satisfies
+every 0.2 rule, because R19, R20, T6 and T7 only narrow.
+
+The hazard is entirely on the **rewriter** side, and it is severe: a 0.2 tool
+re-emitting a 0.3 file drops the footer, the manifest, and every chunk index,
+producing a bundle that no longer says what the author signed. That is spec §4.4's
+definition of a read-only-compatible feature, word for word.
+
+Result: a 0.3 file is **readable** by a 0.2 reader and **unrewritable** by it, and
+a 0.3 reader reads everything a 0.2 file actually defines while naming what is
+missing before attempting a whole-container read. Both directions are asserted by
+tests. The 0.1 and 0.2 golden headers still parse and are still asserted.
+
+An earlier draft of this release put the bit in `feat_incompat`, on a misreading of
+criticality clause 4 that treated "does not check" as "mis-locates". That would
+have made 0.3 files unreadable by every 0.2 reader — spending the
+forward-compatibility mechanism on its own first use. Spec §15 now states the
+lesson as a rule for editors: *"it needs a feature bit" does not mean "it needs an
+incompatible one"*, and the two questions must be asked separately.
+
+### Changed — `bao` audited and rejected; the chunk index that replaced it
+
+`bao` 0.13.1 is BLAKE3 verified streaming by BLAKE3's own author, with a written
+spec and test vectors. It is the wrong dependency here for a reason unrelated to
+its quality: adopting it makes **its encoding** a normative part of `.ctf`, which
+phase 8's independent Go implementation would then have to reproduce from a second
+document with no Go `bao` to lean on. Pre-1.0 with a single maintainer was the
+secondary concern.
+
+The replacement is better than the roadmap's stated fallback of "per-chunk
+BLAKE3". Independent per-chunk hashes would not reduce to the section's `root`, so
+the index would have needed a commitment of its own — a new field in a frozen
+record, and that one really would have been `feat_incompat`. Instead each entry is the chunk's
+BLAKE3 **chaining value**, via the stable `blake3::hazmat` API. Because
+`chunk_size` is a power of two of at least 4 KiB, every chunk boundary is also a
+BLAKE3 subtree boundary, so merging the entries reproduces `BLAKE3(plaintext)`
+exactly.
+
+- **The index is committed by construction.** A forged index cannot reduce to the
+  section root, which lives in the table, which the footer commits to. No new
+  field, and nothing added to the root definition — which spec §15 now states
+  outright is unchangeable without a major version, no feature bit sufficient.
+- **Its length is derived**, `ceil(len_plain / chunk_size) × 32`, so
+  `chunk_index_off` is finally bounds- and overlap-checked like every other region.
+  That closes the `ponytail:` comment 0.2 left in `section.rs` and adds T6 and T7.
+- **The cost is stated rather than discovered**: no interior tree nodes, so
+  verifying a single chunk means reading the whole index. Kilobytes against
+  gigabytes, and not something ingest or serving needs.
+
+`blake3::hazmat` is marked hazardous material because a wrong tree shape yields a
+plausible value that never matches `blake3::hash`. The merge is therefore checked
+against `blake3::hash` directly across 48 input shapes — exact multiples, short
+final chunks, and counts either side of every power of two — rather than argued
+from the tree structure.
+
+### Changed — new rules
+
+- **R19**: `chunk_index_off ≠ 0` with fewer than two chunks is rejected. One
+  chaining value carries no root finalization, so a one-entry index could not be
+  checked against anything; zero entries describe an empty section.
+  `chunk_index_off = 0` is how both say they have no index.
+- **R20**: the manifest section must be neither encrypted nor compressed. It says
+  which key opens every other section and where every external payload lives, so it
+  has to be readable with no key and no codec — otherwise the file stops being
+  self-describing, and a reader would have to decompress untrusted input to learn
+  the decompression limits that make doing so safe.
+- **T6, T7**: chunk index ranges are bounds-checked against `footer_off` and
+  included in overlap detection, against payloads, the table, and each other.
+- Footer checks are ordered so that the fields at fixed offsets from `footer_off`
+  are read first. They are the only part of the footer whose position is unaffected
+  by bytes being appended to or removed from the end of the file, which makes the
+  exact-length rule the accurate diagnostic for exactly that tampering — reading the
+  trailer first reports a magic mismatch, which is true but says nothing about what
+  is wrong.
+- `Error` gains `FeatureRequired`, `BadTotalLen`, `BadFooterLen`,
+  `SignatureTooLong`, `RootMismatch`, `Manifest`, and eight `Cbor*` variants. All
+  still carry static descriptions and offending numbers, never input bytes: a
+  manifest is attacker-controlled text and an error string is not a place to echo
+  it.
+
+### Changed — spec restructured
+
+`spec/SPEC.md` gains §7 manifest, §8 footer, §9 chunk index, and §11 the full-file
+golden vector; reader conformance, constants, security considerations, the
+extension policy, and the compatibility matrix move down accordingly. §14 "what is
+not here yet" shrinks to signature verification, the suite registry, AEAD, zstd
+limits, the later phases' manifest keys, and the entitlement record format.
+
+`footer_off` deliberately keeps its lack of an alignment requirement. Adding one
+would reject files that are legal under 0.2, and the footer is decoded through
+alignment-independent little-endian reads regardless — so the rule would buy
+nothing and cost a compatibility break. Recorded in the spec rather than left as an
+apparent oversight.
+
+### Fixed
+
+- A chunk-swap test passed for the wrong reason: its filler was `(i * 31) as u8`,
+  which repeats every 256 bytes, so every 4096-byte chunk was byte-identical and a
+  "swapped" chunk genuinely was the same bytes. The filler is now a BLAKE3 XOF
+  stream, and position binding is asserted separately by showing that two
+  byte-identical chunks still get different chaining values.
+
 ## [0.2.0] — 2026-08-12
 
 Two themes: the format becomes extensible without becoming permissive, and a
@@ -360,5 +554,6 @@ hardened reader and writer for it. Nothing cryptographic is implemented yet.
 - Both divergences from the original design doc are recorded at their site in the
   code as well as in the doc.
 
+[0.3.0]: https://github.com/EinsBackstein/sidequests/releases/tag/ctf-format-v0.3.0
 [0.2.0]: https://github.com/EinsBackstein/sidequests/releases/tag/ctf-format-v0.2.0
 [0.1.0]: https://github.com/EinsBackstein/sidequests/releases/tag/ctf-format-v0.1.0

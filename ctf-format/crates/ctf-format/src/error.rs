@@ -48,6 +48,10 @@ pub enum Error {
     /// unsupported bits so a diagnostic can name what is missing rather than
     /// reporting the confusing structural error the unknown bytes would cause.
     UnsupportedFeature { class: &'static str, bits: u32 },
+    /// The file does not declare a feature this operation needs. The mirror image
+    /// of [`Error::UnsupportedFeature`]: there the file asks for more than the
+    /// reader has, here the reader asks for more than the file offers.
+    FeatureRequired { class: &'static str, bits: u32 },
     /// Two sections claim overlapping byte ranges. Ambiguity here becomes a
     /// parser-differential exploit.
     OverlappingSections { a: u16, b: u16 },
@@ -64,6 +68,47 @@ pub enum Error {
     /// A combination of fields that is individually well-formed but jointly
     /// meaningless or unsafe.
     Inconsistent { what: &'static str },
+    /// The footer's `total_len` is not the file's real length. Either the file has
+    /// bytes appended after its commitment — the classic archive-format ambiguity —
+    /// or it was truncated.
+    BadTotalLen { declared: u64, file_len: u64 },
+    /// The footer's length is not exactly what its signature lengths imply. Slack
+    /// in the footer would be bytes inside the file, outside every structure, and
+    /// outside the commitment.
+    BadFooterLen { got: u64, want: u64 },
+    /// A signature length beyond what any suite in the registry can produce.
+    SignatureTooLong { got: u32, max: u32 },
+    /// A recomputed BLAKE3 root does not match the one the file claims. The file
+    /// is corrupt or has been tampered with; which, this error cannot say.
+    RootMismatch { at: &'static str },
+    /// The manifest violates the schema of `spec/SPEC.md` §7.
+    ///
+    /// Carries a static description and never the offending text: a manifest is
+    /// attacker-controlled input like everything else, and an error string is not a
+    /// place to echo it.
+    Manifest { what: &'static str },
+    /// CBOR input ended inside a value.
+    CborTruncated,
+    /// CBOR input has bytes after the value. A manifest section is entirely the
+    /// manifest.
+    CborTrailing { at: usize, len: usize },
+    /// An integer argument was not encoded in the shortest form RFC 8949 §4.2.1
+    /// requires. Admitting the longer forms would give one value several encodings
+    /// and so several commitment roots.
+    CborNotShortest,
+    /// A CBOR feature outside the manifest subset: indefinite length, a tag, a
+    /// float, `undefined`, or a reserved additional-information value.
+    CborUnsupported { initial: u8 },
+    /// Two map keys are equal. Last-wins and first-wins are both defensible, which
+    /// is exactly why this is rejected instead of resolved.
+    CborDuplicateKey,
+    /// Map keys are not in canonical order.
+    CborUnsortedKeys,
+    /// A CBOR text string is not valid UTF-8.
+    CborBadUtf8,
+    /// CBOR nesting past the depth cap. Unbounded recursion over attacker-supplied
+    /// nesting is a stack-overflow DoS.
+    CborTooDeep { max: u32 },
 }
 
 impl fmt::Display for Error {
@@ -104,6 +149,12 @@ impl fmt::Display for Error {
                     "file requires unsupported {class} feature bits {bits:#010x}"
                 )
             }
+            Self::FeatureRequired { class, bits } => {
+                write!(
+                    f,
+                    "file does not declare {class} feature bits {bits:#010x}, which this operation needs"
+                )
+            }
             Self::OverlappingSections { a, b } => {
                 write!(f, "sections {a} and {b} overlap")
             }
@@ -118,6 +169,30 @@ impl fmt::Display for Error {
             }
             Self::BadChunkSize { got } => write!(f, "bad chunk_size {got}"),
             Self::Inconsistent { what } => write!(f, "inconsistent: {what}"),
+            Self::BadTotalLen { declared, file_len } => write!(
+                f,
+                "footer declares total_len {declared}, file is {file_len} bytes"
+            ),
+            Self::BadFooterLen { got, want } => {
+                write!(f, "footer is {got} bytes, its contents imply {want}")
+            }
+            Self::SignatureTooLong { got, max } => {
+                write!(f, "signature length {got} exceeds cap {max}")
+            }
+            Self::RootMismatch { at } => write!(f, "BLAKE3 root mismatch at {at}"),
+            Self::Manifest { what } => write!(f, "manifest: {what}"),
+            Self::CborTruncated => write!(f, "cbor: input ended inside a value"),
+            Self::CborTrailing { at, len } => {
+                write!(f, "cbor: value ends at {at}, input is {len} bytes")
+            }
+            Self::CborNotShortest => write!(f, "cbor: integer is not in shortest form"),
+            Self::CborUnsupported { initial } => {
+                write!(f, "cbor: unsupported item, initial byte {initial:#04x}")
+            }
+            Self::CborDuplicateKey => write!(f, "cbor: duplicate map key"),
+            Self::CborUnsortedKeys => write!(f, "cbor: map keys are not in canonical order"),
+            Self::CborBadUtf8 => write!(f, "cbor: text string is not valid UTF-8"),
+            Self::CborTooDeep { max } => write!(f, "cbor: nesting deeper than {max}"),
         }
     }
 }

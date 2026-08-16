@@ -4,7 +4,12 @@ Cold-start context for whoever picks this up. Read this, then
 [`docs/FORMAT-DESIGN.md`](docs/FORMAT-DESIGN.md) (the spec source) and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) (what is built and what is next).
 
-**Last updated:** 2026-08-12, at release `ctf-format-v0.1.0`.
+> **Resuming mid-stream?** [`TODO.md`](TODO.md) holds the outstanding work from the
+> 0.3 review — three confirmed blockers, the reasoning behind each, one rejected
+> finding that must not be re-raised, and the fact that **all of phase 1 is still
+> uncommitted**. Start there.
+
+**Last updated:** 2026-08-13, at format version 0.3 (phase 1 complete).
 
 ## Where this lives
 
@@ -14,11 +19,22 @@ root except shared housekeeping like `.gitignore`.
 
 ```
 ctf-format/
-  Cargo.toml           workspace root — members = ["crates/ctf-format"]
+  Cargo.toml            workspace root
   rust-toolchain.toml   pinned 1.97.1 — load-bearing, see below
-  crates/ctf-format/    the only crate today
-    src/{lib,error,header,section}.rs
-    tests/container.rs  54 tests
+  crates/ctf-format/    the library
+    src/lib.rs          constants, LE readers, the reading order
+    src/error.rs        every way a byte stream can be wrong
+    src/header.rs       64-byte header            spec §4
+    src/section.rs      128-byte records + table   spec §5, §6
+    src/cbor.rs         canonical CBOR             spec §7.1
+    src/manifest.rs     manifest schema            spec §7
+    src/footer.rs       footer + commitment root   spec §8
+    src/chunk.rs        chunk index                spec §9
+    src/bundle.rs       whole-file read and write  spec §10
+    examples/demo.rs    writes a demo .ctf to try the CLI against
+    tests/              container, cbor, chunk, bundle, mutation, fuzzmirror
+  crates/ctf-cli/       the `ctf` binary — `inspect` only so far
+  fuzz/                 cargo-fuzz targets + committed seed corpus
   spec/SPEC.md          normative byte-level spec — wins over the design doc
   docs/FORMAT-DESIGN.md design rationale and threat model
   docs/ROADMAP.md       phased plan, checkboxes reflect reality
@@ -96,40 +112,88 @@ Confirmed against current docs, not from memory. Re-verify before changing:
   everything" is not available. ML-DSA is the least mature primitive in the whole
   stack — keep it behind its own trait so `suite_id` can retire a suite without a
   format change.
+- **`blake3::hazmat` is stable and does what `bao` was wanted for.** `blake3`
+  1.8.6 exposes `HasherExt::set_input_offset`, `finalize_non_root`,
+  `merge_subtrees_non_root`, and `merge_subtrees_root` in the main crate — enough
+  to compute subtree chaining values and merge them back to a root without an
+  extra dependency and without an extra on-disk encoding.
+- **`bao` 0.13.1 was audited and rejected**, on spec surface rather than quality.
+  It is by BLAKE3's author, with its own written spec and vectors, but depending on
+  it makes *its* encoding a normative part of `.ctf`, which the Go second
+  implementation would have to reproduce with no Go `bao` available. Pre-1.0 with a
+  single maintainer was the secondary concern. See `docs/ROADMAP.md` phase 1.
 
-## Current state — format version 0.2
+## Current state — format version 0.3, phase 1 complete
 
-Implemented and green: the header and section table, with the full design §14
-hardening list and the 0.2 compatibility model — `feat_incompat` / `feat_ro_compat`
-in the header, `OPTIONAL` sections, and the extension policy that binds future
-spec edits (spec §2.3, §11). 54 tests, 0 clippy warnings, zero dependencies,
-`unsafe_code = "forbid"`.
+The **container** is done: header, section table, canonical CBOR manifest, chunk
+index, footer, and the commitment root over header plus table. `Bundle::parse`
+runs the whole spec §10 conformance procedure; `write_bundle` produces files and
+parses them back before returning. 124 tests, 0 clippy warnings, one dependency
+(`blake3`), `unsafe_code = "forbid"`.
 
-0.1 files stay readable and are kept as a golden-vector regression test; no field
-moved between 0.1 and 0.2.
+`ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
+and commitment root, with `--verify` to re-hash every inline section and `--hex`
+for the annotated dump.
 
-Not implemented: **everything cryptographic.** No manifest parsing, no BLAKE3, no
-footer, no signatures, no encryption, no generator, no solver gate. A parsed bundle
-is *structurally* valid and nothing more.
+**Intact is not authentic**, and the distinction is in the type system rather than
+in a comment. A successful parse proves the file commits to its own bytes.
+`Bundle::signing()` returns `Signing::Unsigned` or `Signing::Present` — never
+"valid" — because verifying the signatures needs phase 2's suite registry. There
+is deliberately no API that reports a bundle as authentic.
 
-> A reader MUST NOT treat a bundle as trusted until the footer commitment root and
-> both signatures verify. That step does not exist yet, so nothing downstream may
-> consume this crate as an authentication boundary today.
+> An attacker who rewrites a bundle and recomputes the root produces a perfectly
+> intact file. Only the signatures distinguish the author's bundle from anyone
+> else's, and that step does not exist yet, so nothing downstream may consume this
+> crate as an authentication boundary today.
+
+Not implemented: **everything cryptographic beyond BLAKE3.** No signatures, no
+KEM, no AEAD, no zstd, no generator, no solver gate. The writer emits `enc = 0`
+and `comp = 0` only; the reader parses both fields and refuses to act on them.
+
+### What 0.3 changed, and why the bit is `ro_compat`
+
+0.3 adds R19, R20, T6, and T7, which reject files 0.2 would have accepted. A
+narrowing needs a feature bit (spec §15), so 0.3 assigns `feat_ro_compat` bit 0,
+`CONTAINER_V1`, and every 0.3 writer sets it.
+
+**Two separate questions, and conflating them is the trap.** *Does this narrow
+what is legal?* decides whether a bit is needed. The criticality test decides
+which word it goes in — and it says `ro_compat` here. A 0.2 reader meeting a 0.3
+file serves nothing new, trusts nothing, verifies nothing, and does not
+mis-locate the chunk index, because 0.2 §5.5 forbids dereferencing
+`chunk_index_off` at all. It merely fails to *account* for bytes it never touches.
+A valid 0.3 file satisfies every 0.2 rule too, since R19, R20, T6 and T7 only
+narrow.
+
+The severe hazard is the 0.2 **rewriter**, which would drop the footer, the
+manifest, and every chunk index while re-emitting — spec §4.4's definition of
+`ro_compat`, word for word.
+
+So: 0.3 files are readable by 0.2 readers and unrewritable by them; 0.3 readers
+read everything a 0.2 file defines and name what is missing before a
+whole-container read. Both directions are tested. 0.1 and 0.2 golden headers still
+parse and are still asserted.
+
+An earlier cut put this in `feat_incompat`, which would have made every 0.3 file
+unreadable to every 0.2 reader — spending the forward-compatibility mechanism on
+its first use. If you are about to reach for `feat_incompat` because a change feels
+big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-1. **Canonical CBOR manifest** encode/decode, RFC 8949 §4.2. Deterministic encoding
-   is mandatory — the commitment in pillar 3 is byte-exact, so a non-canonical
-   encoder silently breaks it. Depth cap on nesting; reject duplicate map keys.
-2. **BLAKE3 section roots + footer commitment**, whose shape is already fixed in
-   design §6 and spec §10.1: `root = BLAKE3("ctf/root/v1" ‖ header[0,64) ‖ section
-   table)`, a signed transcript binding `suite_id` and `total_len`, and no bytes
-   after the footer. Hashing the header is what keeps the feature words
-   unstrippable, so it is not optional. Audit `bao` maturity before
-   committing to it for verified streaming; fall back to an explicit chunk index
-   with per-chunk BLAKE3 if it is not solid. Then the chunk index's own length can
-   finally be bounds-checked — see the `ponytail:` comment in `section.rs`.
-3. **`ctf inspect`** and the full-file golden vector, which is blocked on 1 and 2.
+1. **Phase 2 crypto.** The footer's signature slots, the transcript, and
+   `suite_id` are all fixed and testable already — `Footer::sig_input` produces the
+   exact 59 bytes phase 2 must sign. What is missing is the suite registry, the
+   hybrid KEM combiner, AEAD-STREAM, and the key envelopes. Start with the
+   registry behind one trait per primitive role, so ML-DSA stays retireable.
+2. **zstd**, which is blocked on nothing but the two limits spec §14 leaves open:
+   an absolute output cap and an expansion ratio cap. Pick both, write them into
+   the spec, then implement — in that order, because a reader that decompresses
+   before the caps exist is the exact thing spec §13 forbids.
+3. **`ctf pack`**, the YAML authoring surface of design §10. The manifest's `crit`
+   mechanism already carries the later phases' keys (`flag`, `generate`, `runtime`,
+   `sealed`, `verify`) as ignorable unknowns, so `pack` can emit them before
+   anything consumes them.
 
 ## Gotchas that will bite you
 
@@ -163,6 +227,30 @@ is *structurally* valid and nothing more.
   convention a release build does not enforce. Prefer the version a caller cannot
   get wrong: the format outlives any single implementation of it, and a second
   language will be checked against this one.
+- **Canonical CBOR is enforced on decode, not only on encode.** This is the part a
+  general-purpose CBOR library will not do, and it is why `cbor.rs` is hand-written
+  rather than a dependency. The commitment is over bytes, so an encoding a decoder
+  tolerates but an encoder would never produce is a second spelling of one manifest
+  and therefore a second commitment root. Duplicate map keys are unrepresentable
+  rather than resolved, because last-wins and first-wins are both defensible and
+  that is exactly how two conforming readers end up disagreeing about a file they
+  both accepted.
+- **The chunk index stores chaining values, not hashes.** `blake3::hazmat` is
+  marked hazardous material for good reason: get the tree shape wrong and you get
+  a plausible-looking value that never matches `blake3::hash`. The invariant is
+  checked against `blake3::hash` directly, over 48 input shapes, in
+  `tests/chunk.rs::index_reduces_to_the_blake3_hash`. Do not change the merge
+  without re-running it.
+- **A test filler with a short period hides real bugs.** The chunk-swap test
+  originally used `(i * 31) as u8`, which repeats every 256 bytes — so every
+  4096-byte chunk was byte-identical and a swapped chunk passed because it
+  genuinely was the same bytes. The filler is now a BLAKE3 XOF stream.
+- **The writer parses its own output** before returning it. Cheap, and it means a
+  writer that could emit a file its own reader rejects does not exist.
+- **`fuzz/` is outside the workspace** because `cargo-fuzz` needs nightly and the
+  toolchain pin is load-bearing. `tests/fuzzmirror.rs` compiles and runs each
+  target's body on the pinned toolchain, so an API change cannot silently rot the
+  fuzz targets between nightly CI runs.
 - Rust was installed with rustup `--no-modify-path`; `~/.cargo/bin` has since been
   appended to `~/.zshrc`.
 
@@ -196,7 +284,12 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 54 tests
+cargo test                    # 124 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
+
+cargo run --example demo -- /tmp/demo.ctf
+cargo run --bin ctf -- inspect --verify --hex /tmp/demo.ctf
+
+cargo +nightly fuzz run bundle          # needs cargo-fuzz; not the pinned toolchain
 ```

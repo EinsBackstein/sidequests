@@ -1,0 +1,19 @@
+[package]
+name = "ctf-cli"
+version = "0.3.0"
+description = "The `ctf` command-line tool for the .ctf challenge transport format"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ctf"
+path = "src/main.rs"
+
+# No argument-parsing crate yet. `clap` is the right answer at the roadmap's eight
+# subcommands with flags and completions; it is not the right answer at one
+# subcommand and two flags, which `std::env::args` handles in fifteen lines.
+[dependencies]
+ctf-format = { path = "../ctf-format" }
+
+[lints]
+workspace = true
