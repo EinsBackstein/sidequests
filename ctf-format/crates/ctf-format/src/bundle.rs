@@ -67,7 +67,7 @@ impl<'a> Bundle<'a> {
         let (table_start, table_end) = header.table_range()?;
         let table_bytes = slice(file, table_start, table_end, "section table")?;
         let sections = parse_table(table_bytes, header.section_table_count)?;
-        validate_layout(&sections, &header, file_len)?;
+        validate_layout(&sections, &header, file)?;
 
         // 5. Footer: total_len equality, no trailing bytes, no slack.
         let footer = Footer::parse(file, header.footer_off)?;

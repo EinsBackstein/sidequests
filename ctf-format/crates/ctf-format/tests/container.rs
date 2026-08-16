@@ -37,6 +37,15 @@ fn good_header() -> Header {
     }
 }
 
+/// A file body of the right length whose padding is all zero, for the layout tests.
+///
+/// `validate_layout` enforces T8, so it needs the bytes and not just a length. These
+/// fixtures are about overlap, bounds and uniqueness, so they want padding that is
+/// trivially valid; `t8_*` below is where the padding rule itself is exercised.
+fn zeros() -> Vec<u8> {
+    vec![0u8; FILE_LEN as usize]
+}
+
 fn good_manifest_record() -> SectionRecord {
     SectionRecord {
         kind: SectionKind::Manifest,
@@ -722,7 +731,7 @@ fn table_rejects_truncated() {
 #[test]
 fn layout_accepts_minimal_bundle() {
     let recs = [good_manifest_record()];
-    section::validate_layout(&recs, &good_header(), FILE_LEN).unwrap();
+    section::validate_layout(&recs, &good_header(), &zeros()).unwrap();
 }
 
 #[test]
@@ -730,7 +739,7 @@ fn layout_rejects_missing_manifest() {
     let mut r = good_manifest_record();
     r.kind = SectionKind::Artifact;
     assert!(matches!(
-        section::validate_layout(&[r], &good_header(), FILE_LEN),
+        section::validate_layout(&[r], &good_header(), &zeros()),
         Err(Error::ManifestCount { got: 0 })
     ));
 }
@@ -745,7 +754,7 @@ fn layout_rejects_two_manifests() {
     h.section_table_count = 2;
     h.footer_off = TABLE_OFF + 2 * SECTION_RECORD_LEN as u64;
     assert!(matches!(
-        section::validate_layout(&[a, b], &h, FILE_LEN),
+        section::validate_layout(&[a, b], &h, &zeros()),
         Err(Error::ManifestCount { got: 2 })
     ));
 }
@@ -761,7 +770,7 @@ fn layout_rejects_duplicate_name_id() {
     h.section_table_count = 2;
     h.footer_off = TABLE_OFF + 2 * SECTION_RECORD_LEN as u64;
     assert!(matches!(
-        section::validate_layout(&[a, b], &h, FILE_LEN),
+        section::validate_layout(&[a, b], &h, &zeros()),
         Err(Error::DuplicateSectionName { name_id: 0 })
     ));
 }
@@ -781,7 +790,7 @@ fn layout_rejects_overlapping_payloads() {
     h.section_table_count = 2;
     h.footer_off = TABLE_OFF + 2 * SECTION_RECORD_LEN as u64;
     assert!(matches!(
-        section::validate_layout(&[a, b], &h, FILE_LEN),
+        section::validate_layout(&[a, b], &h, &zeros()),
         Err(Error::OverlappingSections { .. })
     ));
 }
@@ -797,7 +806,7 @@ fn layout_rejects_payload_overlapping_table() {
     r.len_stored = SECTION_RECORD_LEN as u64;
     r.len_plain = SECTION_RECORD_LEN as u64;
     assert!(matches!(
-        section::validate_layout(&[r], &good_header(), FILE_LEN),
+        section::validate_layout(&[r], &good_header(), &zeros()),
         Err(Error::OverlapsSectionTable { name_id: 0 })
     ));
 }
@@ -817,7 +826,7 @@ fn layout_checks_unknown_optional_sections_like_any_other() {
     h.section_table_count = 2;
     h.footer_off = TABLE_OFF + 2 * SECTION_RECORD_LEN as u64;
     assert!(matches!(
-        section::validate_layout(&[manifest, future], &h, FILE_LEN),
+        section::validate_layout(&[manifest, future], &h, &zeros()),
         Err(Error::OverlapsSectionTable { name_id: 1 })
     ));
 }
@@ -828,7 +837,7 @@ fn layout_rejects_payload_past_footer() {
     r.len_stored = 8192;
     r.len_plain = 8192;
     assert!(matches!(
-        section::validate_layout(&[r], &good_header(), FILE_LEN),
+        section::validate_layout(&[r], &good_header(), &zeros()),
         Err(Error::ExceedsFile { .. })
     ));
 }
@@ -852,5 +861,5 @@ fn layout_accepts_external_section_regardless_of_size() {
     let mut h = good_header();
     h.section_table_count = 2;
     h.footer_off = TABLE_OFF + 2 * SECTION_RECORD_LEN as u64;
-    section::validate_layout(&[manifest, huge], &h, FILE_LEN).unwrap();
+    section::validate_layout(&[manifest, huge], &h, &zeros()).unwrap();
 }

@@ -18,6 +18,12 @@ pub enum Error {
     /// A reserved field was non-zero. Reserved means reserved: tolerating
     /// garbage here forecloses every future use of the field.
     ReservedNotZero { at: &'static str },
+    /// A byte between two structures was non-zero (T8). Padding is covered by no
+    /// commitment, so a non-zero byte there is a channel that survives signing.
+    ///
+    /// `at` is a file offset — a number, not attacker-controlled text — so naming it
+    /// does not turn this error into an oracle for section content.
+    PaddingNotZero { at: u64 },
     /// A flag bit with no assigned meaning was set. Unknown keys are rejected,
     /// never ignored (design §10).
     UnknownFlagBits { at: &'static str, bits: u16 },
@@ -125,6 +131,9 @@ impl fmt::Display for Error {
                 write!(f, "unsupported format version {major}.{minor}")
             }
             Self::ReservedNotZero { at } => write!(f, "reserved field not zero at {at}"),
+            Self::PaddingNotZero { at } => {
+                write!(f, "padding byte at offset {at} is not zero")
+            }
             Self::UnknownFlagBits { at, bits } => {
                 write!(f, "unknown flag bits {bits:#06x} at {at}")
             }

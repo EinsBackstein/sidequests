@@ -100,7 +100,13 @@ nothing as verified, having no verification. And it does not *mis-locate* the
 chunk index: 0.2 §5.5 forbids dereferencing `chunk_index_off` at all, so the
 region is never read. The 0.2 reader fails to **account** for bytes it never
 touches, which is under-checking, not misreading. A valid 0.3 file also satisfies
-every 0.2 rule, because R19, R20, T6 and T7 only narrow.
+every 0.2 rule, because R19, R20, R21, T6, T7 and T8 only narrow.
+
+R21 and T8 differ from the others in that they constrain structures 0.2 already
+defined, rather than ones it declared unspecified. They ride the same
+`CONTAINER_V1` bit instead of taking one of their own because both were folded in
+before 0.3 was ever tagged, so no file they would invalidate has ever existed —
+spec §15's requirement exists to protect published files, and there were none.
 
 The hazard is entirely on the **rewriter** side, and it is severe: a 0.2 tool
 re-emitting a 0.3 file drops the footer, the manifest, and every chunk index,
@@ -208,6 +214,49 @@ alignment-independent little-endian reads regardless — so the rule would buy
 nothing and cost a compatibility break. Recorded in the spec rather than left as an
 apparent oversight.
 
+### Changed — T8: nothing in a bundle is uncommitted
+
+Padding between structures was covered by no commitment. The root of §8.3 spans the
+header and the section table; each section's `root` spans its own plaintext; nothing
+spanned the gaps. A padding byte could therefore be changed in place without moving
+the root and without moving `total_len` — two of the four fields in the §8.4
+signature transcript — so **one signature would have verified two different files**.
+That is signature malleability and a covert channel, and no amount of phase 2 crypto
+would have closed it: the transcript is already correct, and those bytes were simply
+never in scope of anything. 43% of the demo bundle and 93% of the minimal bundle were
+mutable this way.
+
+**T8** now requires every byte in `[64, footer_off)` claimed by no region to be zero,
+and a reader rejects rather than normalizes — silently zeroing padding would change a
+file a signature was computed over. New `Error::PaddingNotZero { at }` names the
+offset; an offset is a number rather than attacker-controlled text, so it does not
+turn the error into an oracle.
+
+The spec had been arguing against itself. F5 forbids sixteen bytes of footer slack as
+"bytes belonging to no structure and covered by no commitment", and §3 forbids bytes
+after the footer as "the ambiguity behind a long line of archive-format
+vulnerabilities" — then §3 permitted arbitrary padding between structures with only a
+writer's SHOULD and no reader-side rule at all. The same argument won twice and lost
+once, in one document. §3 is now a MUST, with the contradiction named rather than
+quietly repaired.
+
+Extending the commitment root to cover the padding was considered and rejected: §15
+states the root definition is unchangeable below a major version, and requiring zero
+buys the same guarantee — one canonical byte string per bundle — without touching it.
+
+Enforcement reuses the sorted, non-overlapping range set `validate_layout` already
+builds, so it is a walk over the gaps rather than new machinery. `validate_layout`
+takes `file: &[u8]` in place of `file_len: u64`, which is one argument fewer: the
+check needs the bytes, and the length was always `file.len()`. The cost is a pass
+over unclaimed bytes, which alignment bounds at under 4096 per payload for a
+conforming bundle.
+
+Golden vectors did not move. `write_bundle` already zero-filled, and
+`minimal_bundle_golden_vector` already asserted `file[64..4096]` was zero with the
+message "padding must be zero" — the property was pinned by a test before it was
+required by a rule. §11 now states that the vector's padding is normative rather than
+incidental.
+
 ### Changed — the serving boundary enforces §10
 
 `Bundle::section_bytes` is where bytes leave the crate, and it was enforcing fewer
@@ -286,24 +335,6 @@ narrowings were folded in rather than deferred to a version with a feature bit o
 its own. The full reasoning, evidence, blast radius, and fix for each lives in
 [`TODO.md`](TODO.md); this section states what a reader of this release needs to
 know before depending on it.
-
-- **A signed bundle will be malleable.** Padding between structures is covered by
-  no commitment: the root is over the header and section table, each section's root
-  is over its own plaintext, and nothing covers the gaps. Mutating a padding byte in
-  place leaves the commitment root *and* `total_len` unchanged, so the phase 2
-  signature transcript is unchanged too — one signature would verify two different
-  files. Confirmed by execution against the demo bundle: two byte-different files,
-  identical root, `ctf inspect --verify` exits 0 on both. 43% of the demo bundle and
-  93% of the minimal golden bundle are mutable this way. **Phase 2 cannot fix this**
-  — the transcript is already correct; the bytes were never in scope of anything —
-  so it has to close in the container. The spec is self-contradictory here, having
-  used exactly this argument to forbid sixteen bytes of footer slack (F5) and bytes
-  after the footer (§3) while permitting arbitrary padding between structures with
-  only a SHOULD. The fix is to promote that SHOULD to a MUST and reject non-zero
-  bytes in unclaimed regions, which `validate_layout` already has the range set to
-  do. It narrows what is legal, so it wants a decision before the first tagged
-  release rather than after.
-Lower severity, all confirmed:
 
 - **`verify_chunk` is callable without `verify_root`**, ordered by a doc comment
   rather than by a type, though C6 is normative. `ChunkIndex` also does not carry the

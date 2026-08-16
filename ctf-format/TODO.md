@@ -5,12 +5,12 @@
 **Read first:** [`HANDOFF.md`](HANDOFF.md) for what the project is, then this file for
 what is outstanding.
 
-**Progress:** H1, B1, B2, B3 done. B4 and the bidi work outstanding, then Tier 2 and
-Tier 3. Checkboxes below are accurate; each closed item keeps its original text and
+**Progress:** Tier 1 complete — H1, B1, B2, B3, B4 all done. The bidi work is next,
+then the rest of Tier 2 and Tier 3. Checkboxes below are accurate; each closed item keeps its original text and
 gains a note saying what actually shipped, because in two cases what shipped is not
 what the entry proposed.
 
-Current tree: `cargo test` 132 pass (was 124 at `9f50d84`), `cargo clippy
+Current tree: `cargo test` 135 pass (was 124 at `9f50d84`), `cargo clippy
 --all-targets` 0 warnings, `cargo fmt --check` clean.
 
 ---
@@ -220,7 +220,32 @@ which also makes its own safety comment true for the first time.
 - **Add:** a test asserting `chunk_cv(&[0], 1, 1)` returns `Err(BadChunkSize)`, and
   the same through `ChunkIndex::verify_chunk`.
 
-### [ ] B4 — inter-structure padding is uncommitted, so a signed bundle is malleable
+### [x] B4 — inter-structure padding is uncommitted, so a signed bundle is malleable
+
+**Done 2026-08-16.** Rule **T8** added: every byte in `[HEADER_LEN, footer_off)` that
+no region claims MUST be zero, enforced in `validate_layout` by walking the gaps
+between the sorted ranges it already builds. New `Error::PaddingNotZero { at }`,
+carrying a file offset — a number, not attacker text, so the no-oracle rule holds.
+
+`validate_layout` now takes `file: &[u8]` instead of `file_len: u64`. The check needs
+the bytes, and the length was always `file.len()`, so the signature lost an argument
+rather than gaining one.
+
+Verified against the reproduction below: the tampered file is now rejected with
+`padding byte at offset 3000 is not zero` and `ctf inspect --verify` exits 1, while
+the untouched demo bundle still exits 0. The test asserts the commitment root is
+**identical** before and after, so a future failure reporting `RootMismatch` instead
+would mean something else moved and T8 is no longer the rule doing the work.
+
+Golden vectors did not move — `write_bundle` already zero-filled, and
+`minimal_bundle_golden_vector` already asserted `file[64..4096]` was zero with the
+message "padding must be zero". The property was pinned by a test before it was
+required by a rule.
+
+Spec: §3's SHOULD became a MUST with the contradiction named, §6 gained T8 and its
+rationale, §10 goes to T1–T8, §11 states the golden vector's padding is normative,
+§17 records T8 riding `CONTAINER_V1`.
+
 
 - **Source:** second audit pass, 2026-08-16. Not found by any of the six reviewers.
 - **Status:** confirmed **by execution** against `9f50d84`.

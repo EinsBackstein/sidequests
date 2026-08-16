@@ -215,7 +215,7 @@ fn a_0_2_reader_can_read_a_0_3_file_but_not_rewrite_it() {
     let (start, end) = h.table_range().unwrap();
     let records =
         section::parse_table(&file[start as usize..end as usize], h.section_table_count).unwrap();
-    section::validate_layout(&records, &h, file.len() as u64).unwrap();
+    section::validate_layout(&records, &h, &file).unwrap();
 }
 
 /// **Backward compatibility.** A 0.2 file has no footer, no manifest schema, and a
@@ -233,7 +233,7 @@ fn a_0_3_reader_reads_a_0_2_file_and_names_what_is_missing() {
     let (start, end) = h.table_range().unwrap();
     let records =
         section::parse_table(&file[start as usize..end as usize], h.section_table_count).unwrap();
-    section::validate_layout(&records, &h, file.len() as u64).unwrap();
+    section::validate_layout(&records, &h, &file).unwrap();
 
     // Only the whole-container read needs a container. Note the direction: the bit
     // is one this build implements and the *file* lacks it, so this is
@@ -1031,4 +1031,98 @@ fn phase_1_cannot_write_a_kind_that_must_be_sealed() {
         result.is_err(),
         "a writer with no encryption must refuse to claim a section is sealed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T8: nothing in the file is uncommitted
+// ---------------------------------------------------------------------------
+
+/// The bug this closes is signature malleability, so the test states it that way
+/// rather than as "a byte was non-zero".
+///
+/// The commitment root spans the header and section table; each section's `root`
+/// spans its own plaintext. Nothing spanned the gaps. A padding byte could therefore
+/// be changed in place without moving the root and without moving `total_len` —
+/// which are two of the four fields in the §8.4 signature transcript — so one phase 2
+/// signature would have verified two different files. Phase 2 cannot fix that: the
+/// transcript is already correct, and these bytes were never in scope of anything.
+///
+/// Note what is asserted: the root is *identical* before and after, and the file is
+/// rejected anyway. If this ever fails with `RootMismatch` instead, something else
+/// changed and T8 is not the rule doing the work.
+#[test]
+fn t8_padding_is_committed_by_being_required_to_be_zero() {
+    let good = minimal_bundle();
+    let root_before = Bundle::parse(&good).unwrap().footer.root;
+
+    // Offset 3000 is inside the gap between the header and the manifest payload —
+    // 4032 bytes of alignment padding that R12 forces and nothing claimed.
+    let mut tampered = good.clone();
+    tampered[3000] = 0x41;
+
+    assert_eq!(tampered.len(), good.len(), "total_len is unchanged");
+    assert_eq!(
+        &tampered[..64],
+        &good[..64],
+        "the header is unchanged, so the commitment root cannot move"
+    );
+    assert_eq!(
+        &tampered[4288..],
+        &good[4288..],
+        "the footer, and therefore the stored root, is byte-identical"
+    );
+
+    match Bundle::parse(&tampered) {
+        Err(Error::PaddingNotZero { at }) => assert_eq!(at, 3000),
+        other => panic!("expected PaddingNotZero at 3000, got {other:?}"),
+    }
+
+    // The root really was unchanged: the file the old reader accepted committed to
+    // exactly the same 32 bytes as the file it should have accepted.
+    let root_after = ctf_format::footer::commitment_root(&tampered[..64], &tampered[4160..4288]);
+    assert_eq!(
+        root_before, root_after,
+        "T8, not the commitment, is what rejects this"
+    );
+}
+
+/// Every gap, not just the big one. The two-byte gap between the manifest payload and
+/// the section table is the one a bounds-only check would miss.
+#[test]
+fn t8_covers_every_gap_between_structures() {
+    let good = minimal_bundle();
+    // 64..4096 head padding; 4158..4160 aligning the table; both unclaimed.
+    for off in [64usize, 3000, 4095, 4158, 4159] {
+        let mut tampered = good.clone();
+        tampered[off] = 0xff;
+        match Bundle::parse(&tampered) {
+            Err(Error::PaddingNotZero { at }) => assert_eq!(at as usize, off),
+            other => panic!("offset {off} must be rejected as padding, got {other:?}"),
+        }
+    }
+}
+
+/// T8 must not reject a byte that a structure legitimately owns, or every real
+/// bundle would fail. The payload, the table and the footer are all claimed regions.
+#[test]
+fn t8_does_not_reach_into_claimed_regions() {
+    let good = minimal_bundle();
+    // A byte inside the manifest payload is caught by that section's root, and a byte
+    // inside the table by the commitment — never by T8.
+    let mut in_payload = good.clone();
+    in_payload[4100] ^= 1;
+    assert!(matches!(
+        Bundle::parse(&in_payload),
+        Err(Error::RootMismatch { .. })
+    ));
+
+    let mut in_table = good.clone();
+    in_table[4200] ^= 1;
+    assert!(!matches!(
+        Bundle::parse(&in_table),
+        Err(Error::PaddingNotZero { .. })
+    ));
+
+    // And the untouched bundle still opens.
+    assert!(Bundle::parse(&good).is_ok());
 }

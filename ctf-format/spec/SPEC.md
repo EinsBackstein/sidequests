@@ -146,9 +146,18 @@ meaning**: it MUST NOT be used to identify a section, and in particular a
 section's index in the table MUST NOT be used as its identity. `name_id` is the
 identity (§5.1).
 
-The file MAY contain bytes belonging to no structure (padding). A reader MUST
-NOT interpret them, and a writer SHOULD zero them. Padding is permitted only
+The file MAY contain bytes belonging to no structure (padding). A writer MUST zero
+them and a reader MUST reject any that is not zero (T8). Padding is permitted only
 *between* structures; the footer itself admits none (F5).
+
+Earlier drafts made zeroing a writer's SHOULD with no reader-side rule, which
+contradicted the two paragraphs around it: F5 forbids footer slack, and the next
+paragraph forbids trailing data, both because bytes belonging to no structure and
+covered by no commitment are an ambiguity an attacker can use. Padding is the same
+bytes with the same property. Since the commitment root covers the header and the
+section table only, and `total_len` is a length rather than a digest, a mutated
+padding byte moves nothing in the signature transcript of §8.4 — one signature over
+two different files. T8 closes it by making the byte string of a bundle canonical.
 
 **The file ends at the footer.** A writer MUST NOT emit any byte after the
 footer, and the footer's `total_len` MUST equal the total length of the file
@@ -670,6 +679,7 @@ the file if any holds.
 | T5 | A non-empty inline payload range overlaps the section table's own range, `[section_table_off, section_table_off + section_table_count × 128)`. |
 | T6 | A chunk index range extends beyond `footer_off`, or its end overflows `u64`. |
 | T7 | A chunk index range overlaps another chunk index range, any non-empty inline payload range, or the section table. |
+| T8 | Any byte in `[64, footer_off)` that lies in no inline payload range, no chunk index range, and not in the section table's own range is non-zero. |
 
 Definitions and notes, all normative:
 
@@ -688,6 +698,24 @@ Definitions and notes, all normative:
   Ranges that merely touch (`a₂ = b₁`) do not overlap.
 - A section's chunk index MUST NOT overlap that same section's payload. This is a
   case of T7, not an exception to it.
+- **Unclaimed bytes are padding, and T8 requires them to be zero.** The bytes
+  between structures belong to no region and are covered by no commitment: the root
+  of §8.3 spans the header and the section table, and each section's `root` spans
+  its own plaintext. Without T8 a padding byte could be changed in place without
+  moving the root and without moving `total_len`, which are two of the four fields
+  in the signature transcript of §8.4 — so a single signature would verify two
+  distinct files. Requiring zero makes the byte string of a bundle canonical, which
+  is the same guarantee, obtained without altering the root definition (§15 forbids
+  altering it below a major version).
+
+  This is the rule F5 and §3 already state for the footer and for trailing data,
+  applied to the one remaining place where bytes belonged to no structure. A reader
+  MUST reject rather than normalize: silently zeroing padding would change a file a
+  signature was computed over.
+
+  T8 costs a pass over the unclaimed bytes. Alignment bounds legitimate padding at
+  under 4096 bytes before each payload, so a conforming bundle pays almost nothing;
+  a file declaring a large gap pays in proportion to bytes it had to supply.
 - T3, T5, T6, and T7 together mean every payload and every chunk index lies
   wholly within `[64, footer_off)` and clear of the table and of each other. The
   lower bounds come from R12 and R17.
@@ -1109,7 +1137,7 @@ MAY NOT, because each depends on values the previous one validated.
    step 4.
 3. Record whether the file is rewritable (§4.4).
 4. Read `section_table_count × 128` bytes at `section_table_off` and apply
-   R1–R21 to every record; then apply T1–T7.
+   R1–R21 to every record; then apply T1–T8.
 5. Parse the footer and apply F1–F7 and F9.
 6. Recompute the commitment root per §8.3 and apply F8.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
@@ -1152,7 +1180,9 @@ Further requirements, all normative:
 
 The smallest thing that is a valid `.ctf`: an OSINT challenge with no artifacts,
 manifest only, unsigned. Total length **4344 bytes**. Every byte not shown below
-is zero padding between structures.
+is zero padding between structures, and that is normative rather than incidental:
+T8 requires it, so a reproduction of this vector with any non-zero padding byte is
+not a valid `.ctf` and its bytes will not match.
 
 ```text
 id       whos-that-bird
@@ -1433,4 +1463,4 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 |---|---|
 | 0.1 | Initial specification: header and section table frozen. |
 | 0.2 | Compatibility model (§2.3): `feat_incompat` and `feat_ro_compat` carved from header reserved space, `OPTIONAL` section flag, extension policy (§15), compatibility matrix (§16). Adds H14, R18; narrows R3 to `kind = 0` and R4 to bits above 3. Redefines `SEALED` by who cannot open a section. Names `name_id` the section's cryptographic identity. Fixes the commitment root, the signature transcript, the no-trailing-bytes rule, and record-over-manifest precedence. No field moved; the section-record golden vector is unchanged and the 0.1 header remains valid. |
-| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 does narrow a structure 0.2 defined, and rides the same `CONTAINER_V1` bit rather than taking one of its own: it was folded in before 0.3 was ever tagged, so no file it would invalidate has ever existed. §15's requirement protects published files, and there were none. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
+| 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |

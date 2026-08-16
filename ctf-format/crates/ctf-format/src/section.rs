@@ -611,7 +611,8 @@ pub fn parse_table(b: &[u8], count: u32) -> Result<Vec<SectionRecord>> {
 /// Overlap matters beyond tidiness: two sections sharing bytes is exactly the
 /// ambiguity that turns into a parser-differential exploit, where two readers
 /// disagree about what a bundle contains.
-pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64) -> Result<()> {
+pub fn validate_layout(records: &[SectionRecord], header: &Header, file: &[u8]) -> Result<()> {
+    let file_len = file.len() as u64;
     header.check_file_len(file_len)?;
     let (table_start, table_end) = header.table_range()?;
 
@@ -671,7 +672,78 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file_len: u64
             return Err(overlap_error(a.2, b.2));
         }
     }
+
+    check_padding(file, header, &ranges)
+}
+
+/// T8: every byte in `[HEADER_LEN, footer_off)` that no region claims MUST be zero.
+///
+/// **Why a MUST and not the SHOULD this started as.** The commitment root spans the
+/// header and the section table; each section's `root` spans its own plaintext.
+/// Nothing spans the gaps. So a padding byte can be changed in place without moving
+/// the root, without moving `total_len`, and therefore without invalidating the
+/// signature transcript of §8.4 — one signature would verify two different files.
+/// That is signature malleability and a covert channel, and no amount of phase 2
+/// crypto fixes it, because the transcript is already correct and these bytes were
+/// simply never in scope of anything.
+///
+/// The alternative was to extend the commitment root to cover the padding. Spec §15
+/// states the root definition is unchangeable without a major version, and requiring
+/// zero buys the same guarantee — one canonical byte string per bundle — without
+/// touching it.
+///
+/// This is also the rule the format already applied twice elsewhere and skipped
+/// here: F5 forbids footer slack, and §3 forbids bytes after the footer, both on the
+/// grounds that bytes belonging to no structure and covered by no commitment are the
+/// ambiguity behind a long line of archive-format vulnerabilities.
+///
+/// Cost, stated rather than discovered: this touches every unclaimed byte, so it is
+/// linear in the padding rather than in the structure count. Legitimate padding is
+/// bounded by alignment — at most 4095 bytes before each payload — so a real bundle
+/// pays almost nothing. A hostile file declaring one small section and a `footer_off`
+/// far away pays a scan proportional to a gap it had to supply the bytes for, over a
+/// file the caller has already mapped.
+///
+/// `ranges` must be sorted and already known not to overlap, which is exactly the
+/// state [`validate_layout`] leaves it in.
+fn check_padding(file: &[u8], header: &Header, ranges: &[(u64, u64, Region)]) -> Result<()> {
+    let mut cursor = u64::from(HEADER_LEN);
+    for &(start, end, _) in ranges {
+        if start > cursor {
+            check_zero(file, cursor, start)?;
+        }
+        // `max` rather than plain assignment: a zero-length payload is not in
+        // `ranges` at all, but nothing else guarantees the sort put a longer region
+        // before a shorter one starting at the same offset.
+        cursor = cursor.max(end);
+    }
+    if header.footer_off > cursor {
+        check_zero(file, cursor, header.footer_off)?;
+    }
     Ok(())
+}
+
+/// Every byte of `file[start..end]` must be zero, naming the offset of the first
+/// that is not.
+fn check_zero(file: &[u8], start: u64, end: u64) -> Result<()> {
+    let (Ok(s), Ok(e)) = (usize::try_from(start), usize::try_from(end)) else {
+        return Err(Error::ExceedsFile {
+            at: "padding",
+            end,
+            file_len: file.len() as u64,
+        });
+    };
+    let bytes = file.get(s..e).ok_or(Error::ExceedsFile {
+        at: "padding",
+        end,
+        file_len: file.len() as u64,
+    })?;
+    match bytes.iter().position(|&b| b != 0) {
+        Some(i) => Err(Error::PaddingNotZero {
+            at: start.saturating_add(i as u64),
+        }),
+        None => Ok(()),
+    }
 }
 
 fn overlap_error(a: Region, b: Region) -> Error {
