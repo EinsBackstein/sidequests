@@ -4,13 +4,14 @@ Cold-start context for whoever picks this up. Read this, then
 [`docs/FORMAT-DESIGN.md`](docs/FORMAT-DESIGN.md) (the spec source) and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) (what is built and what is next).
 
-> **Resuming mid-stream?** [`TODO.md`](TODO.md) holds the outstanding work from the
-> 0.3 review — **four** confirmed blockers, the reasoning behind each, one rejected
-> finding that must not be re-raised, and the open questions that must be answered
-> before the first tagged release. Start there.
+> **Resuming mid-stream?** [`TODO.md`](TODO.md) holds the state of the 0.3 review.
+> **Tier 1 is complete** — all four blockers fixed, plus H1, L1 and L8. Outstanding:
+> H2–H6 and L2–L7. It also carries one rejected finding that must not be re-raised,
+> and the reasoning behind every decision, including two cases where what shipped is
+> deliberately *not* what the review proposed.
 
-**Last updated:** 2026-08-16, at format version 0.3 (phase 1 complete and committed
-as `9f50d84`).
+**Last updated:** 2026-08-16, at format version 0.3 (phase 1 complete, Tier 1 of the
+review applied; `cargo test` 137 pass).
 
 ## Where this lives
 
@@ -129,7 +130,7 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 124 tests, 0 clippy warnings, one dependency
+parses them back before returning. 137 tests, 0 clippy warnings, one dependency
 (`blake3`), `unsafe_code = "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
@@ -182,12 +183,17 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**Tier 1 of [`TODO.md`](TODO.md) comes before all three.** B4 in particular: a
-signed bundle is currently malleable, because inter-structure padding is committed
-to by nothing and sits outside the signed transcript. Phase 2 cannot fix that — the
-transcript is already correct, and the bytes were simply never in scope of anything
-— so starting phase 2 first means building the signature layer on top of a hole it
-cannot close.
+**Tier 1 is done, so phase 2 is unblocked.** The one that had to land first was B4:
+inter-structure padding was committed to by nothing and sat outside the signed
+transcript, so one signature would have verified two different files. Phase 2 could
+not have fixed it — the transcript is already correct, and those bytes were never in
+scope of anything — which is why it closed in the container first. Rule T8 now
+requires unclaimed bytes to be zero.
+
+**Do not tag 0.3 without re-reading `TODO.md`'s open question 2.** R21, T8 and the
+`names` bidi rule were folded into 0.3 rather than given a feature bit of their own,
+on the grounds that nothing is published yet. A tag is the moment that stops being
+true.
 
 1. **Phase 2 crypto.** The footer's signature slots, the transcript, and
    `suite_id` are all fixed and testable already — `Footer::sig_input` produces the
@@ -277,6 +283,12 @@ serving-layer checks:
 
 - `SEALED` and `PLAYER_VISIBLE` are mutually exclusive — a sealed-yet-servable
   section cannot be expressed.
+- `SEALED` requires `enc ≠ 0` (R21) — a sealed-yet-*readable* section cannot be
+  expressed either. Consequence: with no encryption in phase 1, the writer cannot
+  emit a `solver`, `writeup`, or `progress` section at all. That is intended.
+- No byte of a bundle is uncommitted (T8): unclaimed bytes between structures MUST
+  be zero, so a padding byte cannot be changed without changing the file's identity.
+  Without it a phase 2 signature would cover two different files.
 - `solver`, `writeup`, `progress` **must** carry `SEALED`.
 - The manifest may carry none of `SEALED`, `PLAYER_VISIBLE`, `EXTERNAL`.
 - Section kind `0` is invalid, so a zero-filled record rejects rather than reading
