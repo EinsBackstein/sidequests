@@ -7,7 +7,7 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
-## [0.3.0] — 2026-08-13
+## [0.3.0] — 2026-08-16
 
 Phase 1 complete: the container is whole. A `.ctf` now carries a manifest, commits
 to itself, and can be verified incrementally at forensics scale. No field moved.
