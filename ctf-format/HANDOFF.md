@@ -5,11 +5,12 @@ Cold-start context for whoever picks this up. Read this, then
 [`docs/ROADMAP.md`](docs/ROADMAP.md) (what is built and what is next).
 
 > **Resuming mid-stream?** [`TODO.md`](TODO.md) holds the outstanding work from the
-> 0.3 review — three confirmed blockers, the reasoning behind each, one rejected
-> finding that must not be re-raised, and the fact that **all of phase 1 is still
-> uncommitted**. Start there.
+> 0.3 review — **four** confirmed blockers, the reasoning behind each, one rejected
+> finding that must not be re-raised, and the open questions that must be answered
+> before the first tagged release. Start there.
 
-**Last updated:** 2026-08-13, at format version 0.3 (phase 1 complete).
+**Last updated:** 2026-08-16, at format version 0.3 (phase 1 complete and committed
+as `9f50d84`).
 
 ## Where this lives
 
@@ -180,6 +181,13 @@ its first use. If you are about to reach for `feat_incompat` because a change fe
 big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
+
+**Tier 1 of [`TODO.md`](TODO.md) comes before all three.** B4 in particular: a
+signed bundle is currently malleable, because inter-structure padding is committed
+to by nothing and sits outside the signed transcript. Phase 2 cannot fix that — the
+transcript is already correct, and the bytes were simply never in scope of anything
+— so starting phase 2 first means building the signature layer on top of a hole it
+cannot close.
 
 1. **Phase 2 crypto.** The footer's signature slots, the transcript, and
    `suite_id` are all fixed and testable already — `Footer::sig_input` produces the

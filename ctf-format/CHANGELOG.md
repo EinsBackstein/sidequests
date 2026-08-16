@@ -201,6 +201,125 @@ apparent oversight.
   stream, and position binding is asserted separately by showing that two
   byte-identical chunks still get different chaining values.
 
+### Known issues
+
+Found by a six-role multi-agent review of this release (`docs/reviews/0.3-phase1/`,
+with the exact prompts committed alongside the reports) and a second verification
+pass on 2026-08-16. **None of it is fixed in 0.3.** The full reasoning, evidence,
+blast radius, and fix for each lives in [`TODO.md`](TODO.md); this section states
+what a reader of this release needs to know before depending on it.
+
+Four of them are the container failing to enforce an invariant this document
+already claims for it. That is the category, and it is why they are blockers rather
+than cleanups.
+
+- **A signed bundle will be malleable.** Padding between structures is covered by
+  no commitment: the root is over the header and section table, each section's root
+  is over its own plaintext, and nothing covers the gaps. Mutating a padding byte in
+  place leaves the commitment root *and* `total_len` unchanged, so the phase 2
+  signature transcript is unchanged too — one signature would verify two different
+  files. Confirmed by execution against the demo bundle: two byte-different files,
+  identical root, `ctf inspect --verify` exits 0 on both. 43% of the demo bundle and
+  93% of the minimal golden bundle are mutable this way. **Phase 2 cannot fix this**
+  — the transcript is already correct; the bytes were never in scope of anything —
+  so it has to close in the container. The spec is self-contradictory here, having
+  used exactly this argument to forbid sixteen bytes of footer slack (F5) and bytes
+  after the footer (§3) while permitting arbitrary padding between structures with
+  only a SHOULD. The fix is to promote that SHOULD to a MUST and reject non-zero
+  bytes in unclaimed regions, which `validate_layout` already has the range set to
+  do. It narrows what is legal, so it wants a decision before the first tagged
+  release rather than after.
+- **`SEALED` with `enc = 0` is representable, and its plaintext is served.** No rule
+  ties the flag to actual encryption, and `Bundle::verified_bytes` rejects only
+  `EXTERNAL` and non-plain records — never `SEALED`. Since §5.3 defines `SEALED` as
+  "the plaintext requires a key the platform does not hold during the event", a
+  section with `enc = 0` is making a claim the container does not back, and
+  `section_bytes` will hand the "sealed" writeup to any caller that trusts it. This
+  is precisely the class of bug 0.1 claimed to eliminate with "a sealed-yet-servable
+  section cannot be expressed". The fix has an honest consequence worth stating in
+  advance: with it, **phase 1 can no longer write a `solver`, `writeup`, or
+  `progress` section at all**, because R6 forces them `SEALED` and this release has
+  no encryption. Refusing is strictly better than emitting a fake-sealed section.
+- **`section_bytes` returns sections whose kind this reader does not implement**,
+  contrary to §10's normative "a reader MUST NOT serve, execute, decompress, or
+  decrypt a section whose kind it does not implement". `SectionKind::is_known()`
+  exists for exactly this check and has zero callers outside tests.
+- **`chunk_cv` panics on public input.** Its guard checks that `chunk_size` is a
+  power of two but never range-checks it, so `chunk_cv(&[0], 1, 1)` reaches
+  `blake3::hazmat::set_input_offset` and trips an assertion — despite the function's
+  own safety comment asserting the range check that is not there. `Bundle::parse` is
+  unaffected, because R14 range-checks first, but `chunk_cv` is `pub` and reachable
+  directly, and `fuzz/fuzz_targets/chunk_index.rs` already generates the input that
+  hits it. The crate's stated posture is that a panic on hostile input is
+  *unrepresentable* rather than merely absent; here it is merely absent, and clippy's
+  `panic` lint does not see into a dependency.
+
+Lower severity, all confirmed:
+
+- **`verify_inline_sections` reports success while silently skipping.** It
+  `continue`s past `EXTERNAL` and non-plain records and returns only the count it
+  did check, so `ctf inspect --verify` prints `verified N inline section(s)` and
+  exits 0 on a bundle whose inline encrypted payload was never verified. Reporting
+  content as verified when it was not is the one thing this project's own criticality
+  test says must never happen.
+- **`verify_chunk` is callable without `verify_root`**, ordered by a doc comment
+  rather than by a type, though C6 is normative. `ChunkIndex` also does not carry the
+  `chunk_size` it was verified for, requiring the caller to re-supply a value the
+  record already fixed. Both are the same footgun and close with the same change: a
+  `VerifiedChunkIndex` that `verify_root` returns and that owns the chunk size.
+- **`ChunkIndex::parse` accepts trailing bytes** past `count × 32` while `to_bytes`
+  drops them, so the documented byte-for-byte round trip does not hold.
+- **`ctf inspect` prints `category`, `description`, and mirror URLs unescaped**, so a
+  crafted bundle can inject terminal escape sequences and spoof the tool's output.
+  The challenge title on the adjacent line is already safe because it goes out
+  through `{:?}`; the fix is to make the others match. Separately, `check_name`
+  rejects ASCII control characters but not U+202E, whose UTF-8 bytes are all
+  `≥ 0x80`, so a section name can visually reorder the flags column.
+- **`ctf inspect` takes the last path argument silently** when given more than one.
+- **`ctf inspect` never prints a section's `root`**, so an operator fetching a 40 GB
+  external payload cannot get the expected digest from the tool that describes it.
+- **Manifest errors carry no index or `name_id`**, so "names entry is not text"
+  means hand-decoding CBOR on a 50-artifact bundle. An index is a number rather than
+  attacker-controlled text, so adding one does not violate the no-oracle rule.
+- **§9.2's chunk merge is not implementable from the spec alone.** It defers to the
+  BLAKE3 paper for parent-node compression without giving the key words, flag bytes,
+  block construction, counter, block length, or root finalization. Measured against
+  phase 8's actual acceptance criterion — a Go implementation reproducing §11's
+  vector from `spec/SPEC.md` alone — that is a gap, since most Go BLAKE3 libraries do
+  not expose subtree chaining values.
+- **§7.3 overstates what `crit` does.** It claims a typo is caught because "the value
+  the author meant to set is absent, which the schema check for that key catches",
+  which holds only for *required* keys. `runtime`, `generate`, `sealed`, `verify`,
+  `category`, and `description` are all optional, so a misspelled one is carried,
+  ignored, and unnoticed — the exact incident design §10 names. `crit` provides
+  reader forward compatibility, not typo detection; typo detection is `ctf pack`'s
+  job and belongs in phase 3.
+- **§8.2 cites "R1" for hybrid signing**, colliding with *record rule* R1. It means
+  design requirement R1 and should cite F4. §8.2 also says key distribution "is
+  specified with the suite registry (§14)" while §14 says the registry is
+  unspecified.
+- **Normative rules with no dedicated test**: R17, R20, T7, C7, M2–M6, M8, M11–M12,
+  M14–M18, M20. 124 tests pass, so these can regress silently. Some existing
+  rejection tests may also be vacuous, tripping an earlier check than the rule they
+  name — the trap `HANDOFF.md` already warns about.
+- **The `section_table` fuzz target never calls `validate_layout`**, so T1–T7 are
+  entirely unfuzzed despite the target's doc claiming that coverage.
+- **`Manifest::validate_against` is O(records × external entries)**, which at the
+  4096-record cap is a lot of comparisons before a rejection.
+
+Carried forward from earlier releases and still true: **no cryptography beyond
+BLAKE3**, so this crate is not an authentication boundary; the byte layout is not
+frozen while the major version is `0`; ML-DSA remains the least mature primitive in
+the planned stack; the GPL-3 licence choice still sits awkwardly with design §13's
+call for an independent second implementation; and `.ctf` still collides with
+Compact C Type Format on extension though not on magic.
+
+One review finding was **rejected and must not be re-raised**: the claim that §7.1's
+M1g bytewise map-key ordering contradicts RFC 8949. It does not. RFC 8949 §4.2.1
+requires bytewise lexicographic ordering of the encoded keys, which is what the spec
+and `cbor.rs` do; §4.2.3 "Length-First Map Key Ordering" is the RFC 7049 compat
+variant, offered as an alternative. The reviewer attributed §4.2.3's rule to §4.2.1.
+
 ## [0.2.0] — 2026-08-12
 
 Two themes: the format becomes extensible without becoming permissive, and a

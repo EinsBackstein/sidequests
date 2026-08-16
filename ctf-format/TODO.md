@@ -1,6 +1,7 @@
 # TODO — post-review work on 0.3
 
 **Created:** 2026-08-13, immediately after the phase 1 / format 0.3 multi-agent review.
+**Updated:** 2026-08-16 — phase 1 committed, second audit pass added B4 and L8.
 **Read first:** [`HANDOFF.md`](HANDOFF.md) for what the project is, then this file for
 what is outstanding.
 
@@ -12,22 +13,19 @@ clean.
 
 ## ⚠ Read before anything else
 
-**All of phase 1 is uncommitted.** `git log` still ends at `ec98681` (the 0.2
-release). Everything below — the manifest, footer, chunk index, `Bundle`, the CLI
-crate, the fuzz targets, the 0.3 spec rewrite — exists only in the working tree.
+**Phase 1 is committed** as `9f50d84`, unchanged from the tree the reviewers read.
+That was deliberate: the fixes below land as a separate, reviewable diff instead of
+being invisible inside the feature commit. `git log` now runs
+`ec98681` (0.2) → `9f50d84` (0.3, phase 1) → this file's documentation commit.
 
-```
- M ctf-format/{CHANGELOG,HANDOFF}.md  ctf-format/spec/SPEC.md  docs/ROADMAP.md
- M crates/ctf-format/src/{error,lib,section}.rs  tests/container.rs
- M Cargo.toml  Cargo.lock  .gitignore
-?? crates/ctf-format/src/{bundle,cbor,chunk,footer,manifest}.rs
-?? crates/ctf-format/tests/{bundle,cbor,chunk,fuzzmirror,mutation}.rs
-?? crates/ctf-cli/  crates/ctf-format/examples/  fuzz/  docs/reviews/  .mcp.json
-```
+So the baseline for every "blast radius" note below is exactly `9f50d84`. If
+`cargo test` does not report 124 passing before you start, something else moved
+first and the measurements are stale.
 
-Decide whether to commit 0.3 as-is first, or fold the Tier 1 fixes in before the
-commit. **Recommendation: commit 0.3 as-is first**, so the review findings land as
-a separate, reviewable diff rather than being invisible inside the feature commit.
+**Four blockers, not three.** The original review found B1–B3. A second audit pass
+on 2026-08-16 confirmed all three independently — B3 *by execution* — and found
+**B4**, which is the most consequential of the four because it survives phase 2 by
+construction. Read B4 before planning any crypto work.
 
 ---
 
@@ -64,11 +62,41 @@ landed on `Bundle::verified_bytes` / `verify_inline_sections`. That is the servi
 boundary, and it enforces fewer of its own spec rules than anything else in the
 crate. Treat it as the weakest surface until Tier 1 is done.
 
+## The second pass, 2026-08-16
+
+A single reviewer re-read the committed tree with two goals: verify the six
+reviewers' claims rather than relay them, and look where six lanes of review had
+*collectively* not looked. Method and result, so the next pass can be aimed rather
+than repeated:
+
+- **B1 and B2 confirmed by reading**, at the sites the reports name.
+- **B3 confirmed by execution**, not by reading — a scratch test calling
+  `chunk_cv(&[0], 1, 1)` reproduces
+  `assertion left == right failed: offset (1) must be a chunk boundary` verbatim
+  from `blake3-1.8.6/src/hazmat.rs:232`.
+- **B4 found**, by asking a question none of the six roles owned: *which bytes of a
+  valid file does nothing commit to?* Each reviewer checked the structures; nobody
+  checked the space between them.
+- **L6 confirmed** at `chunk.rs:200` (`if b.len() < need`, so trailing bytes pass).
+- **L8, and the L1 sharpening**, from reading `crates/ctf-cli/src/main.rs` end to
+  end. The CLI got the least attention of any file — one reviewer, two findings —
+  because it is the newest and least normative part of the tree. It is also the
+  only part an operator ever looks at.
+
+**The lesson worth carrying to the next pass:** the six prompts partition the work
+by *role* (security, correctness, quality, spec, conformance, challenge-dev), and a
+role-partitioned review has seams. B4 lives in the seam between "security" (which
+checked the crypto constructions) and "spec conformance" (which checked the rules as
+written) — it is a gap in what the spec *says*, so conformance could not see it, and
+it is not a flaw in any construction, so security did not look. When re-running the
+reviewers, add a seventh prompt that partitions by *artifact* instead: hand it the
+byte layout and ask what is not covered by anything.
+
 ---
 
 ## Tier 1 — blockers
 
-These three are the format failing to enforce its own stated invariants. Do these
+These four are the format failing to enforce its own stated invariants. Do these
 before phase 2 touches anything.
 
 ### [ ] B1 — `SEALED` with `enc = 0` is representable, and its plaintext is served
@@ -151,6 +179,80 @@ before phase 2 touches anything.
 - **Add:** a test asserting `chunk_cv(&[0], 1, 1)` returns `Err(BadChunkSize)`, and
   the same through `ChunkIndex::verify_chunk`.
 
+### [ ] B4 — inter-structure padding is uncommitted, so a signed bundle is malleable
+
+- **Source:** second audit pass, 2026-08-16. Not found by any of the six reviewers.
+- **Status:** confirmed **by execution** against `9f50d84`.
+- **Where:** `spec/SPEC.md` §3 (the padding paragraph), and the absence of any check
+  in `crates/ctf-format/src/section.rs::validate_layout` /
+  `crates/ctf-format/src/bundle.rs::parse`.
+
+**Reproduction**, start to finish:
+
+```bash
+cd ctf-format
+cargo run --example demo -- /tmp/demo.ctf     # 18328 bytes
+python3 - <<'PY'
+d = bytearray(open('/tmp/demo.ctf', 'rb').read())
+d[3000] = 0x41   # padding between the section table and the first payload
+d[5000] = 0x42   # padding between the manifest and notes.md
+open('/tmp/tampered.ctf', 'wb').write(bytes(d))
+PY
+cargo run --bin ctf -- inspect --verify /tmp/tampered.ctf
+```
+
+Observed: byte-different file, same length, **identical commitment root**
+`ca81744bdca2d76bb566b47538d716893de7b439d2c0124fb7eeab630178f9ed`,
+`verified 2 inline section(s) against their roots`, **exit 0**.
+
+- **Why it matters, and why it is a blocker rather than a tidiness complaint:** the
+  signed transcript is `SIG_LABEL ‖ suite_id ‖ root ‖ total_len`. Padding appears in
+  none of the four, and mutating it in place leaves `total_len` unchanged. So **one
+  phase 2 signature verifies both files.** This is signature malleability and a
+  covert channel, and phase 2 cannot fix it — the transcript is already fixed and
+  correct; the gap is that the bytes were never in scope of anything. It has to be
+  closed in the container, in phase 1.
+- **The spec contradicts itself here**, and that is the tell. §8 F5 forbids *sixteen
+  bytes* of footer slack on the grounds that padding would be "bytes belonging to no
+  structure and covered by no commitment." §3's trailing-data paragraph forbids
+  bytes after the footer as "the ambiguity behind a long line of archive-format
+  vulnerabilities." Then §3 permits arbitrary padding *between* structures with only
+  *"a writer SHOULD zero them"* and no reader-side rule at all. The same argument
+  wins twice and loses once, in one document.
+- **Scale:** demo bundle, 7862 of 18328 bytes (43%) freely mutable. Minimal golden
+  bundle, 4032 of 4344 (93%) — spec §11 says outright that "every byte not shown
+  below is zero padding between structures."
+- **Fix:** promote SHOULD to MUST. A reader rejects any non-zero byte in
+  `[HEADER_LEN, footer_off)` that no region claims. **The machinery already exists**:
+  `validate_layout` builds `ranges: Vec<(u64, u64, Region)>` and sorts it, so this is
+  a walk over the gaps between adjacent entries plus the head and tail gaps — no new
+  structure, no new field, no format break. Add rule **T8** and a new
+  `Error::PaddingNotZero { at: u64 }` carrying the offset (a number, not attacker
+  text, so the no-oracle rule holds).
+- **Cost to weigh:** it makes `Bundle::parse` touch every padding byte, which on a
+  bundle whose payloads are inline is a scan proportional to file size rather than to
+  structure count. Bounded by `footer_off` and skippable for a 40 GB external-only
+  bundle, which has almost no inline padding by construction. Take the scan; the
+  alternative is an unauthenticated region inside a signed file.
+- **Alternative considered and rejected:** extending the commitment root to cover
+  the padding. That changes the root definition, which spec §15 states outright is
+  unchangeable without a major version, no feature bit sufficient. Rejecting non-zero
+  padding gets the same guarantee — one canonical byte string per bundle — without
+  touching the root.
+- **Blast radius:** none expected. `write_bundle` zero-fills, so every file this
+  crate has ever produced already conforms, including both golden vectors. Confirm
+  by re-running `tests/bundle.rs::minimal_bundle_golden_vector` — it must **not**
+  move. If it does, the writer is emitting non-zero padding and that is a separate
+  bug.
+- **Supersedes** the "4096-byte alignment tax" entry under *Deferred* below, which
+  treated padding purely as a file-size question and never asked what commits to it.
+- **Also update:** spec §3 (the padding paragraph, SHOULD → MUST), §6 rule table
+  (add T8), §11 (state that the golden vector's padding is normative, not
+  incidental), §17 version history, `CHANGELOG.md`.
+- **Decide with question 2 below:** like R21, this narrows what is legal. Same
+  answer, same reasoning — fold it into 0.3 before the first tagged release, while
+  nothing is in the wild to invalidate.
+
 ---
 
 ## Tier 2 — high value, not blocking
@@ -178,6 +280,15 @@ before phase 2 touches anything.
   consume the parsed index and return a distinct `VerifiedChunkIndex` type that is
   the only thing carrying `verify_chunk`. Same trick as `FutureKind`: turn a
   convention into a type.
+- **Fold in, found 2026-08-16:** `ChunkIndex` does not carry `chunk_size` —
+  `struct ChunkIndex { cvs: Vec<ChainingValue> }` at `chunk.rs:263`, while
+  `verify_chunk(&self, index, data, chunk_size)` takes it per call. So the caller
+  must re-supply, from memory, a value the record already fixed. It fails safe (a
+  wrong `chunk_size` yields a wrong offset and the chaining value mismatches), so
+  this is a footgun rather than a hole — but it is the *same* footgun as the
+  ordering one, and the same fix closes both: give `VerifiedChunkIndex` a private
+  `chunk_size` field populated from the record, and let `verify_chunk(index, data)`
+  take no size argument at all. One type change, two convention-only rules retired.
 
 ### [ ] H3 — spec §7.3's typo claim is false for optional keys
 
@@ -236,13 +347,45 @@ before phase 2 touches anything.
 
 | # | Finding | Where |
 |---|---|---|
-| [ ] L1 | CLI prints `category` and mirror URLs unescaped — a crafted bundle can inject terminal escape sequences and spoof output | `crates/ctf-cli/src/main.rs` |
+| [ ] L1 | CLI prints `category` and mirror URLs unescaped — a crafted bundle can inject terminal escape sequences and spoof output. See the note below; the fix is already sitting two lines away | `crates/ctf-cli/src/main.rs:106-108`, `137` |
 | [ ] L2 | `ctf inspect` never prints a section's `root`; an operator fetching a 40 GB external payload cannot get the expected digest from the tool | `crates/ctf-cli/src/main.rs` |
 | [ ] L3 | Manifest errors carry no index or `name_id`, so "names entry is not text" means hand-decoding CBOR on a 50-artifact bundle. An index is a number, not attacker text, so this does not violate the no-oracle rule | `src/manifest.rs`, `src/error.rs` |
 | [ ] L4 | §8.2 note says "R1 mandates hybrid signing" — collides with *record rule* R1. It means *design requirement* R1. Cite **F4** instead | `spec/SPEC.md` §8.2 |
 | [ ] L5 | §8.2 says key distribution "is specified with the suite registry (§14)" while §14 says the registry is unspecified. State plainly that it is not specified in this version | `spec/SPEC.md` §8.2, §14 |
 | [ ] L6 | `ChunkIndex::parse` accepts trailing bytes past `count × 32` but `to_bytes` drops them, breaking the documented byte-for-byte round trip. Require `b.len() == need` | `src/chunk.rs` |
-| [ ] L7 | `Manifest::validate_against` is O(records × external entries) — 4096 records against many entries is a lot of comparisons before rejection. Build a lookup set once | `src/manifest.rs` |
+| [ ] L7 | `Manifest::validate_against` is O(records × external entries) — 4096 records against many entries is a lot of comparisons before rejection. Build a lookup set once | `src/manifest.rs:347-386` |
+| [ ] L8 | `ctf inspect a.ctf b.ctf` silently inspects `b.ctf` — the arg loop assigns `path` on every positional, so the last one wins with no warning. Error on a second positional | `crates/ctf-cli/src/main.rs:47` |
+
+### L1 in detail — the fix is an asymmetry, not a new escaping layer
+
+Found 2026-08-16, sharpening what the reviewer reported.
+
+Two adjacent lines in `inspect()` treat attacker-controlled text differently:
+
+```rust
+println!("              {:?}", b.manifest.name());   // :106 — Debug, control chars escaped
+println!("              category {c}");              // :108 — Display, raw
+```
+
+`{:?}` on a `&str` escapes control characters, so the challenge *title* is already
+safe. `category`, `description`, and mirror URLs (`:137`) go out through `Display`
+and are not. The cheapest correct fix is to make `:108` and `:137` match `:106`,
+not to write an escaping helper.
+
+**`names` is *mostly* covered but not fully.** `check_name` (`manifest.rs:478`)
+rejects `/`, `\`, bytes `< 0x20`, and `0x7f`, so ASCII `ESC` cannot reach the
+terminal through a name. It does **not** reject U+202E RIGHT-TO-LEFT OVERRIDE,
+whose UTF-8 is `E2 80 AE` — every byte `≥ 0x80`, so every one of those four tests
+passes. A name can therefore visually reorder the `flags` column in `ctf inspect`
+and in any future TUI. Whether to reject bidi controls in `check_name` or to escape
+at every display site is a real decision: rejecting at the format boundary matches
+the module's stated reasoning ("one extraction path forgetting to re-check is all
+it takes"), but it narrows what is legal and so wants the same release timing as
+R21 and T8.
+
+**Not a finding, recorded so it is not re-raised:** `id` is already safe by
+`check_id` (lowercase ASCII, digits, interior hyphens only), and `--hex` renders
+bytes outside `0x20..0x7f` as `.`, so the hexdump path is clean.
 
 ---
 
@@ -277,9 +420,15 @@ as written; **no change**. Its other three findings (H4, L4, L5 above) stand.
   `ctf pack` is designed; if directory trees are needed, add a separate
   path-typed manifest field with traversal checks rather than loosening `names`.
 - **The 4096-byte alignment tax.** A minimal bundle is 4344 bytes of which 4032 is
-  zero padding (93%), because R12 forces payloads to a page boundary. Accepted:
-  mmap alignment is the stated reason and a 6 KB floor is already expected once PQ
-  signatures land (design §12). Revisit only if a real deployment complains.
+  zero padding (93%), because R12 forces payloads to a page boundary. Accepted *as a
+  size question*: mmap alignment is the stated reason and a 6 KB floor is already
+  expected once PQ signatures land (design §12). Revisit only if a real deployment
+  complains.
+  **Superseded in part by B4.** This entry asked only "is the padding too big" and
+  never "what commits to it". The size verdict stands; the authentication verdict
+  does not, and B4 is the live item. Keeping the alignment *and* requiring the
+  padding be zero costs nothing extra — a page of zeros compresses and dedupes to
+  nothing, and it is already what the writer emits.
 - **`SectionRecord`'s public fields allow constructing invalid records.**
   `to_bytes` is deliberately a low-level serializer; `parse` is the validating
   boundary. Reviewer raised it as an open question, not a finding. Leave as is,
@@ -291,12 +440,25 @@ as written; **no change**. Its other three findings (H4, L4, L5 above) stand.
 
 ```bash
 cd ctf-format
-cargo test                    # was 124 before any fix
+cargo test                    # was 124 at 9f50d84, before any fix
 cargo clippy --all-targets    # must stay at 0 warnings
 cargo fmt --all -- --check
 cargo run --example demo -- /tmp/demo.ctf
 cargo run --bin ctf -- inspect --verify --hex /tmp/demo.ctf
 ```
+
+**B4 regression, once T8 lands.** The repro in B4 must start failing, and must fail
+with the *padding* error rather than a root mismatch — a root mismatch would mean
+something else changed and the check is not the thing catching it:
+
+```bash
+cargo run --bin ctf -- inspect --verify /tmp/tampered.ctf   # expect: non-zero exit
+```
+
+This one belongs in `tests/bundle.rs` as well as here: build a valid bundle, flip
+one byte in a known gap, assert `Bundle::parse` returns `PaddingNotZero`. Per the
+fixture discipline in `HANDOFF.md`, mutate exactly one byte from a known-good
+bundle, and pick a gap offset that no earlier rule reaches first.
 
 **Golden vectors:** Tier 1 should not move them — the minimal bundle has no sealed
 section, no unknown kind, and no chunk index. If `tests/bundle.rs::minimal_bundle_golden_vector`
@@ -311,13 +473,25 @@ The security and spec-conformance roles are the two worth re-running first.
 
 ## Open questions for the user
 
-1. Commit 0.3 as-is before fixing, or fold Tier 1 into the 0.3 commit? (Recommend:
-   commit first.)
+1. ~~Commit 0.3 as-is before fixing, or fold Tier 1 into the 0.3 commit?~~
+   **Answered 2026-08-16: committed as-is, `9f50d84`.** The reviewed tree is now a
+   fixed point every finding below is measured against.
 2. Does R21 (`SEALED` ⇒ `enc ≠ 0`) need a `feat_incompat` bit? It narrows what is
    legal, and spec §15 says narrowings need a bit — **but** no 0.3 file has been
    published yet, so there is nothing in the wild to invalidate. Cheapest honest
    answer: fold R21 into 0.3 before release and treat it as never having existed
    otherwise. Decide before the first tagged release, not after.
+   **Now covers three narrowings, not one:** R21 (B1), T8 (B4), and — if it is taken
+   at the format boundary rather than the display layer — rejecting bidi controls in
+   `check_name` (L1). One decision, three rules, and they all want the same answer
+   for the same reason. Deciding them separately is how one of them ends up
+   published and unfixable.
 3. Should `ctf inspect --verify` exit non-zero when it skips an unverifiable
    section (H1), or just report it? Non-zero is safer for CI; report-only is
    friendlier for humans.
+4. Reject U+202E and the other Unicode bidi/formatting controls in `check_name`
+   (format boundary, matches the module's stated reasoning, narrows what is legal),
+   or escape at every display site (no format change, but every future
+   consumer — TUI, web, logs — has to remember)? See *L1 in detail*. This is the
+   only one of the four that is a genuine design choice rather than a timing
+   question.
