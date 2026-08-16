@@ -257,18 +257,41 @@ Observed: byte-different file, same length, **identical commitment root**
 
 ## Tier 2 — high value, not blocking
 
-### [ ] H1 — `verify_inline_sections` reports success while silently skipping
+### [x] H1 — `verify_inline_sections` reports success while silently skipping
+
+**Done 2026-08-16.** `verify_inline_sections` now returns `VerifyReport { verified,
+external, unverifiable }` instead of `usize`, and `ctf inspect --verify` exits
+non-zero when `unverifiable != 0`.
 
 - **Source:** Challenge-dev reviewer. Confirmed at `bundle.rs:156-166`.
-- The loop `continue`s past `EXTERNAL` and non-plain records, returns only the
-  count it *did* check, and `ctf inspect --verify` prints
-  `verified N inline section(s)` and exits 0.
-- A bundle with an inline `enc = 1` artifact therefore reports success while that
-  payload was never verified. This trips **my own criticality clause 3** — "report
-  content as verified when it was not."
-- **Fix:** return verified *and* skipped counts (or a small struct); make the CLI
-  print skipped sections explicitly and exit non-zero if anything was skipped under
-  `--verify`. Do not silently succeed.
+- The loop `continue`d past `EXTERNAL` and non-plain records, returned only the
+  count it *did* check, and `ctf inspect --verify` printed
+  `verified N inline section(s)` and exited 0. A bundle with an inline `enc = 1`
+  artifact therefore reported success while that payload was never verified —
+  tripping **criticality clause 3**, "report content as verified when it was not."
+- **The fix as first written would have been wrong, and this is the part worth
+  keeping.** "Exit non-zero if anything was skipped" fails the demo bundle, which is
+  *correct* — it describes a 40 GB external image whose bytes are elsewhere by
+  design. Making non-zero the normal case destroys the signal. So the report splits
+  the two meanings of "not verified":
+  - `external` — bytes absent by design. Reported, never a failure.
+  - `unverifiable` — bytes are **right here** and this build cannot read them
+    (encrypted or compressed). A real reason to fail.
+- **The policy stays with the caller.** The library counts and returns; only the CLI
+  decides that `unverifiable != 0` is an error. A phase 2 caller holding the content
+  key can verify exactly what this build counts as unverifiable, so hard-erroring in
+  the library would have taken that decision away from the layer that will be able
+  to act on it.
+- **Verified both directions.** `external_bundle` → `verified 1, external 1,
+  unverifiable 0`, CLI exits 0. A hand-built bundle with `enc = 1` on an inline
+  artifact → `verified 1, external 0, unverifiable 1`, CLI prints the count and
+  exits 1.
+- **New in `tests/bundle.rs`:** `mark_encrypted`, which flips a record's `enc` byte
+  and repairs the commitment root so the file still opens. The phase 1 writer cannot
+  emit `enc != 0`, so this fixture has to be built by hand; re-rooting is the trick,
+  because changing a record changes the table and therefore the root, and without it
+  the file would fail on the commitment and never reach the code under test. **B1
+  needs the same helper** for its `SEALED`-with-`enc = 0` cases.
 
 ### [ ] H2 — `verify_chunk` is callable without `verify_root`
 
@@ -499,9 +522,16 @@ The security and spec-conformance roles are the two worth re-running first.
    R21, T8, and the name rule from the start, and the *Known issues* section added in
    `b1e265c` shrinks to the findings that remain unfixed. **Do not tag anything until
    Tier 1 lands.** A tag is the moment this option stops being available.
-3. Should `ctf inspect --verify` exit non-zero when it skips an unverifiable
-   section (H1), or just report it? Non-zero is safer for CI; report-only is
-   friendlier for humans.
+3. ~~Should `ctf inspect --verify` exit non-zero when it skips an unverifiable
+   section (H1), or just report it?~~
+   **Answered 2026-08-16: non-zero, but only for the skips that mean something.**
+
+   The question as posed had a false premise, and finding it is the useful part. A
+   plain "non-zero on any skip" fails the demo bundle — which is a *correct* bundle
+   describing a 40 GB external image — so non-zero becomes the normal case and stops
+   carrying information. `EXTERNAL` sections are reported and never counted as
+   failures; only sections whose bytes are present and unreadable by this build make
+   the command exit 1. See H1 for the implementation and both verified directions.
 4. ~~Reject bidi controls at the format boundary, or escape at every display site?~~
    **Answered 2026-08-16: both.** The two halves close different holes, and neither
    subsumes the other.

@@ -19,7 +19,10 @@ const USAGE: &str = "\
 usage: ctf inspect [--hex] [--verify] <file.ctf>
 
   --hex     annotated hexdump of the header, section table, and footer
-  --verify  re-hash every inline section against its root (reads the whole file)
+  --verify  re-hash every inline section against its root (reads the whole file).
+            Exits non-zero if any section's bytes are present but unreadable by
+            this build. External payloads are reported, not counted as failures:
+            their bytes are elsewhere by design.
 ";
 
 fn main() -> ExitCode {
@@ -149,9 +152,31 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
 
     if verify {
         println!();
-        let n = b.verify_inline_sections()?;
-        println!("verified      {n} inline section(s) against their roots");
-        println!("              external payloads are not here; stream them separately");
+        let r = b.verify_inline_sections()?;
+        println!(
+            "verified      {} inline section(s) against their roots",
+            r.verified
+        );
+        if r.external != 0 {
+            println!(
+                "              {} external — bytes are not here; stream them separately",
+                r.external
+            );
+        }
+        // Printed before the error is returned, so an operator sees the count even
+        // though the command is about to fail.
+        if r.unverifiable != 0 {
+            println!(
+                "              {} inline section(s) NOT VERIFIED — encrypted or \
+                 compressed, which this build cannot read",
+                r.unverifiable
+            );
+            return Err(format!(
+                "--verify could not check {} inline section(s); this file is not fully verified",
+                r.unverifiable
+            )
+            .into());
+        }
     }
 
     if hex {

@@ -13,7 +13,7 @@
 
 use ctf_format::{
     Bundle, Error, FEAT_RO_COMPAT_CONTAINER_V1, Footer, HEADER_LEN, Header, MAGIC, Manifest,
-    Payload, SectionFlags, SectionKind, SectionSpec, Signing,
+    Payload, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionSpec, Signing,
     cbor::Value,
     chunk::ChunkIndex,
     footer::{MAX_SIG_LEN, MIN_FOOTER_LEN, commitment_root, sig_input},
@@ -80,6 +80,30 @@ fn artifact_bundle() -> Vec<u8> {
     .unwrap()
 }
 
+/// Mark the section at table index `i` as AEAD-STREAM encrypted, and repair the
+/// commitment root so the file still opens.
+///
+/// The phase 1 writer cannot emit `enc != 0`, deliberately — it has no crypto — so a
+/// bundle carrying an inline payload this build cannot read has to be built by hand.
+/// Re-rooting is the whole trick: changing a record changes the table, which changes
+/// `BLAKE3("ctf/root/v1" ‖ header ‖ table)`, so without this the file would fail on
+/// the commitment and never reach the code under test.
+///
+/// Only legal on a section with a non-zero `chunk_size` (R-rule: STREAM is defined
+/// over a chunk sequence), which is why callers pass an artifact built by
+/// `artifact_bundle`.
+fn mark_encrypted(file: &mut [u8], i: usize) {
+    let header = Header::parse(file).unwrap();
+    let table = header.section_table_off as usize;
+    file[table + i * SECTION_RECORD_LEN + 6] = 1; // OFF_ENC, Encryption::AeadStream
+    let root = commitment_root(
+        &file[..HEADER_LEN as usize],
+        &file[table..table + header.section_table_count as usize * SECTION_RECORD_LEN],
+    );
+    let footer = header.footer_off as usize;
+    file[footer..footer + 32].copy_from_slice(&root);
+}
+
 // ---------------------------------------------------------------------------
 // Round trips
 // ---------------------------------------------------------------------------
@@ -95,7 +119,7 @@ fn minimal_bundle_round_trips() {
     assert_eq!(b.manifest.name(), "Who's That Bird");
     assert_eq!(b.manifest.name_of(0), Some("manifest"));
     assert_eq!(b.footer.total_len, file.len() as u64);
-    assert_eq!(b.verify_inline_sections().unwrap(), 1);
+    assert_eq!(b.verify_inline_sections().unwrap().verified, 1);
 }
 
 /// The full-file golden vector, reproduced in spec §11.
@@ -753,6 +777,57 @@ fn a_40gb_payload_fits_in_a_few_kilobytes() {
     // something plausible.
     let record = *b.section(1).unwrap();
     assert!(b.section_bytes(&record).is_err());
+}
+
+/// An absent payload and an unreadable one are different facts, and a verify pass
+/// that returned one number could not tell them apart.
+///
+/// This is the shape that keeps a non-zero exit worth having: a bundle describing a
+/// 40 GB external image is *correct*, so its skipped section must not be counted as
+/// a failure, or every real bundle fails and the signal is gone.
+#[test]
+fn a_verify_pass_separates_absent_payloads_from_unreadable_ones() {
+    let file = external_bundle(41_231_986_688, [0x33; 32]).unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 1, "the manifest is inline and checkable");
+    assert_eq!(report.external, 1, "the 40 GB image is absent by design");
+    assert_eq!(
+        report.unverifiable, 0,
+        "nothing here has bytes this build cannot read, so --verify must succeed"
+    );
+}
+
+/// The other half: an inline payload whose bytes are present and unreadable must be
+/// counted, not skipped in silence.
+///
+/// This is the case the old `-> Result<usize>` signature could not express. It
+/// returned the number it *had* checked, so a bundle with an encrypted artifact
+/// reported "verified 1 section" and exited 0 — reporting content as verified when
+/// it was not.
+#[test]
+fn an_unreadable_inline_payload_is_counted_not_skipped() {
+    let mut file = artifact_bundle();
+    mark_encrypted(&mut file, 1);
+    let b = Bundle::parse(&file).unwrap();
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(
+        report.verified, 1,
+        "the manifest is still plain and checked"
+    );
+    assert_eq!(report.external, 0);
+    assert_eq!(
+        report.unverifiable, 1,
+        "the encrypted artifact's bytes are here and were not checked"
+    );
+
+    // And the section itself still refuses to hand anything back, so the count is
+    // reporting a real refusal rather than a bookkeeping detail.
+    let record = *b.section(1).unwrap();
+    assert!(matches!(
+        b.section_bytes(&record),
+        Err(Error::Inconsistent { .. })
+    ));
 }
 
 /// Two carriers of one fact with no stated precedence is how one implementation

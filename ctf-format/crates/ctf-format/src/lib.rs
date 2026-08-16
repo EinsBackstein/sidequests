@@ -47,7 +47,7 @@ pub mod header;
 pub mod manifest;
 pub mod section;
 
-pub use bundle::{Bundle, Payload, SectionSpec, write_bundle};
+pub use bundle::{Bundle, Payload, SectionSpec, VerifyReport, write_bundle};
 pub use error::{Error, Result};
 pub use footer::{Footer, Signing};
 pub use header::Header;

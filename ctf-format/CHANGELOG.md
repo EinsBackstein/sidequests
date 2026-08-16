@@ -195,6 +195,28 @@ apparent oversight.
 
 ### Fixed
 
+- **A verify pass could report success it had not earned.**
+  `verify_inline_sections` returned a single `usize` — the number of sections it
+  *had* checked — after silently `continue`ing past everything it could not. A
+  bundle with an inline encrypted artifact therefore printed
+  `verified 1 inline section(s)` and exited 0 while that payload went unread, which
+  is the one thing the project's own criticality test says must never happen.
+
+  It now returns `VerifyReport { verified, external, unverifiable }`, and
+  `ctf inspect --verify` exits non-zero when `unverifiable` is not zero.
+
+  **The obvious fix would have been wrong, and the distinction is the point.**
+  "Fail if anything was skipped" fails a bundle describing a 40 GB external image —
+  which is *correct*, its bytes being elsewhere by design — so non-zero would have
+  become the normal case and stopped carrying information. `EXTERNAL` sections are
+  reported and never counted as failures. Only a section whose bytes are **present
+  in this file** and unreadable by this build is a reason to fail.
+
+  The policy stays with the caller: the library counts and returns, and only the CLI
+  decides that `unverifiable` is fatal. A phase 2 caller holding the content key can
+  verify precisely what this build counts as unverifiable, so a library-level hard
+  error would have taken the decision away from the layer that will be able to act
+  on it.
 - A chunk-swap test passed for the wrong reason: its filler was `(i * 31) as u8`,
   which repeats every 256 bytes, so every 4096-byte chunk was byte-identical and a
   "swapped" chunk genuinely was the same bytes. The filler is now a BLAKE3 XOF
@@ -256,12 +278,6 @@ than cleanups.
 
 Lower severity, all confirmed:
 
-- **`verify_inline_sections` reports success while silently skipping.** It
-  `continue`s past `EXTERNAL` and non-plain records and returns only the count it
-  did check, so `ctf inspect --verify` prints `verified N inline section(s)` and
-  exits 0 on a bundle whose inline encrypted payload was never verified. Reporting
-  content as verified when it was not is the one thing this project's own criticality
-  test says must never happen.
 - **`verify_chunk` is callable without `verify_root`**, ordered by a doc comment
   rather than by a type, though C6 is normative. `ChunkIndex` also does not carry the
   `chunk_size` it was verified for, requiring the caller to re-supply a value the

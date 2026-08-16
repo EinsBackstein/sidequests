@@ -150,19 +150,28 @@ impl<'a> Bundle<'a> {
 
     /// Verify every inline, unencrypted, uncompressed section against its root.
     ///
-    /// Returns how many sections were checked. Not part of [`Bundle::parse`]: a
-    /// bundle referencing gigabytes of inline payload should not be hashed merely
-    /// to open it, so the cost is the caller's to ask for.
-    pub fn verify_inline_sections(&self) -> Result<usize> {
-        let mut n = 0;
+    /// Not part of [`Bundle::parse`]: a bundle referencing gigabytes of inline
+    /// payload should not be hashed merely to open it, so the cost is the caller's
+    /// to ask for.
+    ///
+    /// Returns a [`VerifyReport`] rather than a count, because a count cannot
+    /// distinguish "checked everything" from "checked what I could". See that
+    /// type for why the difference is the whole point.
+    pub fn verify_inline_sections(&self) -> Result<VerifyReport> {
+        let mut report = VerifyReport::default();
         for r in &self.sections {
-            if r.flags.contains(SectionFlags::EXTERNAL) || !is_plain(r) {
+            if r.flags.contains(SectionFlags::EXTERNAL) {
+                report.external += 1;
+                continue;
+            }
+            if !is_plain(r) {
+                report.unverifiable += 1;
                 continue;
             }
             Self::verified_bytes(self.file, r)?;
-            n += 1;
+            report.verified += 1;
         }
-        Ok(n)
+        Ok(report)
     }
 
     fn verified_bytes(file: &'a [u8], record: &SectionRecord) -> Result<&'a [u8]> {
@@ -188,6 +197,33 @@ impl<'a> Bundle<'a> {
         }
         Ok(bytes)
     }
+}
+
+/// What a pass over the inline sections actually established.
+///
+/// Three counts rather than one, because "not verified" has two meanings and
+/// collapsing them is how a tool reports success it did not earn. An `external`
+/// section's bytes are absent by design, so skipping it is the normal case and
+/// says nothing is wrong. An `unverifiable` section's bytes are *right here* and
+/// this build cannot check them — encrypted or compressed, both of which land in
+/// phase 2 — and that is a reason for a caller to fail rather than to shrug.
+///
+/// The distinction is what keeps a non-zero exit meaningful: a bundle describing a
+/// 40 GB external image is perfectly good and would otherwise fail every run.
+///
+/// The policy stays with the caller. This type reports; it does not decide, because
+/// a phase 2 caller holding the content key can verify exactly what this build
+/// counts as unverifiable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VerifyReport {
+    /// Sections hashed and matched against their `root`.
+    pub verified: usize,
+    /// `EXTERNAL` sections, whose bytes are not in this file. Stream them through
+    /// [`chunk::verify_stream`].
+    pub external: usize,
+    /// Sections whose bytes are in this file and which this build cannot check.
+    /// Non-zero means the file was **not** fully verified.
+    pub unverifiable: usize,
 }
 
 /// A section whose stored bytes are its plaintext.
