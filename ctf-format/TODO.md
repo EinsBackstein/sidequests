@@ -521,6 +521,11 @@ as written; **no change**. Its other three findings (H4, L4, L5 above) stand.
   This is a phase 3 authoring-surface question, not a phase 1 bug. Revisit when
   `ctf pack` is designed; if directory trees are needed, add a separate
   path-typed manifest field with traversal checks rather than loosening `names`.
+  **Addressed in 0.9.0 (ticket 88):** the optional `paths` manifest key (spec §7.2,
+  M22–M25) maps a `name_id` to a relative POSIX path, checked component-by-component
+  so traversal is unrepresentable, unique, and naming a real section. `names` stays
+  flat. `ctf pack` does not yet emit it — that is still phase 3 — but the format now
+  can, and `Manifest::path_of` exposes it.
 - **The 4096-byte alignment tax.** A minimal bundle is 4344 bytes of which 4032 is
   zero padding (93%), because R12 forces payloads to a page boundary. Accepted *as a
   size question*: mmap alignment is the stated reason and a 6 KB floor is already
@@ -664,3 +669,14 @@ them:
 
 The remaining tickets span spec wording, the authoring surface, and test/tooling
 gaps; none is ship-blocking for phase 1.
+
+**Closed in 0.9.0:** 81 (name the section in a root mismatch; the verify pass
+reports every mismatch), 83 (tighten the header commitment test), 86 (the design
+note no longer claims thread-parallel BLAKE3), 87 (delete `Bundle::sig_input`, pin
+`Manifest::description`), 88 (`paths`: directory trees without widening `names`),
+90 (`ExceedsFile` reports the real file length), 91 (`crit` errors carry an entry
+index), 92 (the serving API checks the record belongs to the bundle), 95 (no input
+bytes in an error `Display`), 96 (a pre-0.3 file is diagnosed as an older format),
+and 97 (`ctf inspect` prints each section's full name). No byte-layout change and no
+feature bit; spec §7.2/§7.5 gained `paths` and M22–M25, §10–§13 and §16 gained
+diagnostic wording, and §17 records 0.9.0.

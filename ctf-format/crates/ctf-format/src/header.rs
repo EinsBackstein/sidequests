@@ -80,7 +80,7 @@ impl Header {
             .and_then(|s| s.try_into().ok())
             .ok_or(Error::Truncated { need, got: b.len() })?;
         if magic != MAGIC {
-            return Err(Error::BadMagic { got: magic });
+            return Err(Error::BadMagic);
         }
 
         let trunc = || Error::Truncated { need, got: b.len() };

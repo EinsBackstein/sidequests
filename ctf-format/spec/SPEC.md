@@ -873,6 +873,7 @@ Keys defined by manifest `spec` 1. Every key is a text string.
 | `id` | tstr | ● | Challenge identifier |
 | `name` | tstr | ● | Human-readable title |
 | `names` | array of tstr | ● | The name table; index is `name_id` |
+| `paths` | map | | Section locations in a directory tree, keyed by `name_id` (§7.2) |
 | `version` | uint | | Challenge version; absent means 0 |
 | `category` | tstr | | Challenge category |
 | `description` | tstr | | Markdown description |
@@ -922,6 +923,29 @@ displays them MUST escape rather than reject (§13).
 `names` MAY be longer than the number of sections — a generator declares output
 names for artifacts that do not exist yet — but MUST NOT exceed 65536 entries,
 which is the `name_id` space.
+
+**Paths, for directory trees.** A name is flat and unique, so it cannot express
+`src/main.c` and cannot distinguish two `main.c` files in different directories.
+The optional `paths` key is the tree: a map from a `name_id` (unsigned integer,
+≤ 65535) to a **relative POSIX path** naming where that section's payload belongs
+when the challenge is unpacked.
+
+A path is 1 to 4096 bytes, split on `/` into components. Every component MUST be 1
+to 255 bytes and MUST satisfy the name-shape rule above — no `.`, no `..`, no `/`,
+no `\`, no byte below `0x20` or `0x7f`, and none of the nine bidi formatting
+characters. A leading, trailing, or doubled `/` therefore yields an empty component
+and is rejected, as is an absolute path. Traversal is thus unrepresentable rather
+than filtered: a component that could escape its directory fails the same check a
+name fails.
+
+Each key MUST name a section in the table (M25), and each path MUST be unique
+across the map (M24) — two sections cannot extract to one file. A section with no
+`paths` entry keeps its flat `names[name_id]` as its filename, so the key is
+additive and a manifest that omits it behaves exactly as before. `paths` is an
+ordinary manifest key: a reader that does not implement it MUST carry it
+byte-for-byte (§7.3), and a writer that relies on the tree SHOULD list `paths` in
+`crit` so a reader that would ignore it refuses the file cleanly instead of
+unpacking the artifacts flat.
 
 **`spec` versus the container version.** `spec` versions this schema and is
 independent of `version_major.minor`, which versions the bytes. Neither implies
@@ -1005,11 +1029,18 @@ A reader MUST reject the file if any of the following holds.
 | M19 | A section's `name_id` is greater than or equal to the number of entries in `names`. |
 | M20 | A section carries `EXTERNAL` and has no `external` entry; or a section without `EXTERNAL` has one; or an `external` entry names a `name_id` that no `EXTERNAL` section uses. |
 | M21 | An `external` entry's `size` or `root` disagrees with the record's `len_plain` or `root`. |
+| M22 | `paths` is present and is not a map, or one of its keys is not an unsigned integer, or a key exceeds 65535. |
+| M23 | A `paths` value is not text, or is not a valid relative path per §7.2 (empty, too long, absolute, a `.`/`..` component, an empty component, or a forbidden byte or bidi control). |
+| M24 | Two `paths` entries name the same path. |
+| M25 | A `paths` key names a `name_id` that no section uses. |
 
 M7 SHOULD be evaluated before M9–M18: if the manifest requires an understanding
 this reader does not have, every other diagnostic is noise about a schema that was
-never meant for it. M19–M21 need the section table and are therefore evaluated
-after it (§10 step 8).
+never meant for it. M19–M21 and M25 need the section table and are therefore
+evaluated after it (§10 step 8); M22–M24 are manifest-local and evaluated with the
+rest of the schema. The list rules — M6–M8, M15, M17, M18, M22–M24 — SHOULD
+identify the offending entry by its position, a number, and MUST NOT echo the entry
+text (§13).
 
 ### 7.6 Declaration keys for the later phases
 
@@ -1428,7 +1459,9 @@ MAY NOT, because each depends on values the previous one validated.
    mirror of H14 — a bit the file lacks and the reader has — not H14 itself. A
    reader that
    only wants the structure of a 0.1 or 0.2 file MAY skip this and stop after
-   step 4.
+   step 4. The refusal SHOULD name what is absent — no footer, manifest, or chunk
+   index — and MAY report the file's `version_minor`; the bit, never the minor
+   number, decides whether the read proceeds (§2.3).
 3. Record whether the file is rewritable (§4.4).
 4. Read `section_table_count × 128` bytes at `section_table_off` and apply
    R1–R22 to every record; then apply T1–T8. **R20, R21, R22 and T8 are applied
@@ -1437,8 +1470,8 @@ MAY NOT, because each depends on values the previous one validated.
 5. Parse the footer and apply F1–F7 and F9.
 6. Recompute the commitment root per §8.3 and apply F8.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
-   decode it and apply M1–M18.
-8. Apply M19–M21 against the section table.
+   decode it and apply M1–M18 and M22–M24.
+8. Apply M19–M21 and M25 against the section table.
 9. If the caller supplies a trusted public key and needs authenticity, verify both
    signatures over the transcript of §8.4 (§20.3). A reader that does not take this
    step, or that takes it without a trusted key, has established only that the file
@@ -1589,6 +1622,7 @@ measured against.
 | `MAX_DECOMPRESSION_RATIO` | `65536` | Cap on `len_plain / len_stored` for a compressed section (D2) |
 | `MAX_DEPTH` (`cbor`) | `16` | Manifest nesting cap |
 | `MAX_NAME_LEN` | `255` | Longest name table entry |
+| `MAX_PATH_LEN` | `4096` | Longest `paths` entry |
 | `MAX_ID_LEN` | `64` | Longest challenge `id` |
 | `MAX_MIRROR_LEN` | `2048` | Longest mirror URL |
 | `MAX_NAMES` | `65536` | Entries in the name table; the `name_id` space |
@@ -1685,8 +1719,14 @@ The customary filename extension is `.ctf`. No media type is registered.
   A rewriter that renumbers sections, or that re-encrypts under an unchanged key,
   risks repeating an AEAD nonce.
 - **Error reporting must not become an oracle.** A reader's diagnostics SHOULD
-  carry offending offsets and lengths, and MUST NOT carry bytes from a sealed
-  section — nor from the manifest, whose text is attacker-controlled.
+  carry offending offsets, lengths, and `name_id`s — all numbers — and MUST NOT
+  carry bytes from a sealed section, from the manifest, or from the input at all.
+  A bad magic, an unsupported CBOR item, and a section root mismatch are therefore
+  reported by position or by category, never by echoing what was read; a
+  `name_id` is safe to name because it is the identity of the section whose root
+  failed, not any of its content. A whole-file verification pass that finds more
+  than one bad section SHOULD report every one rather than stopping at the first,
+  so an operator is not left to bisect a large bundle by hand.
 - **Decompression is bounded before it runs.** A compressed section's declared
   plaintext is checked against an absolute cap and an expansion-ratio cap (D1, D2)
   before any decoder is invoked, so a decompression bomb is refused rather than
@@ -1770,7 +1810,7 @@ Rules for the editor, all normative:
 |---|---|---|
 | 0.1 | 0.2+ | Header and table accepted. `[40, 64)` reads as "no features in use", which is what 0.1 wrote |
 | 0.2, no features, no unknown kinds | 0.1 | Header and table accepted. `version_minor` is not validated and the feature words are zero |
-| 0.2 | 0.3 | Header and table accepted in full; a whole-container read is refused at §10 step 2, because a 0.2 file has no footer or manifest to read. R20, R21, R22 and T8 are **not** applied — see below |
+| 0.2 | 0.3 | Header and table accepted in full; a whole-container read is refused at §10 step 2, because a 0.2 file has no footer or manifest to read. The refusal SHOULD name the older format and what is absent rather than reading as a feature-negotiation failure. R20, R21, R22 and T8 are **not** applied — see below |
 | **0.3** | **0.2** | **Accepted, read-only.** `feat_incompat` is zero, so nothing stops the read; `CONTAINER_V1` is an unimplemented `ro_compat` bit, so the file MUST NOT be rewritten (§4.4) |
 | 0.3 | 0.1 | Rejected, as `reserved not zero`. 0.1 predates the feature words entirely; see below |
 | 0.3, plus a `ro_compat` bit from a later version | 0.3 | Accepted, read-only (§4.4) |
@@ -1837,6 +1877,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.6.0 | Phase 2 constructions. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Specifies and implements the hybrid KEM combiner (§20.1), the AEAD-STREAM construction with its nonce, AAD, and per-chunk length framing (§20.2) — including the composition of `comp = 1` with `enc = 1` — and hybrid signature production and verification over the §8.4 transcript (§20.3), for suites 1 and 2; suite 3's SLH-DSA signature role remains unimplemented. Nothing here narrows what is legal: it defines structures 0.5 left unspecified, and the 0.5 writer emits `enc = 0` only, so no feature bit is spent (§15). §14 shrinks accordingly — key envelopes, derived flags, entitlement signatures, key distribution, and the live gate remain unspecified. |
 | 0.7.0 | Key envelopes, derived flags, and the review-debt tickets 72–97. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file this version's writer produces is byte-identical to a 0.6 file's for the same inputs. Specifies the key-envelope construction (§21) and the derived-flag and stage-key derivations (§22), and the production side of the hybrid signature — signing a bundle in place, changing no byte outside the footer (§20.3). Adds **R22** (an `EXTERNAL` record carries no codec) and gates **R20** on `CONTAINER_V1`; both ride the existing bit rather than spending a new one, because the mirror bytes R22 rules out were never well-defined (§5.7, §9.4) and no writer has produced the combination, while R20 on the legacy path protects nothing (§16). Places the C1–C7 chunk-index rules explicitly **on-use** in §10, and states `chunk_size ≠ 0` as a precondition of the §5.5 index-length formula, R19, T6, C1, and C3, with R16 ordered before them (§2.1, §5.6). §14 shrinks to entitlement signatures, key distribution, and the live gate. |
 | 0.8.0 | Encrypted sections end to end, the entitlement chain, and stage gating. **No byte-layout change:** `version_minor` stays `3`, and the header, section table, footer, commitment root, and signature transcript are untouched. Adds **`name_id`** to the key-envelope map (§21.3, EN5), which is what lets one `keys` section deliver the content keys of every encrypted section; no writer has ever emitted a `keys` section, so no existing file carries the old three-key form. The reference writer now emits `enc = 1` — compress, then encrypt, with `comp = 1` framing one zstd frame per STREAM chunk (§5.4, §20.2) — and a reader recovers a section's key from its envelope and decrypts it. A **stage-gated** section's content key is `stage_key(flag(N−1), N)` rather than random (§20.2, §22.4); the derivation is the gate and no envelope carries it. Implements the entitlement chain's E1–E9 (§18): the record format was specified in 0.5.0, and **E9** now verifies `sig_platform` always and a `transfer`'s `sig_holder` given trusted keys, so §14 shrinks to key distribution and the live gate. Adds the optional `flag.stage_gate` declaration (§7.6) and enforces **DF5**: a stage gate on a static flag is rejected, and a static flag is `static`/`none` or any derivation this version does not implement. Closes the review-debt tickets 75, 77, 78, 79, and 82: §15's limit row is split by direction and §12 reconciled with it; §3's padding clause is gated on `CONTAINER_V1`; §16's M7 cell no longer claims to name the key; §4.5 names the test that asserts each header vector, with a dedicated **0.3 header vector test** added; and `ctf` gains argument parsing, shell completions, and CLI integration tests. Every change either defines what a previous version left unspecified or *widens* what a reader accepts, so no feature bit is spent (§15). |
+| 0.9.0 | Review-debt tickets 81, 83, 86–88, 90–92, 95–97. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Adds the optional **`paths`** manifest key and rules M22–M25 (§7.2, §7.5), so a directory tree is representable without widening `names`: a relative POSIX path per `name_id`, checked component-by-component against the name rule so `.`, `..`, an absolute path, and a `\` are unrepresentable rather than filtered; unique across the map; and naming a real section. It is an ordinary manifest key, so no feature bit is spent — a reader that does not implement it carries it byte-for-byte (§7.3). The rest are diagnostic and reference-implementation changes with no format effect: a section root mismatch carries the section's `name_id` and the whole-file verification pass reports every mismatch instead of aborting on the first; `crit` list errors (M6–M8) carry an entry index like the sibling list rules; `ExceedsFile` reports the real file length and names `footer_off` as the bound when that is what fired; a pre-0.3 file is diagnosed as an older format with no container rather than as a feature-negotiation failure; `BadMagic` and `CborUnsupported` no longer echo input bytes; `ctf inspect` prints each section's full name so truncated labels cannot collide; the unused `Bundle::sig_input` is deleted and `Manifest::description` is pinned by a test. The design note's thread-parallel BLAKE3 claim is corrected to state the reference implementation hashes single-threaded. |
 
 ## 18. Entitlement records
 

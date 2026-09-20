@@ -1,6 +1,6 @@
 //! The manifest: what the bundle *means*, in canonical CBOR.
 //!
-//! Normative: `spec/SPEC.md` §7, rules M1–M21.
+//! Normative: `spec/SPEC.md` §7, rules M1–M25.
 //!
 //! Exactly one section of kind `manifest` exists per bundle (T1), it is never
 //! sealed, player-visible, or external (R7–R9), and its plaintext is a single
@@ -17,6 +17,15 @@
 //! eventually written to disk. A name containing a separator has no legitimate use
 //! and one extraction path forgetting to re-check is all it takes, so separators
 //! are rejected outright at the format boundary (design §14).
+//!
+//! # Paths, for directory trees
+//!
+//! A name is flat and unique, so it cannot express `src/main.c` and cannot
+//! disambiguate two `main.c` files in different directories. The optional `paths`
+//! key is the tree: a map from `name_id` to a relative POSIX path, checked
+//! component-by-component with the same rules as a name, so `..`, an absolute
+//! path, and a backslash are unrepresentable rather than filtered. A section with
+//! no entry extracts under its name, which keeps `paths` additive.
 //!
 //! # Unknown keys, and why they are not simply rejected
 //!
@@ -57,6 +66,9 @@ pub const MANIFEST_SPEC: u64 = 1;
 /// Longest legal entry in the name table.
 pub const MAX_NAME_LEN: usize = 255;
 
+/// Longest legal section path.
+pub const MAX_PATH_LEN: usize = 4096;
+
 /// Longest legal mirror URL.
 pub const MAX_MIRROR_LEN: usize = 2048;
 
@@ -86,6 +98,7 @@ const KNOWN_KEYS: &[&str] = &[
     "id",
     "name",
     "names",
+    "paths",
     "platform",
     "runtime",
     "sealed",
@@ -167,18 +180,27 @@ impl Manifest {
             let list = crit.as_array().ok_or(Error::Manifest {
                 what: "manifest `crit` is not an array",
             })?;
-            for item in list {
-                let key = item.as_text().ok_or(Error::Manifest {
+            for (index, item) in list.iter().enumerate() {
+                // The list rules carry the offending entry's position — a number, not
+                // the key text, which is attacker-controlled (§13). M6–M8 get the same
+                // treatment as the sibling list rules M15, M17, and M18.
+                let key = item.as_text().ok_or(Error::ManifestEntry {
                     what: "manifest `crit` entry is not text",
+                    index: Some(index),
+                    name_id: None,
                 })?;
                 if !KNOWN_KEYS.contains(&key) {
-                    return Err(Error::Manifest {
+                    return Err(Error::ManifestEntry {
                         what: "manifest marks a key critical that this build does not implement",
+                        index: Some(index),
+                        name_id: None,
                     });
                 }
                 if value.get(key).is_none() {
-                    return Err(Error::Manifest {
+                    return Err(Error::ManifestEntry {
                         what: "manifest `crit` names a key that is not present",
+                        index: Some(index),
+                        name_id: None,
                     });
                 }
             }
@@ -252,6 +274,51 @@ impl Manifest {
                 index: dup.get(1).map(|x| x.0),
                 name_id: None,
             });
+        }
+
+        if let Some(paths) = value.get("paths") {
+            let entries = paths.as_map().ok_or(Error::Manifest {
+                what: "manifest `paths` is not a map",
+            })?;
+            let mut seen: Vec<(usize, &str)> = Vec::with_capacity(entries.len());
+            for (index, (k, v)) in entries.iter().enumerate() {
+                let id = k.as_uint().ok_or(Error::ManifestEntry {
+                    what: "a `paths` key is not an unsigned integer",
+                    index: Some(index),
+                    name_id: None,
+                })?;
+                if u16::try_from(id).is_err() {
+                    return Err(Error::ManifestEntry {
+                        what: "a `paths` key is outside the `name_id` space",
+                        index: None,
+                        name_id: Some(id),
+                    });
+                }
+                let p = v.as_text().ok_or(Error::ManifestEntry {
+                    what: "a `paths` value is not text",
+                    index: Some(index),
+                    name_id: Some(id),
+                })?;
+                if let Some(what) = check_path(p) {
+                    return Err(Error::ManifestEntry {
+                        what,
+                        index: Some(index),
+                        name_id: Some(id),
+                    });
+                }
+                seen.push((index, p));
+            }
+            seen.sort_unstable_by(|a, b| a.1.cmp(b.1));
+            if let Some(dup) = seen
+                .windows(2)
+                .find(|w| w.first().map(|x| x.1) == w.get(1).map(|x| x.1))
+            {
+                return Err(Error::ManifestEntry {
+                    what: "`paths` contains a duplicate",
+                    index: dup.get(1).map(|x| x.0),
+                    name_id: None,
+                });
+            }
         }
 
         if let Some(ext) = value.get("external") {
@@ -356,6 +423,23 @@ impl Manifest {
             .and_then(Value::as_text)
     }
 
+    /// The relative path a section's payload should be extracted to, if the
+    /// manifest gives one.
+    ///
+    /// `None` means the section has no explicit location, and a caller falls back
+    /// to [`Manifest::name_of`] as a flat filename. `paths` is what lets two
+    /// artifacts in different directories share a basename: `names` forbids
+    /// separators and requires uniqueness, so a tree cannot be expressed there
+    /// without either widening what a name may contain or colliding on the
+    /// basename.
+    pub fn path_of(&self, name_id: u16) -> Option<&str> {
+        let entries = self.value.get("paths").and_then(Value::as_map)?;
+        entries
+            .iter()
+            .find(|(k, _)| k.as_uint() == Some(u64::from(name_id)))
+            .and_then(|(_, v)| v.as_text())
+    }
+
     /// Mirror metadata for an external section.
     pub fn external(&self, name_id: u16) -> Option<External<'_>> {
         let entries = self.value.get("external").and_then(Value::as_map)?;
@@ -382,13 +466,31 @@ impl Manifest {
     ///   who can edit either chooses which one is wrong.
     pub fn validate_against(&self, records: &[SectionRecord]) -> Result<()> {
         let names = self.names();
+        let mut section_ids: BTreeSet<u64> = BTreeSet::new();
         for r in records {
+            section_ids.insert(u64::from(r.name_id));
             if usize::from(r.name_id) >= names.len() {
                 return Err(Error::ManifestEntry {
                     what: "a section's name_id is past the end of the manifest name table",
                     index: None,
                     name_id: Some(u64::from(r.name_id)),
                 });
+            }
+        }
+
+        // A `paths` entry names a section's location, so a key naming no section
+        // describes nothing. Unlike `external` this is a subset, not an exact match:
+        // a section with no entry is a flat file named by the name table.
+        if let Some(entries) = self.value.get("paths").and_then(Value::as_map) {
+            for (k, _) in entries {
+                let id = k.as_uint().unwrap_or(u64::MAX);
+                if !section_ids.contains(&id) {
+                    return Err(Error::ManifestEntry {
+                        what: "the manifest's `paths` map names a section that does not exist",
+                        index: None,
+                        name_id: Some(id),
+                    });
+                }
             }
         }
 
@@ -605,4 +707,32 @@ pub(crate) fn check_name(n: &str) -> Option<&'static str> {
             .any(|c| c == b'/' || c == b'\\' || c < 0x20 || c == 0x7f)
         || n.chars().any(is_bidi_control);
     bad.then_some("name is empty, too long, path-like, or contains a control character")
+}
+
+/// A section path: a relative POSIX path used to place the section in a directory
+/// tree when it is extracted.
+///
+/// It is a sequence of `/`-separated components, each of which must satisfy
+/// [`check_name`]. That is what makes traversal unrepresentable rather than
+/// filtered: `.` and `..` are rejected as names, an empty component — from a
+/// leading, trailing, or doubled `/` — is rejected as an empty name, and a
+/// backslash is rejected as a name byte. `names` stays flat, because the name table
+/// is the section's human identity and not its location; a tree is expressed here
+/// without widening what a name may contain.
+///
+/// Returns the *reason* rather than an [`Error`] so the caller can attach the
+/// entry's index and `name_id`; the reason is static, so no part of the path is
+/// echoed.
+pub(crate) fn check_path(p: &str) -> Option<&'static str> {
+    if p.is_empty() || p.len() > MAX_PATH_LEN {
+        return Some("path is empty or too long");
+    }
+    if p.split('/')
+        .any(|component| check_name(component).is_some())
+    {
+        return Some(
+            "path component is empty, path-like, too long, or contains a control character",
+        );
+    }
+    None
 }

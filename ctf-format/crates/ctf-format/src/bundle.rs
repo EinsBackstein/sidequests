@@ -63,7 +63,18 @@ impl<'a> Bundle<'a> {
         // implement, and the file is missing it. `Header::parse` is the backward
         // compatible path and accepts such a file; only the whole-container read
         // needs a container.
+        //
+        // The bit is the authority on whether the read can proceed, never
+        // `version_minor` (§2.3). The minor only picks which refusal reads
+        // correctly to an operator: a pre-0.3 file is simply an older format with
+        // no footer, manifest, or chunk index, while a 0.3+ file missing the bit is
+        // a feature-negotiation inconsistency.
         if header.feat_ro_compat & crate::FEAT_RO_COMPAT_CONTAINER_V1 == 0 {
+            if header.version_minor < crate::CONTAINER_V1_MINOR {
+                return Err(Error::LegacyContainer {
+                    minor: header.version_minor,
+                });
+            }
             return Err(Error::FeatureRequired {
                 class: "ro_compat",
                 bits: crate::FEAT_RO_COMPAT_CONTAINER_V1,
@@ -131,15 +142,29 @@ impl<'a> Bundle<'a> {
         crate::crypto::sign::verify_footer(self.header.suite_id, &self.footer, public_key)
     }
 
-    /// The transcript both signatures cover.
-    pub fn sig_input(&self) -> Vec<u8> {
-        self.footer.sig_input(self.header.suite_id)
-    }
-
     /// The section record with this `name_id`, which is a section's identity
     /// (spec §5.1) — never its position in the table.
     pub fn section(&self, name_id: u16) -> Option<&SectionRecord> {
         self.sections.iter().find(|r| r.name_id == name_id)
+    }
+
+    /// The canonical record for `record`'s `name_id`, or an error if the caller's
+    /// record is not the one this bundle's table holds.
+    ///
+    /// The serving API takes a `&SectionRecord` rather than a `name_id`, so a caller
+    /// can hand in a record it built itself — one whose `root`, `offset`, or
+    /// `len_stored` the footer never committed to. Verifying *that* record's own
+    /// fields proves nothing about the bundle, so membership is checked first.
+    /// `name_id` is unique (T4), so equality with the table's record is membership;
+    /// returning the caller's reference rather than the table's keeps the result
+    /// tied to the caller's borrow, which is all the callers use it for.
+    fn owned<'r>(&self, record: &'r SectionRecord) -> Result<&'r SectionRecord> {
+        match self.section(record.name_id) {
+            Some(canonical) if canonical == record => Ok(record),
+            _ => Err(Error::Inconsistent {
+                what: "section record does not belong to this bundle",
+            }),
+        }
     }
 
     /// A section's plaintext, verified against its `root` before it is returned.
@@ -158,6 +183,10 @@ impl<'a> Bundle<'a> {
     /// one with `comp = 1`. The root check runs over the plaintext either way, so
     /// the caller never sees bytes that were not verified.
     pub fn section_bytes(&self, record: &SectionRecord) -> Result<Cow<'a, [u8]>> {
+        // Membership first: a caller-supplied record proves nothing about this
+        // bundle until it is shown to be the one the table — and therefore the
+        // footer — commits to.
+        let record = self.owned(record)?;
         // Spec §10, normative: "A reader MUST NOT serve, execute, decompress, or
         // decrypt a section whose kind it does not implement (§5.2)." §5.2 is
         // equally explicit that `PLAYER_VISIBLE` on an unknown kind "confers nothing
@@ -200,6 +229,7 @@ impl<'a> Bundle<'a> {
     /// plaintext-derived guess-confirmation oracle while `section_bytes` refuses the
     /// bytes themselves. This mirrors the guards in [`Bundle::section_bytes`].
     pub fn chunk_index(&self, record: &SectionRecord) -> Result<Option<VerifiedChunkIndex>> {
+        let record = self.owned(record)?;
         if !record.kind.is_known() {
             return Err(Error::Inconsistent {
                 what: "a section of a kind this build does not implement has no readable chunk index",
@@ -277,6 +307,7 @@ impl<'a> Bundle<'a> {
         record: &SectionRecord,
         content_key: &[u8],
     ) -> Result<Vec<u8>> {
+        let record = self.owned(record)?;
         if !record.kind.is_known() {
             return Err(Error::Inconsistent {
                 what: "a section of a kind this build does not implement is not decodable",
@@ -337,7 +368,9 @@ impl<'a> Bundle<'a> {
         }
 
         if blake3::hash(&plain).as_bytes() != &record.root {
-            return Err(Error::RootMismatch { at: "section" });
+            return Err(Error::SectionRootMismatch {
+                name_id: record.name_id,
+            });
         }
         Ok(plain)
     }
@@ -376,8 +409,17 @@ impl<'a> Bundle<'a> {
                 report.unverifiable += 1;
                 continue;
             }
-            Self::verified_bytes(self.file, r)?;
-            report.verified += 1;
+            match Self::verified_bytes(self.file, r) {
+                Ok(_) => report.verified += 1,
+                // A root mismatch is the finding, not a reason to stop: the point of
+                // the pass is to tell an operator *which* sections are bad, and a
+                // 50-artifact bundle should not need hand-bisecting. Every other
+                // failure — truncation, an over-cap codec — still aborts, because it
+                // means the structure itself is wrong and the rest of the pass would
+                // be guessing.
+                Err(Error::SectionRootMismatch { name_id }) => report.mismatches.push(name_id),
+                Err(e) => return Err(e),
+            }
         }
         Ok(report)
     }
@@ -419,7 +461,9 @@ impl<'a> Bundle<'a> {
             Compression::Zstd => Cow::Owned(compress::decompress(stored, record.len_plain)?),
         };
         if blake3::hash(&plain).as_bytes() != &record.root {
-            return Err(Error::RootMismatch { at: "section" });
+            return Err(Error::SectionRootMismatch {
+                name_id: record.name_id,
+            });
         }
         Ok(plain)
     }
@@ -440,7 +484,7 @@ impl<'a> Bundle<'a> {
 /// The policy stays with the caller. This type reports; it does not decide, because
 /// a phase 2 caller holding the content key can verify exactly what this build
 /// counts as unverifiable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VerifyReport {
     /// Sections hashed and matched against their `root`.
     pub verified: usize,
@@ -455,6 +499,11 @@ pub struct VerifyReport {
     /// a caller asks for the index. Non-zero here is therefore not a failure, only
     /// a disclosure that index integrity was outside this report.
     pub chunk_indices: usize,
+    /// `name_id` of every inline section whose plaintext did not hash to its
+    /// `root`. The pass does not stop at the first, because the operator fixing a
+    /// bundle needs the whole list; the `name_id` is a number, never attacker text,
+    /// so naming it is not an oracle (spec §13).
+    pub mismatches: Vec<u16>,
 }
 
 fn slice<'a>(file: &'a [u8], start: u64, end: u64, what: &'static str) -> Result<&'a [u8]> {

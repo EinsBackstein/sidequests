@@ -209,6 +209,11 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
       checks with the offending key named and a non-zero exit on any finding.
       **`ctf pack` landed in 0.7.0** (ticket 35): YAML → an unsigned bundle with the
       manifest and a synthesized name table, refusing an invalid document.
+- [ ] `ctf pack` emits the optional `paths` tree (ticket 88). The format-level key
+      and its M22–M25 validation landed in **0.9.0** (spec §7.2): a `name_id` maps
+      to a relative POSIX path, checked component-by-component so traversal is
+      unrepresentable. `names` stays flat; the YAML surface that fills `paths` is
+      the remaining authoring work.
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
 aarch64, and a deliberately nondeterministic generator is rejected at ingest.

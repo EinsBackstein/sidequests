@@ -10,7 +10,11 @@ pub enum Error {
     /// Fewer bytes than the structure being parsed requires.
     Truncated { need: usize, got: usize },
     /// Signature mismatch. Not a `.ctf` file, or mangled in transit.
-    BadMagic { got: [u8; 8] },
+    ///
+    /// Deliberately carries no bytes: the magic is at a fixed offset, so a
+    /// diagnostic needs only the fact of the mismatch, never a copy of the input
+    /// (spec §13's no-oracle rule). The expected value is [`crate::MAGIC`].
+    BadMagic,
     /// `header_len` is not the value this version mandates.
     BadHeaderLen { got: u32 },
     /// Major version this build does not implement.
@@ -58,6 +62,17 @@ pub enum Error {
     /// of [`Error::UnsupportedFeature`]: there the file asks for more than the
     /// reader has, here the reader asks for more than the file offers.
     FeatureRequired { class: &'static str, bits: u32 },
+    /// A whole-container read of a file that predates the container: it carries no
+    /// footer, no manifest, and no chunk index, because it was written before
+    /// `CONTAINER_V1` existed (spec §10 step 2, §16).
+    ///
+    /// Distinct from [`Error::FeatureRequired`] on purpose. The bit is the
+    /// authority and its absence is what refuses the file; this variant only
+    /// reports *why* in the operator's terms — an older format with nothing to
+    /// read — instead of reading as an internal feature-negotiation failure. It
+    /// names `version_minor`, which is informational and never decides anything
+    /// (§2.3).
+    LegacyContainer { minor: u16 },
     /// Two sections claim overlapping byte ranges. Ambiguity here becomes a
     /// parser-differential exploit.
     OverlappingSections { a: u16, b: u16 },
@@ -87,6 +102,13 @@ pub enum Error {
     /// A recomputed BLAKE3 root does not match the one the file claims. The file
     /// is corrupt or has been tampered with; which, this error cannot say.
     RootMismatch { at: &'static str },
+    /// A section's plaintext does not hash to the `root` its record claims.
+    ///
+    /// Separate from [`Error::RootMismatch`] because it can name the offending
+    /// section: `name_id` is a number, not attacker-controlled text, so an operator
+    /// can locate a failing artifact in a 50-section bundle without bisecting by
+    /// hand, and naming it does not turn the error into an oracle (§13).
+    SectionRootMismatch { name_id: u16 },
     /// The manifest violates the schema of `spec/SPEC.md` §7.
     ///
     /// Carries a static description and never the offending text: a manifest is
@@ -123,7 +145,11 @@ pub enum Error {
     CborNotShortest,
     /// A CBOR feature outside the manifest subset: indefinite length, a tag, a
     /// float, `undefined`, or a reserved additional-information value.
-    CborUnsupported { initial: u8 },
+    ///
+    /// `what` names the *kind* of unsupported item and never the byte that carried
+    /// it: an error must not echo input (spec §13), and the category is the useful
+    /// part of the diagnostic anyway.
+    CborUnsupported { what: &'static str },
     /// Two map keys are equal. Last-wins and first-wins are both defensible, which
     /// is exactly why this is rejected instead of resolved.
     CborDuplicateKey,
@@ -159,7 +185,7 @@ impl fmt::Display for Error {
             Self::Truncated { need, got } => {
                 write!(f, "truncated: need {need} bytes, got {got}")
             }
-            Self::BadMagic { got } => write!(f, "bad magic: {got:02x?}"),
+            Self::BadMagic => write!(f, "bad magic: expected the .ctf signature"),
             Self::BadHeaderLen { got } => {
                 write!(f, "bad header_len: {got}, expected {}", crate::HEADER_LEN)
             }
@@ -200,6 +226,11 @@ impl fmt::Display for Error {
                     "file does not declare {class} feature bits {bits:#010x}, which this operation needs"
                 )
             }
+            Self::LegacyContainer { minor } => write!(
+                f,
+                "file is format 0.{minor} with no container: it has no footer, manifest, or chunk index, \
+                 which a whole-container read needs"
+            ),
             Self::OverlappingSections { a, b } => {
                 write!(f, "sections {a} and {b} overlap")
             }
@@ -225,6 +256,9 @@ impl fmt::Display for Error {
                 write!(f, "signature length {got} exceeds cap {max}")
             }
             Self::RootMismatch { at } => write!(f, "BLAKE3 root mismatch at {at}"),
+            Self::SectionRootMismatch { name_id } => {
+                write!(f, "BLAKE3 root mismatch for section {name_id}")
+            }
             Self::Manifest { what } => write!(f, "manifest: {what}"),
             Self::ManifestEntry {
                 what,
@@ -247,8 +281,8 @@ impl fmt::Display for Error {
                 write!(f, "structure ends at {at}, input is {len} bytes")
             }
             Self::CborNotShortest => write!(f, "cbor: integer is not in shortest form"),
-            Self::CborUnsupported { initial } => {
-                write!(f, "cbor: unsupported item, initial byte {initial:#04x}")
+            Self::CborUnsupported { what } => {
+                write!(f, "cbor: unsupported {what}")
             }
             Self::CborDuplicateKey => write!(f, "cbor: duplicate map key"),
             Self::CborUnsortedKeys => write!(f, "cbor: map keys are not in canonical order"),

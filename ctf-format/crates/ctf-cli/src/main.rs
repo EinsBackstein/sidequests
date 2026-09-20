@@ -958,6 +958,13 @@ fn inspect(
             r.len_plain,
             flag_names(r.flags)
         );
+        // The table's `name` column is truncated for alignment, so two long names
+        // that share a prefix render to the same label and the operator cannot tell
+        // the sections apart. Print the full name on its own line, `{:?}`-escaped,
+        // matching the manifest's `name` and the `mirror` lines: the name comes from
+        // the manifest and Debug formatting keeps any control character as visible
+        // text rather than letting it reach the terminal.
+        println!("      name    {name:?}");
         // The expected digest for this section's payload, inline or fetched
         // out-of-band. An operator fetching a 40 GB external image needs it from the
         // tool: without it, the only copy is inside the very file being checked. It
@@ -1002,6 +1009,13 @@ fn inspect(
             "verified      {} inline section(s) against their roots",
             r.verified
         );
+        // Every mismatch, not just the first: an operator fixing a bundle should not
+        // have to bisect. `name_id` is a number and the name is validated, so this
+        // cannot leak or spoof (the name is Debug-escaped).
+        for name_id in &r.mismatches {
+            let name = b.manifest.name_of(*name_id).unwrap_or("?");
+            println!("              section {name_id} ({name:?}) does NOT match its root");
+        }
         if r.external != 0 {
             println!(
                 "              {} external — bytes are not here; stream them separately",
@@ -1019,6 +1033,13 @@ fn inspect(
             return Err(format!(
                 "--verify could not check {} inline section(s); this file is not fully verified",
                 r.unverifiable
+            )
+            .into());
+        }
+        if !r.mismatches.is_empty() {
+            return Err(format!(
+                "--verify found {} section(s) whose bytes do not match their roots",
+                r.mismatches.len()
             )
             .into());
         }

@@ -118,6 +118,14 @@ pub const VERSION_MINOR: u16 = 3;
 /// without costing forward compatibility.
 pub const FEAT_RO_COMPAT_CONTAINER_V1: u32 = 1 << 0;
 
+/// The `version_minor` at which `CONTAINER_V1` was introduced.
+///
+/// Used only to choose a diagnostic, never to decide whether a read may proceed:
+/// the feature bit is the authority (spec §2.3). A file that lacks the bit and
+/// declares a minor below this predates the container, so the refusal can name the
+/// older format instead of reading as a feature-negotiation failure.
+pub const CONTAINER_V1_MINOR: u16 = 3;
+
 /// Incompatible features this build implements. A file requesting any bit outside
 /// this mask cannot be read at all — the reader would be guessing at bytes whose
 /// meaning changed.

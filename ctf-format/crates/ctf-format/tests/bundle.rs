@@ -241,10 +241,15 @@ fn a_0_2_reader_can_read_a_0_3_file_but_not_rewrite_it() {
 /// chunk index of undefined length, because 0.2 §10.2 forbade inventing any of them.
 /// A 0.3 reader reads everything such a file actually defines, and says by name that
 /// there is no container to read rather than failing somewhere structural.
+///
+/// The refusal is decided by the feature bit, never by the minor number (§2.3); the
+/// minor only selects a diagnostic that reads as "older format" rather than as a
+/// feature-negotiation failure.
 #[test]
 fn a_0_3_reader_reads_a_0_2_file_and_names_what_is_missing() {
     let mut file = minimal_bundle();
-    // Clear the bit, exactly as a 0.2 writer left it.
+    // A genuine 0.2 file: minor 2 and the bit clear, exactly as a 0.2 writer left it.
+    file[10..12].copy_from_slice(&2u16.to_le_bytes());
     file[44..48].copy_from_slice(&0u32.to_le_bytes());
 
     let h = Header::parse(&file).unwrap();
@@ -262,8 +267,22 @@ fn a_0_3_reader_reads_a_0_2_file_and_names_what_is_missing() {
     section::validate_layout(&records, &h, &file).unwrap();
 
     // Only the whole-container read needs a container. Note the direction: the bit
-    // is one this build implements and the *file* lacks it, so this is
-    // `FeatureRequired`, not H14's `UnsupportedFeature`.
+    // is one this build implements and the *file* lacks it, so this is not H14's
+    // `UnsupportedFeature`. The diagnostic names the older format.
+    assert!(matches!(
+        Bundle::parse(&file),
+        Err(Error::LegacyContainer { minor: 2 })
+    ));
+}
+
+/// A file that declares a container-era minor but does not set `CONTAINER_V1` is a
+/// feature-negotiation inconsistency, not an older format, and says so.
+#[test]
+fn a_container_era_file_without_the_bit_is_a_feature_error() {
+    let mut file = minimal_bundle();
+    // `minimal_bundle` declares 0.3; only the bit is cleared.
+    file[44..48].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(Header::parse(&file).unwrap().version_minor, 3);
     assert!(matches!(
         Bundle::parse(&file),
         Err(Error::FeatureRequired {
@@ -353,11 +372,65 @@ fn section_bytes_are_verified_before_they_are_returned() {
     // payload bytes, and the payload's own root is what catches this.
     let b = Bundle::parse(&file).unwrap();
     let artifact = *b.section(1).unwrap();
+    // The mismatch names the offending section — a number, not attacker text.
     assert!(matches!(
         b.section_bytes(&artifact),
-        Err(Error::RootMismatch { at: "section" })
+        Err(Error::SectionRootMismatch { name_id: 1 })
     ));
-    assert!(b.verify_inline_sections().is_err());
+    // The verification pass reports every mismatch instead of aborting on the first.
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 1, "the manifest still verifies");
+    assert_eq!(report.mismatches, vec![1]);
+}
+
+/// The report lists *every* bad section, not the first. An operator with 50
+/// artifacts must not have to bisect by hand, which is what aborting on the first
+/// mismatch forced.
+#[test]
+fn the_verify_report_lists_every_mismatch() {
+    let manifest = Manifest::minimal("many", "Many", &["manifest", "a", "b"])
+        .unwrap()
+        .encode()
+        .unwrap();
+    let mut file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                &[0x11u8; 64],
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                2,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                &[0x22u8; 64],
+            ),
+        ],
+    )
+    .unwrap();
+
+    // Flip one byte inside each artifact's payload; the table and commitment are
+    // untouched, so the file still opens and only the section roots disagree.
+    let b = Bundle::parse(&file).unwrap();
+    let (a, c) = (
+        b.section(1).unwrap().offset as usize,
+        b.section(2).unwrap().offset as usize,
+    );
+    drop(b);
+    file[a] ^= 1;
+    file[c] ^= 1;
+
+    let b = Bundle::parse(&file).unwrap();
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 1, "only the manifest still matches");
+    assert_eq!(
+        report.mismatches,
+        vec![1, 2],
+        "every mismatch is reported, in table order"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -367,15 +440,39 @@ fn section_bytes_are_verified_before_they_are_returned() {
 /// Hashing the header is what makes the feature words unstrippable: an attacker who
 /// clears the bit that tells an old reader to refuse a file must also forge the
 /// root.
+///
+/// The test asserts the *commitment* is what rejects each mutation, not merely that
+/// something did. A loop over offsets that trips `BadMagic` or `UnknownFlagBits`
+/// first would pass for any rejection and evidence nothing, so the offsets below are
+/// the two no earlier rule constrains: `version_minor` is informational (§2.3) and
+/// `suite_id` is not validated at parse time. Each must reach step 6 and fail with
+/// `RootMismatch { at: "commitment root" }`. A separate assertion shows the mutation
+/// actually moves the root, so the two are not the same fact restated.
 #[test]
 fn a_flipped_header_byte_breaks_the_commitment() {
-    for off in [16usize, 20, 24, 32, 40, 44] {
-        let mut file = minimal_bundle();
-        file[off] ^= 1;
-        let err = Bundle::parse(&file).unwrap_err();
+    let file = minimal_bundle();
+    let h = Header::parse(&file).unwrap();
+    let (start, end) = h.table_range().unwrap();
+    let table = &file[start as usize..end as usize];
+    let original = commitment_root(&file[..HEADER_LEN as usize], table);
+
+    for off in [10usize, 16] {
+        let mut tampered = file.clone();
+        tampered[off] ^= 1;
+        let err = Bundle::parse(&tampered).unwrap_err();
         assert!(
-            !matches!(err, Error::RootMismatch { at: "section" }),
-            "header offset {off} produced {err}"
+            matches!(
+                err,
+                Error::RootMismatch {
+                    at: "commitment root"
+                }
+            ),
+            "header offset {off} must reach the commitment check, got {err}"
+        );
+        assert_ne!(
+            commitment_root(&tampered[..HEADER_LEN as usize], table),
+            original,
+            "flipping header offset {off} must move the commitment root"
         );
     }
 }
@@ -556,7 +653,7 @@ fn rejects_a_bad_footer_magic() {
     let mut file = minimal_bundle();
     let n = file.len();
     file[n - 1] ^= 1;
-    assert!(matches!(Bundle::parse(&file), Err(Error::BadMagic { .. })));
+    assert!(matches!(Bundle::parse(&file), Err(Error::BadMagic)));
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +689,8 @@ fn unknown_keys_are_carried_byte_for_byte() {
     assert!(m.value().get("zenith").is_some());
 }
 
-/// The same key becomes a hard reject the moment the writer marks it critical.
+/// The same key becomes a hard reject the moment the writer marks it critical. The
+/// diagnostic names the entry's position (M7) rather than echoing the key text.
 #[test]
 fn a_critical_unknown_key_is_rejected() {
     let v = Value::Map(vec![
@@ -608,13 +706,17 @@ fn a_critical_unknown_key_is_rejected() {
     ]);
     assert!(matches!(
         Manifest::decode(&v.encode().unwrap()),
-        Err(Error::Manifest { .. })
+        Err(Error::ManifestEntry {
+            index: Some(0),
+            name_id: None,
+            ..
+        })
     ));
 }
 
 /// A typo appears in neither `crit` nor the known-key list, which is the failure
 /// design §10 actually cares about — and it is still caught, because `crit` may only
-/// name keys the reader implements.
+/// name keys the reader implements. The entry's index is carried (M7).
 #[test]
 fn a_typo_in_crit_is_rejected() {
     let v = Value::Map(vec![
@@ -629,7 +731,11 @@ fn a_typo_in_crit_is_rejected() {
     ]);
     assert!(matches!(
         Manifest::decode(&v.encode().unwrap()),
-        Err(Error::Manifest { .. })
+        Err(Error::ManifestEntry {
+            index: Some(0),
+            name_id: None,
+            ..
+        })
     ));
 }
 
@@ -645,6 +751,181 @@ fn a_higher_spec_number_is_accepted() {
         (Value::Text("names".into()), Value::Array(vec![])),
     ]);
     assert_eq!(Manifest::decode(&v.encode().unwrap()).unwrap().spec(), 99);
+}
+
+/// `Manifest::description` mirrors `category` and has no production caller yet —
+/// phase 3's authoring surface will use it. Pinned here rather than left as untested
+/// public API (ticket 87).
+#[test]
+fn description_accessor_returns_what_the_manifest_carries() {
+    let m = Manifest::build(
+        "chal",
+        "Title",
+        &["manifest"],
+        vec![(
+            Value::Text("description".into()),
+            Value::Text("a **markdown** blurb".into()),
+        )],
+    )
+    .unwrap();
+    assert_eq!(m.description(), Some("a **markdown** blurb"));
+    assert_eq!(
+        m.category(),
+        None,
+        "an absent optional key is None, not empty"
+    );
+
+    let bare = Manifest::minimal("chal", "Title", &["manifest"]).unwrap();
+    assert_eq!(bare.description(), None);
+}
+
+/// A helper for the `paths` tests: a section record with a given `name_id`.
+fn path_record(name_id: u16) -> SectionRecord {
+    SectionRecord {
+        kind: SectionKind::Artifact,
+        name_id,
+        flags: SectionFlags(SectionFlags::PLAYER_VISIBLE),
+        enc: ctf_format::Encryption::None,
+        comp: ctf_format::Compression::None,
+        offset: 4096,
+        len_stored: 10,
+        len_plain: 10,
+        chunk_size: 0,
+        chunk_index_off: 0,
+        root: [0x33; 32],
+    }
+}
+
+/// `names` is flat and unique, so it cannot express `src/main.c` and cannot
+/// disambiguate two `main.c` files in different directories. `paths` is the tree:
+/// a map from `name_id` to a relative POSIX path, checked component-by-component
+/// with the same rules as a name (M22–M25).
+#[test]
+fn paths_express_a_directory_tree() {
+    let m = Manifest::build(
+        "chal",
+        "Title",
+        &["manifest", "main", "main2"],
+        vec![(
+            Value::Text("paths".into()),
+            Value::Map(vec![
+                (Value::Uint(1), Value::Text("src/main.c".into())),
+                (Value::Uint(2), Value::Text("vendor/main.c".into())),
+            ]),
+        )],
+    )
+    .unwrap();
+
+    assert_eq!(m.path_of(1), Some("src/main.c"));
+    assert_eq!(m.path_of(2), Some("vendor/main.c"));
+    // A section with no entry extracts under its flat name.
+    assert_eq!(m.path_of(0), None);
+
+    // Byte-for-byte round trip, like every other manifest key.
+    let bytes = m.encode().unwrap();
+    assert_eq!(Manifest::decode(&bytes).unwrap().encode().unwrap(), bytes);
+
+    // Cross-checked against the table: every key must name a real section.
+    let records = [path_record(0), path_record(1), path_record(2)];
+    m.validate_against(&records).unwrap();
+}
+
+/// Traversal, absolute paths, empty components, and duplicates are all rejects, so
+/// an extraction path cannot escape its directory and two sections cannot collide.
+#[test]
+fn paths_reject_traversal_and_duplicates() {
+    for bad in [
+        "../evil",
+        "a/../../b",
+        "/abs",
+        "a/",
+        "a//b",
+        "a\\b",
+        "./a",
+        "a/./b",
+        "..",
+        "a/..",
+    ] {
+        let result = Manifest::build(
+            "chal",
+            "T",
+            &["manifest", "x"],
+            vec![(
+                Value::Text("paths".into()),
+                Value::Map(vec![(Value::Uint(1), Value::Text(bad.into()))]),
+            )],
+        );
+        assert!(
+            matches!(result, Err(Error::ManifestEntry { .. })),
+            "`{bad}` must be rejected"
+        );
+    }
+
+    // Two sections cannot extract to one file.
+    let dup = Manifest::build(
+        "chal",
+        "T",
+        &["manifest", "a", "b"],
+        vec![(
+            Value::Text("paths".into()),
+            Value::Map(vec![
+                (Value::Uint(1), Value::Text("same".into())),
+                (Value::Uint(2), Value::Text("same".into())),
+            ]),
+        )],
+    );
+    assert!(matches!(dup, Err(Error::ManifestEntry { .. })));
+
+    // A key outside the `name_id` space.
+    let wide = Manifest::build(
+        "chal",
+        "T",
+        &["manifest", "x"],
+        vec![(
+            Value::Text("paths".into()),
+            Value::Map(vec![(Value::Uint(70_000), Value::Text("x".into()))]),
+        )],
+    );
+    assert!(matches!(wide, Err(Error::ManifestEntry { .. })));
+
+    // A non-text path, and `paths` that is not a map.
+    let non_text = Manifest::build(
+        "chal",
+        "T",
+        &["manifest", "x"],
+        vec![(
+            Value::Text("paths".into()),
+            Value::Map(vec![(Value::Uint(1), Value::Uint(1))]),
+        )],
+    );
+    assert!(matches!(non_text, Err(Error::ManifestEntry { .. })));
+    let not_map = Manifest::build(
+        "chal",
+        "T",
+        &["manifest", "x"],
+        vec![(Value::Text("paths".into()), Value::Uint(1))],
+    );
+    assert!(matches!(not_map, Err(Error::Manifest { .. })));
+
+    // A `paths` key naming a section the table does not have (M25). Shape checks pass
+    // at decode; the cross-check needs the table.
+    let dangling = Manifest::build(
+        "chal",
+        "T",
+        &["manifest", "x"],
+        vec![(
+            Value::Text("paths".into()),
+            Value::Map(vec![(Value::Uint(9), Value::Text("ghost".into()))]),
+        )],
+    )
+    .unwrap();
+    assert!(matches!(
+        dangling.validate_against(&[path_record(0), path_record(1)]),
+        Err(Error::ManifestEntry {
+            name_id: Some(9),
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -846,11 +1127,19 @@ fn m6_crit_must_be_an_array_of_text() {
         Value::Text("crit".into()),
         Value::Array(vec![Value::Uint(1)]),
     ));
-    assert!(matches!(manifest_error(non_text), Error::Manifest { .. }));
+    // The offending entry's position is carried, like the sibling list rules.
+    assert!(matches!(
+        manifest_error(non_text),
+        Error::ManifestEntry {
+            index: Some(0),
+            name_id: None,
+            ..
+        }
+    ));
 }
 
 /// M8: a `crit` entry must name a key that is present. (M7 — a key the reader does
-/// not implement — has its own test above.)
+/// not implement — has its own test above.) The entry's index is carried.
 #[test]
 fn m8_crit_must_name_a_present_key() {
     let mut entries = base_manifest();
@@ -859,7 +1148,14 @@ fn m8_crit_must_name_a_present_key() {
         Value::Text("crit".into()),
         Value::Array(vec![Value::Text("category".into())]),
     ));
-    assert!(matches!(manifest_error(entries), Error::Manifest { .. }));
+    assert!(matches!(
+        manifest_error(entries),
+        Error::ManifestEntry {
+            index: Some(0),
+            name_id: None,
+            ..
+        }
+    ));
 }
 
 /// M11: `category` and `description` are optional, but must be text when present.
@@ -1404,15 +1700,17 @@ fn a_chunk_index_is_bounds_and_overlap_checked() {
         "expected an overlap error, got {err}"
     );
 
-    // Point it past the footer.
+    // Point it past the footer. The bound is `footer_off`, so the diagnostic names
+    // it, and `file_len` reports the real file length rather than `footer_off`.
     let mut tampered = file.clone();
     tampered[record_off + 40..record_off + 48].copy_from_slice(&(h.footer_off - 8).to_le_bytes());
     assert!(matches!(
         Bundle::parse(&tampered),
         Err(Error::ExceedsFile {
-            at: "chunk index",
+            at: "chunk index beyond footer_off",
+            file_len,
             ..
-        })
+        }) if file_len == tampered.len() as u64
     ));
 }
 
@@ -1534,14 +1832,56 @@ fn an_unknown_kind_is_committed_and_verified_but_never_served() {
 #[test]
 fn a_sealed_section_is_never_served() {
     let mut file = artifact_bundle();
-    let mut record = *Bundle::parse(&file).unwrap().section(1).unwrap();
-    mark_encrypted(&mut file, 1);
+    // Build the SEALED + encrypted record in the file itself, so the record under
+    // test is the table's own — a hand-mutated copy would be refused by the
+    // membership check before the sealed guard ever ran, proving nothing.
+    mark_sealed_encrypted(&mut file, 1);
     let b = Bundle::parse(&file).unwrap();
-    record.flags = SectionFlags(SectionFlags::SEALED);
+    let record = *b.section(1).unwrap();
+    assert!(record.flags.sealed());
     assert!(matches!(
         b.section_bytes(&record),
         Err(Error::Inconsistent { .. })
     ));
+}
+
+/// The serving API takes a `&SectionRecord`, so a caller can hand in a record it
+/// built itself — one whose `root`, `offset`, or `len_stored` the footer never
+/// committed to. Verifying that record against its own fields would prove nothing
+/// about the bundle, so membership in the table is checked first.
+#[test]
+fn a_record_not_from_the_table_is_refused() {
+    let file = artifact_bundle();
+    let b = Bundle::parse(&file).unwrap();
+    let canonical = *b.section(1).unwrap();
+
+    // A record with the same `name_id` but a field the table does not carry. The
+    // root is the field an attacker would most want to swap, so mutate that.
+    let mut forged = canonical;
+    forged.root[0] ^= 1;
+    assert!(matches!(
+        b.section_bytes(&forged),
+        Err(Error::Inconsistent { .. })
+    ));
+    assert!(matches!(
+        b.chunk_index(&forged),
+        Err(Error::Inconsistent { .. })
+    ));
+    assert!(matches!(
+        b.decrypt_section_bytes(&forged, &[0u8; 32]),
+        Err(Error::Inconsistent { .. })
+    ));
+
+    // A record naming a section the bundle does not have is refused too.
+    let mut absent = canonical;
+    absent.name_id = 99;
+    assert!(matches!(
+        b.section_bytes(&absent),
+        Err(Error::Inconsistent { .. })
+    ));
+
+    // The table's own record still works.
+    assert_eq!(b.section_bytes(&canonical).unwrap().len(), 5000);
 }
 
 /// C8: the chunk index of a section the serving boundary refuses is withheld too.
@@ -1725,9 +2065,10 @@ fn t8_does_not_reach_into_claimed_regions() {
     // inside the table by the commitment — never by T8.
     let mut in_payload = good.clone();
     in_payload[4100] ^= 1;
+    // The manifest's own root catches this, and now names the section it belongs to.
     assert!(matches!(
         Bundle::parse(&in_payload),
-        Err(Error::RootMismatch { .. })
+        Err(Error::SectionRootMismatch { name_id: 0 })
     ));
 
     let mut in_table = good.clone();
