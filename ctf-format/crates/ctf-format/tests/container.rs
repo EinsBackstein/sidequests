@@ -450,6 +450,12 @@ fn record_rejects_sealed_without_encryption() {
 
 /// The invariant that stops the failure mode design §4 calls primary: a sealed
 /// section can never be eligible for serving to players.
+///
+/// **Coverage note:** R5 is the one rule here that a single-field mutation cannot
+/// isolate, because it constrains a *pair* of bits — both must be set to violate it.
+/// That is why this fixture writes both bits in one step rather than flipping one;
+/// the neighbouring rules (R6, R21) each need only a single field change and are
+/// tested that way.
 #[test]
 fn record_rejects_sealed_and_player_visible() {
     let mut r = good_manifest_record();
@@ -589,6 +595,60 @@ fn record_rejects_bad_chunk_size() {
             "chunk_size {bad} must be rejected"
         );
     }
+}
+
+/// R17: a non-zero `chunk_index_off` must be at least 64 and aligned to 8.
+///
+/// Trap check: the fixture is a chunked artifact with `len_plain` spanning two
+/// chunks, so neither R16 (`chunk_index_off` without `chunk_size`) nor R19 (fewer
+/// than two chunks) can fire first and make this prove the wrong rule.
+#[test]
+fn record_rejects_bad_chunk_index_off() {
+    let mut r = good_manifest_record();
+    r.kind = SectionKind::Artifact;
+    r.chunk_size = 4096;
+    r.len_stored = 8192;
+    r.len_plain = 8192;
+
+    // Below `HEADER_LEN`.
+    r.chunk_index_off = 8;
+    assert!(matches!(
+        SectionRecord::parse(&r.to_bytes()),
+        Err(Error::BadOffset {
+            at: "section.chunk_index_off",
+            ..
+        })
+    ));
+
+    // At or above `HEADER_LEN` but not aligned to 8.
+    r.chunk_index_off = 4100;
+    assert!(matches!(
+        SectionRecord::parse(&r.to_bytes()),
+        Err(Error::Misaligned {
+            at: "section.chunk_index_off",
+            ..
+        })
+    ));
+}
+
+/// R20: the manifest may be neither encrypted nor compressed. It says which key
+/// opens every other section and where every external payload lives, so it must be
+/// readable with no key and no codec.
+#[test]
+fn record_rejects_encrypted_or_compressed_manifest() {
+    let mut enc = good_manifest_record();
+    enc.enc = Encryption::AeadStream;
+    assert!(matches!(
+        SectionRecord::parse(&enc.to_bytes()),
+        Err(Error::Inconsistent { .. })
+    ));
+
+    let mut comp = good_manifest_record();
+    comp.comp = Compression::Zstd;
+    assert!(matches!(
+        SectionRecord::parse(&comp.to_bytes()),
+        Err(Error::Inconsistent { .. })
+    ));
 }
 
 #[test]
@@ -828,6 +888,33 @@ fn layout_checks_unknown_optional_sections_like_any_other() {
     assert!(matches!(
         section::validate_layout(&[manifest, future], &h, &zeros()),
         Err(Error::OverlapsSectionTable { name_id: 1 })
+    ));
+}
+
+/// T7: a chunk index range must not overlap any other region — here, a *different*
+/// section's payload. The index is inside `[64, footer_off)` and clear of the
+/// section table, so a bounds-only check would pass it; only overlap detection sees
+/// that the bytes already belong to the manifest.
+#[test]
+fn layout_rejects_index_overlapping_another_payload() {
+    let manifest = good_manifest_record(); // payload [4096, 4196)
+    let mut artifact = good_manifest_record();
+    artifact.kind = SectionKind::Artifact;
+    artifact.name_id = 1;
+    artifact.offset = 12288; // clear of the table at 8192 and the manifest payload
+    artifact.len_stored = 8192;
+    artifact.len_plain = 8192;
+    artifact.chunk_size = 4096;
+    // The index starts on the manifest's payload.
+    artifact.chunk_index_off = 4096;
+
+    let mut h = good_header();
+    h.section_table_count = 2;
+    h.footer_off = 24576;
+    let file = vec![0u8; 24576];
+    assert!(matches!(
+        section::validate_layout(&[manifest, artifact], &h, &file),
+        Err(Error::OverlappingSections { .. })
     ));
 }
 

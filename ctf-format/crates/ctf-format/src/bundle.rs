@@ -8,7 +8,7 @@
 use crate::{
     Error, HEADER_LEN, Header, Result, SECTION_RECORD_LEN, SectionFlags, SectionKind,
     SectionRecord,
-    chunk::{self, ChunkIndex},
+    chunk::{self, ChunkIndex, VerifiedChunkIndex},
     footer::{Footer, MIN_FOOTER_LEN, ROOT_LEN, Signing, commitment_root},
     manifest::Manifest,
     section::{parse_table, validate_layout},
@@ -163,15 +163,19 @@ impl<'a> Bundle<'a> {
     /// `Ok(None)` when the section has no index. The root check happens here rather
     /// than being left to the caller because an unchecked index is worse than none:
     /// per-chunk verification against an attacker's index proves nothing.
-    pub fn chunk_index(&self, record: &SectionRecord) -> Result<Option<ChunkIndex>> {
+    ///
+    /// Returns a [`VerifiedChunkIndex`], which is the only type that can check a
+    /// chunk — so the ordering C6 requires (reduce the index to the root, then check
+    /// chunks) cannot be reversed, and the `chunk_size` the record fixed travels with
+    /// the index instead of being re-supplied per call.
+    pub fn chunk_index(&self, record: &SectionRecord) -> Result<Option<VerifiedChunkIndex>> {
         let Some((start, end)) = record.index_range()? else {
             return Ok(None);
         };
         let bytes = slice(self.file, start, end, "chunk index")?;
         let count = chunk::chunk_count(record.len_plain, record.chunk_size)?;
         let index = ChunkIndex::parse(bytes, count)?;
-        index.verify_root(&record.root)?;
-        Ok(Some(index))
+        Ok(Some(index.verify_root(&record.root, record.chunk_size)?))
     }
 
     /// Verify every inline, unencrypted, uncompressed section against its root.

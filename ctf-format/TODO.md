@@ -5,13 +5,15 @@
 **Read first:** [`HANDOFF.md`](HANDOFF.md) for what the project is, then this file for
 what is outstanding.
 
-**Progress:** Tier 1 complete (B1–B4), plus H1, L1 and L8. Outstanding: H2–H6 and
-L2–L7. Checkboxes below are accurate; each closed item keeps its original text and
-gains a note saying what actually shipped, because in two cases what shipped is not
-what the entry proposed.
+**Progress:** Tier 1 complete (B1–B4), and Tier 2 and Tier 3 complete (H2–H6,
+L1–L8). The post-fix re-review of 2026-09-20 closed the final two open items — L6 and
+L7 — and recorded 28 new tickets (70–97) rather than folding them in; see
+`docs/reviews/0.3-phase1/post-fix/REVIEW.md`. **0.3 is tagged.** Checkboxes below are
+accurate; each closed item keeps its original text and gains a note saying what
+actually shipped, because in two cases what shipped is not what the entry proposed.
 
-Current tree: `cargo test` 139 pass (was 124 at `9f50d84`), `cargo clippy
---all-targets` 0 warnings, `cargo fmt --check` clean.
+Current tree: `cargo test` 161 pass (was 139 after Tier 1, 124 at `9f50d84`),
+`cargo clippy --all-targets` 0 warnings, `cargo fmt --check` clean.
 
 ---
 
@@ -359,7 +361,7 @@ non-zero when `unverifiable != 0`.
   the file would fail on the commitment and never reach the code under test. **B1
   needs the same helper** for its `SEALED`-with-`enc = 0` cases.
 
-### [ ] H2 — `verify_chunk` is callable without `verify_root`
+### [x] H2 — `verify_chunk` is callable without `verify_root`
 
 - **Source:** Security reviewer. Confirmed: both are `pub` on `ChunkIndex`; only a
   doc comment orders them. `Bundle::chunk_index` does the right thing, but the raw
@@ -379,7 +381,7 @@ non-zero when `unverifiable != 0`.
   `chunk_size` field populated from the record, and let `verify_chunk(index, data)`
   take no size argument at all. One type change, two convention-only rules retired.
 
-### [ ] H3 — spec §7.3's typo claim is false for optional keys
+### [x] H3 — spec §7.3's typo claim is false for optional keys
 
 - **Source:** Challenge-dev reviewer. Confirmed in `spec/SPEC.md:812-816`.
 - Current text: *"A typo is still caught … the value the author meant to set is
@@ -395,7 +397,7 @@ non-zero when `unverifiable != 0`.
   (reject unknown YAML keys at authoring time, phase 3) and record it as a phase 3
   requirement in `docs/ROADMAP.md`.
 
-### [ ] H4 — spec §9.2's chunk merge is not implementable from the document alone
+### [x] H4 — spec §9.2's chunk merge is not implementable from the document alone
 
 - **Source:** Spec-document reviewer (rated HIGH). Not a defect in running code.
 - §9.2 says `parent_cv`/`parent_root` are "BLAKE3's parent node compression,
@@ -410,7 +412,7 @@ non-zero when `unverifiable != 0`.
   BLAKE3 version/spec revision it is defined against, and add a worked
   two-chunk example with intermediate chaining values.
 
-### [ ] H5 — normative rules with no dedicated test
+### [x] H5 — normative rules with no dedicated test
 
 - **Source:** Rust quality reviewer. Uncovered: **R17, R20, T7, C7, M2–M6, M8,
   M11–M12, M14–M18, M20.**
@@ -421,7 +423,7 @@ non-zero when `unverifiable != 0`.
   valid baseline, in the established style. While doing it, re-verify that each
   existing rejection test trips the rule it names and not an earlier one.
 
-### [ ] H6 — the `section_table` fuzz target never calls `validate_layout`
+### [x] H6 — the `section_table` fuzz target never calls `validate_layout`
 
 - **Source:** Rust quality reviewer. Confirmed by reading
   `fuzz/fuzz_targets/section_table.rs`.
@@ -437,12 +439,12 @@ non-zero when `unverifiable != 0`.
 | # | Finding | Where |
 |---|---|---|
 | [x] L1 | CLI prints `category` and mirror URLs unescaped — a crafted bundle can inject terminal escape sequences and spoof output. See the note below; the fix is already sitting two lines away | `crates/ctf-cli/src/main.rs:106-108`, `137` |
-| [ ] L2 | `ctf inspect` never prints a section's `root`; an operator fetching a 40 GB external payload cannot get the expected digest from the tool | `crates/ctf-cli/src/main.rs` |
-| [ ] L3 | Manifest errors carry no index or `name_id`, so "names entry is not text" means hand-decoding CBOR on a 50-artifact bundle. An index is a number, not attacker text, so this does not violate the no-oracle rule | `src/manifest.rs`, `src/error.rs` |
-| [ ] L4 | §8.2 note says "R1 mandates hybrid signing" — collides with *record rule* R1. It means *design requirement* R1. Cite **F4** instead | `spec/SPEC.md` §8.2 |
-| [ ] L5 | §8.2 says key distribution "is specified with the suite registry (§14)" while §14 says the registry is unspecified. State plainly that it is not specified in this version | `spec/SPEC.md` §8.2, §14 |
-| [ ] L6 | `ChunkIndex::parse` accepts trailing bytes past `count × 32` but `to_bytes` drops them, breaking the documented byte-for-byte round trip. Require `b.len() == need` | `src/chunk.rs` |
-| [ ] L7 | `Manifest::validate_against` is O(records × external entries) — 4096 records against many entries is a lot of comparisons before rejection. Build a lookup set once | `src/manifest.rs:347-386` |
+| [x] L2 | `ctf inspect` never prints a section's `root`; an operator fetching a 40 GB external payload cannot get the expected digest from the tool | `crates/ctf-cli/src/main.rs` |
+| [x] L3 | Manifest errors carry no index or `name_id`, so "names entry is not text" means hand-decoding CBOR on a 50-artifact bundle. An index is a number, not attacker text, so this does not violate the no-oracle rule | `src/manifest.rs`, `src/error.rs` |
+| [x] L4 | §8.2 note says "R1 mandates hybrid signing" — collides with *record rule* R1. It means *design requirement* R1. Cite **F4** instead | `spec/SPEC.md` §8.2 |
+| [x] L5 | §8.2 says key distribution "is specified with the suite registry (§14)" while §14 says the registry is unspecified. State plainly that it is not specified in this version | `spec/SPEC.md` §8.2, §14 |
+| [x] L6 | `ChunkIndex::parse` accepts trailing bytes past `count × 32` but `to_bytes` drops them, breaking the documented byte-for-byte round trip. Require `b.len() == need` | `src/chunk.rs` |
+| [x] L7 | `Manifest::validate_against` is O(records × external entries) — 4096 records against many entries is a lot of comparisons before rejection. Build a lookup set once | `src/manifest.rs:347-386` |
 | [x] L8 | `ctf inspect a.ctf b.ctf` silently inspects `b.ctf` — the arg loop assigns `path` on every positional, so the last one wins with no warning. Error on a second positional | `crates/ctf-cli/src/main.rs:47` |
 
 ### [x] L1 and L8 — done 2026-08-16
@@ -637,3 +639,29 @@ The security and spec-conformance roles are the two worth re-running first.
    text CBOR admits. Escaping makes that safe to *print*; it does not make it
    sensible to *store*. Left open deliberately — decide it with `ctf pack` in phase 3,
    where authoring-time validation belongs.
+
+---
+
+## Post-fix re-review — 2026-09-20
+
+The committed prompts were re-run against the tree with tickets 01–06 applied, plus a
+seventh lane partitioned by artifact rather than by role. (The Codex CLI could not be
+used — no network egress from the sandbox — so the lanes ran as seven parallel
+read-only agent sessions using the prompts verbatim; see
+`docs/reviews/0.3-phase1/post-fix/REVIEW.md`.)
+
+**Every finding above is closed.** The re-review's new findings are recorded as
+tickets **70–97** in the ticket tracker, not fixed inline, and are explicitly
+deferred. The two that phase 2 must settle before building on them are:
+
+- **Ticket 71** — the footer's `sig_classical_len`/`sig_pq_len` are inside neither
+  the commitment root nor the signature transcript, so the slot split is
+  unauthenticated. Harmless while signatures are unverified; phase 2 must pin
+  per-suite signature sizes or bind the lengths.
+- **Ticket 70** — `Bundle::chunk_index` returns a verified index for a `SEALED`
+  record whose plaintext `section_bytes` refuses, exposing plaintext-derived chaining
+  values. Phase 2 decides whether a sealed index is intentionally exposed.
+
+The rest span spec wording, the authoring surface, and test/tooling gaps; none is
+ship-blocking for phase 1. Deferring them was the deliberate choice so that the tagged
+0.3 is exactly the tree both reviews saw.

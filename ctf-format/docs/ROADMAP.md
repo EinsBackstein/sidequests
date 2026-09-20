@@ -158,6 +158,12 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
 - [ ] `determinism: flag_only` path requiring no generator at all — this is the
       default and it carries most challenges
 - [ ] `ctf init <archetype>` scaffolds a working generator per archetype
+- [ ] **Authoring-time schema validation**: `ctf pack` rejects unknown YAML keys, so
+      a typo'd optional key (`visibilty`) is caught at the authoring surface. The
+      manifest's `crit` mechanism provides *reader forward compatibility*, not typo
+      detection (spec §7.3) — a misspelled optional key is otherwise carried and
+      ignored, which is exactly the "silently publish a hidden challenge" incident
+      design §10 names
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
 aarch64, and a deliberately nondeterministic generator is rejected at ingest.

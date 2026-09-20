@@ -148,6 +148,21 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
             r.len_plain,
             flag_names(r.flags)
         );
+        // The expected digest for this section's payload, inline or fetched
+        // out-of-band. An operator fetching a 40 GB external image needs it from the
+        // tool: without it, the only copy is inside the very file being checked. It
+        // is a digest and a number, so printing it cannot leak payload or echo
+        // attacker text. For an external section it is the record's `root`, which
+        // spec §5.7 makes authoritative over the manifest's copy.
+        println!(
+            "      root    {}{}",
+            hexstr(&r.root),
+            if r.flags.contains(SectionFlags::EXTERNAL) {
+                "  (external)"
+            } else {
+                ""
+            }
+        );
         if let Some(ext) = b.manifest.external(r.name_id) {
             for m in &ext.mirrors {
                 println!("      mirror  {m:?}");

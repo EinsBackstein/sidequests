@@ -7,6 +7,72 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.3.1] — 2026-09-20
+
+The review-debt release. Everything the first multi-agent review found is now
+closed, the specification's weak spots are corrected or pinned, and a post-fix
+re-review's new findings are recorded and deferred rather than folded in.
+
+**No on-disk change.** `version_minor` stays `3` and every 0.3 file is byte-identical;
+this is the same container with tighter code, better diagnostics, and clearer text.
+0.3.0's entry below is preserved as the historical record of what that tag contains.
+
+### Changed — chunk verification is enforced by a type
+
+`ChunkIndex::verify_root` now consumes the index and returns a
+`VerifiedChunkIndex`, which owns the `chunk_size` the record fixed and is the only
+type carrying `verify_chunk`. C6 ("reduce the index to the root before checking any
+chunk") and C7 ("expose no chunk before it passes C5") stop being doc comments and
+become unwritable in the wrong order. Two `compile_fail` doctests pin that a bare
+index has no per-chunk method and that no method returns chunk bytes.
+
+### Changed — diagnostics name the entry
+
+New `Error::ManifestEntry` carries an index, a `name_id`, or a mirror position —
+numbers, never text, so the no-oracle rule holds — for the `names`, `external`, and
+`mirrors` rules. `ctf inspect` prints every section's `root` (the digest an operator
+needs to check an out-of-band fetch) and marks externally stored sections.
+
+### Changed — the spec is implementable alone
+
+- **§9.2 is pinned to BLAKE3 specification revision `20211102173700`**, with the
+  parent-node and root compression given in full and a worked three-chunk example
+  whose intermediate chaining values are printed. An independent reimplementation
+  reproduced the example and §11's golden vector.
+- **§7.3 no longer claims `crit` catches typos.** Criticality is reader forward
+  compatibility; typo detection belongs to `ctf pack` (recorded as a phase 3
+  requirement in `docs/ROADMAP.md`).
+- **§8.2 cites F4 for the downgrade check**, not a requirement label that collides
+  with record rule R1, and states plainly that key distribution is unspecified.
+- `cv(i)` is stated to be the non-root chaining value of an aligned subtree, not a
+  single-chunk value.
+
+### Added — tests and fuzz coverage
+
+- **Every previously untested rule** now has a single-property fixture: R17, R20, T7,
+  C7, M2–M6, M8, M11–M18, and M20.
+- **The `section_table` fuzz target reaches `validate_layout`**, so T1–T8 are fuzzed;
+  a committed seed is asserted to reach T8.
+- 161 tests, zero clippy warnings, still `unsafe_code = "forbid"`, one dependency.
+
+### Fixed
+
+- **`ChunkIndex::parse` accepted trailing bytes** while `to_bytes` dropped them, so
+  one index had two byte spellings and the documented round trip did not hold. It now
+  requires exactly `count × 32` bytes (`Error::TrailingBytes`), and the fuzz oracles
+  compare against the whole input.
+- **`Manifest::validate_against` was O(records × external entries).** Both lookups are
+  built once, so cross-validation is linear in the section count capped at 4096.
+
+### Review debt
+
+All first-review findings (B1–B4, H1–H6, L1–L8) are closed. The post-fix re-review's
+new findings are tickets 70–97, explicitly deferred so the tagged tree is exactly the
+tree the review saw; see `docs/reviews/0.3-phase1/post-fix/REVIEW.md`. Phase 2 must
+settle two before building on them: **71** (the footer's signature-slot lengths are
+in neither the root nor the transcript) and **70** (a sealed section's chunk index is
+served while its plaintext is refused).
+
 ## [0.3.0] — 2026-08-16
 
 Phase 1 complete: the container is whole. A `.ctf` now carries a manifest, commits
@@ -365,6 +431,9 @@ requirement and why the two mechanisms are not alternatives.
   byte-identical chunks still get different chaining values.
 
 ### Known issues
+
+**Superseded: every item below was fixed in [0.3.1].** This list is preserved
+because it describes the 0.3.0 tag as shipped; do not read it as the current state.
 
 Found by a six-role multi-agent review of this release (`docs/reviews/0.3-phase1/`,
 with the exact prompts committed alongside the reports) and a second verification
