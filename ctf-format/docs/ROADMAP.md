@@ -164,7 +164,15 @@ R1 is mandated, so this lands before generators.
       — **landed in 0.7.0** (ticket 15, spec §22). `seed`, `flag`, and `stage_key`
       are domain-separated and length-prefix safe; a test asserts no bundle byte
       contains the flag or the secret.
-- [ ] `ctf keys` / `ctf seal` / `ctf unseal`
+- [x] `ctf keys` / `ctf seal` / `ctf unseal`
+      — **landed in 0.8.0** (tickets 16 and 18). The writer emits `enc = 1`
+      end to end: compress (`comp = 1` frames one zstd frame per chunk), seal with a
+      fresh content key under AEAD-STREAM, and wrap that key to each recipient as an
+      envelope in the bundle's `keys` section. `Bundle::section_content_key` opens
+      an envelope, `Bundle::decrypt_section_bytes` recovers and verifies the
+      plaintext, and `section_bytes` keeps refusing a keyless reader. The envelope
+      gained a `name_id` (spec §21.3, EN5) so one `keys` section serves many
+      encrypted sections.
 - [x] Test vectors for every primitive, checked against a second library
       — **landed in 0.7.0** (ticket 17). `spec/vectors/generate.py` derives them
       from a pure-Python BLAKE3, Python HKDF/AEAD/Ed25519, and OpenSSL 3.6 for
@@ -246,14 +254,17 @@ touching the CLI.
 ## Phase 6 — Subjects, holders, handoff (design §9)
 
 - [x] Entitlement chain: append-only, hash-chained, hybrid-signed
-      — **record format specified in 0.5.0** (ticket 38, spec §18): the CBOR array
-      of records, `seq` ordering, `prev` hash chain, genesis binding to the bundle
-      commitment root, and the hybrid transcript. Implementation is ticket 39.
-- [ ] `grant` / `transfer` / `revoke` / `progress` records
-- [ ] `transfer` requires the current holder's signature — non-repudiable handoff
+      — **record format specified in 0.5.0** (ticket 38, spec §18); **implemented in
+      0.8.0** (ticket 39): `entitlement.rs` with E1–E8 offline validation and **E9**
+      signature verification given trusted keys, so §14 shrinks to key distribution
+      and the live gate.
+- [x] `grant` / `transfer` / `revoke` / `progress` records — the four record types
+      are represented, signed, and validated (ticket 39)
+- [x] `transfer` requires the current holder's signature — non-repudiable handoff
+      (E8 requires it; E9 verifies it against the holder named by the previous record)
 - [ ] `progress` carries earned stage flags sealed to the new holder's key
-- [ ] Ordering by `seq`; `timestamp` is advisory display only
-- [ ] Offline validation: chain verifies with no platform reachable (air-gapped
+- [x] Ordering by `seq`; `timestamp` is advisory display only
+- [x] Offline validation: chain verifies with no platform reachable (air-gapped
       forensics workstation on USB media)
 - [ ] `ctf transfer`
 
@@ -266,11 +277,12 @@ validates offline.
 
 Depends on phase 2's derived flags.
 
-- [ ] `stage:N` section key = `HKDF(flag(N-1), "stage" ‖ N)`
-- [ ] Validator **rejects** `stage_gate` on static flags — a guessable string is
-      not a key
-- [ ] Test: stage 3 stays opaque ciphertext even when the whole bundle is handed
-      over
+- [x] `stage:N` section key = `HKDF(flag(N-1), "stage" ‖ N)` — **landed in 0.8.0**
+      (spec §22.4); a stage-gated section's content key is derived, not random
+- [x] Validator **rejects** `stage_gate` on static flags — a guessable string is
+      not a key (`flag.stage_gate` + DF5, spec §7.6/§22.5, 0.8.0)
+- [x] Test: stage 3 stays opaque ciphertext even when the whole bundle is handed
+      over (`tests/encrypted.rs`, 0.8.0)
 
 **Done when** the crypto enforces unlock order with the platform's gating logic
 deliberately disabled in the test.

@@ -35,11 +35,19 @@
 //!
 //! | Key | Type | Value |
 //! |---|---|---|
+//! | `name_id` | uint | The identity of the section whose `content_key` this wraps |
 //! | `context` | tstr | The recipient context, carried verbatim |
 //! | `ct` | bstr | The hybrid KEM ciphertext |
 //! | `wrapped` | bstr | The sealed content key (`content_key ‖ tag`) |
 //!
-//! Exactly these three keys; a missing, extra, or wrong-typed key is rejected.
+//! Exactly these four keys; a missing, extra, or wrong-typed key is rejected.
+//!
+//! `name_id` is what lets one `keys` section serve every encrypted section in a
+//! bundle: it is the section's own identity (§5.1), the value the STREAM nonce and
+//! AAD already bind, so a recipient finds the envelope addressed to the section it
+//! holds. It is not itself covered by the envelope AAD, but a mismatched `name_id`
+//! still fails safe: the recovered content key is then used to decrypt a different
+//! section, whose STREAM AAD binds its own `name_id`, so the tag does not verify.
 
 use crate::cbor::Value;
 use crate::suite::{KemContext, Role, SuiteError};
@@ -71,6 +79,9 @@ fn malformed(reason: &'static str) -> SuiteError {
 /// A content key wrapped to one named recipient.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
+    /// The identity of the section whose `content_key` this envelope wraps
+    /// (spec §5.1). One `keys` section can carry envelopes for many sections.
+    pub name_id: u16,
     /// The recipient context: `storage`, `seal`, `stage:<n>`, or `holder`.
     pub context: String,
     /// The hybrid KEM ciphertext for the recipient.
@@ -81,13 +92,15 @@ pub struct Envelope {
 
 /// Seal a content key to a recipient's hybrid KEM public key.
 ///
-/// The returned envelope is bound to `context`; unwrapping requires the exact same
-/// context (see [`Envelope::open`]).
+/// The returned envelope is bound to `name_id` (the section whose key it carries)
+/// and to `context`; unwrapping requires the exact same context (see
+/// [`Envelope::open`]).
 pub fn seal(
     content_key: &[u8; 32],
     recipient_public_key: &[u8],
     suite_id: u16,
     version_major: u16,
+    name_id: u16,
     context: &str,
 ) -> Result<Envelope, SuiteError> {
     let suite = crate::suite::suite(suite_id)?;
@@ -107,6 +120,7 @@ pub fn seal(
     let wrapped = aead.seal(&kek, &nonce, &aad, content_key)?;
 
     Ok(Envelope {
+        name_id,
         context: context.to_owned(),
         ciphertext,
         wrapped,
@@ -160,10 +174,14 @@ impl Envelope {
         crate::crypto::fixed::<CONTENT_KEY_LEN>(&plaintext, Role::Kem)
     }
 
-    /// The envelope as a canonical-CBOR value: a map with `context`, `ct`, and
-    /// `wrapped`.
+    /// The envelope as a canonical-CBOR value: a map with `name_id`, `context`,
+    /// `ct`, and `wrapped`.
     pub fn to_cbor(&self) -> Value {
         Value::Map(vec![
+            (
+                Value::Text("name_id".into()),
+                Value::Uint(u64::from(self.name_id)),
+            ),
             (
                 Value::Text("context".into()),
                 Value::Text(self.context.clone()),
@@ -188,6 +206,7 @@ impl Envelope {
             .as_map()
             .ok_or_else(|| malformed("envelope is not a CBOR map"))?;
 
+        let mut name_id: Option<u16> = None;
         let mut context: Option<String> = None;
         let mut ciphertext: Option<Vec<u8>> = None;
         let mut wrapped: Option<Vec<u8>> = None;
@@ -197,6 +216,17 @@ impl Envelope {
                 .as_text()
                 .ok_or_else(|| malformed("envelope map key is not text"))?;
             match name {
+                "name_id" => {
+                    if name_id.is_some() {
+                        return Err(malformed("envelope has a duplicate key"));
+                    }
+                    let raw = value
+                        .as_uint()
+                        .ok_or_else(|| malformed("envelope name_id is not an unsigned integer"))?;
+                    name_id = Some(u16::try_from(raw).map_err(|_| {
+                        malformed("envelope name_id is outside the u16 section identity space")
+                    })?);
+                }
                 "context" => {
                     if context.is_some() {
                         return Err(malformed("envelope has a duplicate key"));
@@ -235,6 +265,7 @@ impl Envelope {
         }
 
         Ok(Envelope {
+            name_id: name_id.ok_or_else(|| malformed("envelope is missing name_id"))?,
             context: context.ok_or_else(|| malformed("envelope is missing context"))?,
             ciphertext: ciphertext.ok_or_else(|| malformed("envelope is missing ct"))?,
             wrapped: wrapped.ok_or_else(|| malformed("envelope is missing wrapped"))?,

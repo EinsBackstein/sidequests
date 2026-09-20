@@ -76,15 +76,29 @@ pub fn check_caps(len_plain: u64, stored: u64) -> Result<()> {
 /// without having retained chunk *N-1*'s output.
 pub fn compress(plain: &[u8], chunk_size: u32) -> Result<Vec<u8>> {
     let mut out = Vec::new();
+    for frame in compress_frames(plain, chunk_size)? {
+        out.extend_from_slice(&frame);
+    }
+    Ok(out)
+}
+
+/// Compress a section's plaintext into one frame per chunk, as separate buffers.
+///
+/// This is the same framing [`compress`] emits, kept un-concatenated so the
+/// encrypted path (`enc = 1` with `comp = 1`, spec §20.2) can seal each frame as
+/// its own STREAM chunk. `chunk_size = 0` yields a single frame; otherwise frame
+/// *i* covers `[i × chunk_size, min((i+1) × chunk_size, len(plain)))`.
+pub fn compress_frames(plain: &[u8], chunk_size: u32) -> Result<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
     if chunk_size == 0 {
         let frame = zstd::bulk::compress(plain, LEVEL).map_err(|_| Error::DecompressionFailed)?;
-        out.extend_from_slice(&frame);
+        out.push(frame);
     } else {
         let chunk_size = chunk_size as usize;
         for chunk in plain.chunks(chunk_size) {
             let frame =
                 zstd::bulk::compress(chunk, LEVEL).map_err(|_| Error::DecompressionFailed)?;
-            out.extend_from_slice(&frame);
+            out.push(frame);
         }
     }
     Ok(out)

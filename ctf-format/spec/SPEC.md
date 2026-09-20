@@ -1,13 +1,13 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.7.0
+**Version:** 0.3 (major 0, minor 3); document revision 0.8.0
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
-format (§18), the crypto suite registry (§19), the phase 2 constructions — the
-hybrid KEM combiner, the AEAD-STREAM construction, and hybrid signature production
-and verification (§20) — the key-envelope construction (§21), and derived flags and
-stage keys (§22). Entitlement signature verification, key distribution, and the
-live gate remain unspecified. See §14.
+format and chain validation (§18), the crypto suite registry (§19), the phase 2
+constructions — the hybrid KEM combiner, the AEAD-STREAM construction, and hybrid
+signature production and verification (§20) — the key-envelope construction (§21),
+and derived flags and stage keys (§22). Key distribution and the live gate remain
+unspecified. See §14.
 **Reference implementation:** `crates/ctf-format`.
 **Rationale, threat model, and design history:** `docs/FORMAT-DESIGN.md`. Where
 that document and this one disagree, this one wins.
@@ -153,7 +153,10 @@ identity (§5.1).
 
 The file MAY contain bytes belonging to no structure (padding). A writer MUST zero
 them and a reader MUST reject any that is not zero (T8). Padding is permitted only
-*between* structures; the footer itself admits none (F5).
+*between* structures; the footer itself admits none (F5). **T8 applies only to a
+file that sets `CONTAINER_V1`** (§16): it is a statement about the commitment root
+of §8.3 and the transcript of §8.4, and a 0.1 or 0.2 file has neither, so applying
+it unconditionally would reject files its predecessors called valid.
 
 Earlier drafts made zeroing a writer's SHOULD with no reader-side rule, which
 contradicted the two paragraphs around it: F5 forbids footer slack, and the next
@@ -380,10 +383,13 @@ The same header as written by version **0.1**, which differs only at offset 10:
 0.1 wrote zeros across `[40, 64)`, which is exactly what 0.2 reads as "no
 features in use" — the reason the version could grow without moving a field.
 
-All three are asserted byte-for-byte by the reference tests
-`tests/container.rs::header_golden_vector`, `::header_golden_vector_v0_1`, and
-`tests/bundle.rs::minimal_bundle_golden_vector`. Any change to any of them is a
-format break.
+Each vector is asserted byte-for-byte by its own test, so a failure names the
+version that moved: `tests/container.rs::header_golden_vector` (0.2),
+`tests/container.rs::header_golden_vector_v0_1` (0.1), and
+`tests/container.rs::header_golden_vector_v0_3` (the 0.3 header above — the minimal
+bundle's layout offsets with `CONTAINER_V1` set). The whole-file
+`tests/bundle.rs::minimal_bundle_golden_vector` pins the same 0.3 header among the
+bytes it asserts. Any change to any of them is a format break.
 
 ## 5. Section record
 
@@ -1015,7 +1021,7 @@ agree about them.
 
 | Key | Type | Required sub-keys | Optional sub-keys |
 |---|---|---|---|
-| `flag` | tstr **or** map | — (a tstr is a derivation name, e.g. `derived`) | `derive` tstr, `template` tstr, `scope` tstr |
+| `flag` | tstr **or** map | — (a tstr is a derivation name, e.g. `derived`) | `derive` tstr, `template` tstr, `scope` tstr, `stage_gate` bool |
 | `generate` | map | `wasm` tstr, `determinism` tstr, `outputs` array | — |
 | `runtime` | map | `image` tstr, `ports` array, `resources` map, `instancing` tstr, `ttl` tstr, `readiness` map | — |
 | `sealed` | map | `release` tstr, `members` array of tstr | — |
@@ -1029,6 +1035,15 @@ Within `generate.outputs`, each entry is a map with `name` (tstr) and
 `team`, or `event`; `generate.determinism` is one of `strict`, `flag_only`, or
 `none`; `runtime.instancing` is `shared` or `per_team`; `sealed.release` is
 `event_end`, `manual`, or `stage:<id>`.
+
+`flag.stage_gate`, when true, declares that a later stage's key derives from this
+flag (spec §22.4). It is valid **only** on a derived flag: a stage gate on a static
+flag MUST be rejected by the validator (DF5, §22.5), because a stage key must derive
+from something with entropy, not from a guessable string. `derive` names the
+derivation; `derived` and `hkdf-sha256` are the derivations this version implements,
+and `static`/`none` name a literal. The key is an ordinary carried declaration like
+the rest of this section: a reader that does not act on it preserves it byte-for-byte
+and MUST NOT reject the file for carrying it.
 
 **The container carries these keys; it does not act on them.** A reader of this
 version MUST preserve them byte-for-byte (they are ordinary manifest keys) and MUST
@@ -1583,15 +1598,25 @@ measured against.
 | `SUPPORTED_RO_COMPAT` | `0x00000001` | `feat_ro_compat` bits this version implements |
 
 Every limit above is **normative, not an implementation detail**: a writer that
-exceeds one produces a file that every conforming reader rejects. Raising any of
-them is therefore an incompatible change (§15). At the cap the section table is
-512 KiB, which is four orders of magnitude above what a real challenge uses.
+exceeds one produces a file that every conforming reader rejects. The two directions
+are not symmetric, and §15's table is the authority:
 
-`MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` are the exception, and the
-direction is the reason: they bound what a *reader* will expand rather than what a
-writer may emit, so **raising** either accepts more files and is a relaxation
-(§15's "relaxations are free"), while lowering either rejects files that were legal
-and needs a feature bit.
+- **Lowering** a limit rejects files that were legal when written, so a lower limit
+  needs a `feat_incompat` bit.
+- **Raising** a limit is a relaxation: a reader with the higher limit accepts
+  strictly more files, and accepts every file the lower limit accepted. It needs no
+  bit for the reader. A writer that emits a file *beyond* the old limit SHOULD set a
+  `feat_incompat` bit, so an old reader names the missing feature rather than
+  reporting a structural error about a range it never expected.
+
+At the cap the section table is 512 KiB, which is four orders of magnitude above
+what a real challenge uses.
+
+`MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` are the same rule in a
+different direction: they bound what a *reader* will expand rather than what a writer
+may emit, so **raising** either accepts more files and is a relaxation (§15's
+"relaxations are free"), while lowering either rejects files that were legal and
+needs a feature bit.
 
 `root` is 32 bytes in the frozen layout, so **every present and future crypto
 suite MUST use a 32-byte digest.** A suite with a different digest size requires
@@ -1678,11 +1703,9 @@ The customary filename extension is `.ctf`. No media type is registered.
 An implementation MUST NOT invent behaviour for any of the following, and MUST
 NOT claim conformance to a later version by guessing.
 
-- **The entitlement chain's signatures (E9).** The record format, ordering, and
-  genesis binding are specified (§18), but verifying `sig_holder` and `sig_platform`
-  is not implemented. The signature primitive itself is specified (§20.3).
-- **Key distribution.** How a verifier obtains the trusted public key of §20.3 is not
-  specified; it is an input, never a bundle field (§8.2).
+- **Key distribution.** How a verifier obtains the trusted public key of §20.3, or
+  the trusted keys E9 verifies entitlement records under (§18.4), is not specified;
+  they are inputs, never bundle fields (§8.2).
 - **The live solvability gate's socket contract** (design §3, pillar 5).
 
 ## 15. Extension policy
@@ -1702,7 +1725,8 @@ which looks harmless in review cannot silently become a compatibility break.
 | Add a value to `enc` or `comp` | `feat_incompat` bit (§5.4) |
 | Add a field to the footer | `feat_incompat` bit |
 | Change a layout, alignment, or ordering rule | `feat_incompat` bit |
-| Raise or lower any limit in §12 | `feat_incompat` bit |
+| **Lower** a limit in §12, so files that were legal are rejected | `feat_incompat` bit |
+| **Raise** a limit in §12, so a reader accepts more | Nothing for the reader; old readers were merely stricter. A writer emitting a file beyond the old limit SHOULD set a `feat_incompat` bit, so an old reader names the feature rather than failing structurally |
 | Add data a reader may ignore but a rewriter would destroy | `feat_ro_compat` bit |
 | Define a structure a previous version left unspecified | Run the criticality test; `feat_ro_compat` if old readers still answer correctly about what they do check, `feat_incompat` otherwise |
 | Add a new section kind that must be understood | `feat_incompat` bit **and** a kind number |
@@ -1754,7 +1778,7 @@ Rules for the editor, all normative:
 | 0.4+, `feat_incompat` feature not in use | 0.3 | Accepted |
 | 0.4+, `OPTIONAL` unknown kind | 0.3 | Accepted; the section is carried, never interpreted |
 | Manifest `spec` 2+, no `crit` | 0.3 | Accepted; unknown keys carried byte-for-byte |
-| Manifest `spec` 2+, unknown key in `crit` | 0.3 | Rejected, naming the key (M7) |
+| Manifest `spec` 2+, unknown key in `crit` | 0.3 | Rejected (M7). The diagnostic may identify the entry's position — a number — but MUST NOT echo the key text, which is attacker-controlled manifest content (§13) |
 
 **R20, R21, R22 and T8 are conditional on `CONTAINER_V1`, and this is what the bit
 is for.** Each narrows what a 0.1 or 0.2 file could legally contain, so applying
@@ -1812,6 +1836,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.5.0 | Phase 2 groundwork and the authoring surface. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Defines zstd framing and the two decompression caps (§5.4, D1–D2), adds `MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` to §12, and implements compression in the reference reader and writer. Specifies the five declaration keys `flag`, `generate`, `runtime`, `sealed`, `verify` (§7.6) and the namespaced `platform` overlay (§7.7), and makes strict key rejection normative for the authoring front end (§7.8). Specifies the entitlement record format, ordering, genesis binding, and signature transcript (§18), and the crypto suite registry with its failure timing (§19); only the BLAKE3 hash role is implemented. Nothing here narrows what is legal — each change either defines a structure a previous version left unspecified or widens what a reader accepts — so no feature bit is spent. |
 | 0.6.0 | Phase 2 constructions. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Specifies and implements the hybrid KEM combiner (§20.1), the AEAD-STREAM construction with its nonce, AAD, and per-chunk length framing (§20.2) — including the composition of `comp = 1` with `enc = 1` — and hybrid signature production and verification over the §8.4 transcript (§20.3), for suites 1 and 2; suite 3's SLH-DSA signature role remains unimplemented. Nothing here narrows what is legal: it defines structures 0.5 left unspecified, and the 0.5 writer emits `enc = 0` only, so no feature bit is spent (§15). §14 shrinks accordingly — key envelopes, derived flags, entitlement signatures, key distribution, and the live gate remain unspecified. |
 | 0.7.0 | Key envelopes, derived flags, and the review-debt tickets 72–97. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file this version's writer produces is byte-identical to a 0.6 file's for the same inputs. Specifies the key-envelope construction (§21) and the derived-flag and stage-key derivations (§22), and the production side of the hybrid signature — signing a bundle in place, changing no byte outside the footer (§20.3). Adds **R22** (an `EXTERNAL` record carries no codec) and gates **R20** on `CONTAINER_V1`; both ride the existing bit rather than spending a new one, because the mirror bytes R22 rules out were never well-defined (§5.7, §9.4) and no writer has produced the combination, while R20 on the legacy path protects nothing (§16). Places the C1–C7 chunk-index rules explicitly **on-use** in §10, and states `chunk_size ≠ 0` as a precondition of the §5.5 index-length formula, R19, T6, C1, and C3, with R16 ordered before them (§2.1, §5.6). §14 shrinks to entitlement signatures, key distribution, and the live gate. |
+| 0.8.0 | Encrypted sections end to end, the entitlement chain, and stage gating. **No byte-layout change:** `version_minor` stays `3`, and the header, section table, footer, commitment root, and signature transcript are untouched. Adds **`name_id`** to the key-envelope map (§21.3, EN5), which is what lets one `keys` section deliver the content keys of every encrypted section; no writer has ever emitted a `keys` section, so no existing file carries the old three-key form. The reference writer now emits `enc = 1` — compress, then encrypt, with `comp = 1` framing one zstd frame per STREAM chunk (§5.4, §20.2) — and a reader recovers a section's key from its envelope and decrypts it. A **stage-gated** section's content key is `stage_key(flag(N−1), N)` rather than random (§20.2, §22.4); the derivation is the gate and no envelope carries it. Implements the entitlement chain's E1–E9 (§18): the record format was specified in 0.5.0, and **E9** now verifies `sig_platform` always and a `transfer`'s `sig_holder` given trusted keys, so §14 shrinks to key distribution and the live gate. Adds the optional `flag.stage_gate` declaration (§7.6) and enforces **DF5**: a stage gate on a static flag is rejected, and a static flag is `static`/`none` or any derivation this version does not implement. Closes the review-debt tickets 75, 77, 78, 79, and 82: §15's limit row is split by direction and §12 reconciled with it; §3's padding clause is gated on `CONTAINER_V1`; §16's M7 cell no longer claims to name the key; §4.5 names the test that asserts each header vector, with a dedicated **0.3 header vector test** added; and `ctf` gains argument parsing, shell completions, and CLI integration tests. Every change either defines what a previous version left unspecified or *widens* what a reader accepts, so no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -1833,7 +1858,7 @@ manifest; a reader MUST reject any byte after the array.
 | `root` | bstr, 32 bytes | ● at genesis only | Commitment root (§8.3) of the bundle the genesis grant was issued for |
 | `timestamp` | int (uint or nint) | | Platform-issued; **advisory only** |
 | `payload` | bstr | | Opaque bytes, e.g. a `progress` blob sealed to the new holder |
-| `sig_holder` | map | required for `transfer` | Current holder's hybrid signature |
+| `sig_holder` | map | required for `transfer`, absent otherwise | Current holder's hybrid signature |
 | `sig_platform` | map | ● | Platform's hybrid signature |
 
 A signature map has exactly two keys, `classical` and `pq`, each a byte string.
@@ -1846,7 +1871,7 @@ A signature map has exactly two keys, `classical` and `pq`, each a byte string.
 - The **record id** of record *n* is
   `BLAKE3("ctf/entitlement/record/v1" ‖ cbor)`, where `cbor` is the canonical
   encoding of the record map with both `sig_*` keys removed.
-  `"ctf/entitlement/record/v1"` is the 24 ASCII bytes, with no terminator.
+  `"ctf/entitlement/record/v1"` is the 25 ASCII bytes, with no terminator.
 - `prev` of record *n* (n > 0) MUST equal the record id of record *n−1*; `prev` of
   the genesis record (n = 0) MUST be 32 zero bytes.
 - The genesis record MUST be a `grant` and MUST carry `root` equal to the
@@ -1864,10 +1889,13 @@ sig_input = "ctf/entitlement-sig/v1" ‖ u16_le(suite_id) ‖ u32_le(seq) ‖ re
 
 `"ctf/entitlement-sig/v1"` is 22 ASCII bytes. `suite_id` is the enclosing bundle's
 header field, and both components of that suite's hybrid signature MUST verify
-(§19). The label differs from §8.4's, so a footer signature can never be replayed as
-an entitlement signature even though the two share keys (design §9). `sig_holder` is
-required only for `transfer`, which is what makes a handoff non-repudiable: the
-current holder cannot later claim another player took the challenge.
+(§19). Every element after the label is fixed width, so the transcript is
+`22 + 2 + 4 + 32 = 60` bytes and needs no length prefixes (design §7's `LP` rule
+applies to inputs with a variable-width element). The label differs from §8.4's, so a
+footer signature can never be replayed as an entitlement signature even though the
+two share keys (design §9). `sig_holder` is required only for `transfer`, which is
+what makes a handoff non-repudiable: the current holder cannot later claim another
+player took the challenge.
 
 ### 18.4 Validation rules
 
@@ -1883,21 +1911,26 @@ following holds.
 | E5 | The genesis record is not a `grant`, does not carry `root`, or has a non-zero `prev`. |
 | E6 | A non-genesis record carries `root`. |
 | E7 | `prev` of a record does not equal the record id of its predecessor. |
-| E8 | `sig_platform` is absent; or `type` is `transfer` and `sig_holder` is absent. |
+| E8 | `sig_platform` is absent; or `type` is `transfer` and `sig_holder` is absent; or `type` is not `transfer` and `sig_holder` is present. |
+| E9 | A `sig_platform` signature, or a `transfer`'s `sig_holder` signature, does not verify under a trusted key. |
 
-Signature verification is **E9** and is not implemented in this version (§14). The
-signature primitive itself exists (§20.3); E9 is the entitlement transcript's
-verification over it, which is not yet written. A reader MUST NOT report a chain as
-authenticated until it is.
+E9 needs trusted public keys the bundle does not carry — key distribution is out of
+scope (§14) — so it is a separate step from the offline E1–E8 check: the platform's
+public key always, and for a `transfer` the public key of the holder named by the
+previous record. Both components of the suite's hybrid signature MUST verify over
+the §18.3 transcript (§20.3); a failure of either is a failure of the whole.
+E1–E8 establish structure and the genesis binding, **not** authenticity: a reader
+MUST NOT report a chain as authenticated until E9 has run with trusted keys.
 
 ### 18.5 Offline validation
 
 Everything except E9 is checkable with no platform reachable: the records are
 inside the bundle, the chain is a hash chain, and the genesis binds the bundle's
-commitment root. That is why the chain lives in the format rather than in a
-database table — an air-gapped forensics workstation on USB media has to validate
-it, and it has to stay auditable even if the platform's database is later found to
-be wrong (design §9).
+commitment root. E9 needs trusted public keys, but it needs no network either — the
+signature primitive is local and the keys are an input (§14). That is why the chain
+lives in the format rather than in a database table — an air-gapped forensics
+workstation on USB media has to validate it, and it has to stay auditable even if
+the platform's database is later found to be wrong (design §9).
 
 ## 19. Crypto suite registry
 
@@ -2043,6 +2076,15 @@ because it is a different keystream. Re-encrypting under a reused key is forbidd
 and no field exists that would make it safe. A rewriter MUST NOT reassign `name_id`
 (§5.1).
 
+**One exception, for stage gating.** A stage-gated section's content key is not
+random: it is `stage_key(flag(N−1), N)` (§22.4). The derivation *is* the gate, so the
+key must be recomputable by whoever submits the previous stage's flag, and it is
+never delivered by an envelope. This is the only case in which a content key is not
+drawn fresh, and it is safe for the same reason a fresh key is: the flag that derives
+it is per-subject and per-stage, so two encryptions under one `name_id` still use
+different keys unless the same flag is submitted twice for the same stage — which the
+platform's one-shot stage progression forbids.
+
 A reader MUST reject a body whose framing is malformed, whose last chunk was not
 sealed as final, that has bytes beyond the body, or any chunk whose tag does not
 verify, and MUST NOT return plaintext before every chunk has been authenticated
@@ -2127,19 +2169,28 @@ the tag does not verify.
 
 A `keys` section (kind 7, §5.2) carries envelopes as the plaintext of a single
 canonical CBOR **array** (§7.1), one element per envelope, with no bytes after it.
-Each element is a map with exactly three keys:
+Each element is a map with exactly four keys:
 
 | Key | Type | Meaning |
 |---|---|---|
+| `name_id` | uint | The identity (§5.1) of the section whose `content_key` this envelope wraps |
 | `context` | tstr | The recipient context, carried verbatim; §21.1 names the contexts in use |
 | `ct` | bstr | The hybrid KEM ciphertext |
 | `wrapped` | bstr | The content key sealed under the KEM-derived key |
 
+`name_id` is what lets one `keys` section serve every encrypted section in a bundle:
+a recipient finds the envelope addressed to the section it holds. It is the section's
+own identity — the value the STREAM nonce and AAD already bind (§20.2) — so an
+envelope whose `name_id` is swapped is not a forgery of a key; the recovered content
+key is then used to decrypt a different section, whose STREAM AAD binds its own
+`name_id`, and the tag does not verify.
+
 A reader MUST reject a `keys` section whose plaintext is not canonical CBOR, is not
 an array, has bytes after it, or contains an element that is not a map, is missing
-one of the three keys, carries an extra key, or has a field of the wrong type
-(**EN5**). The `keys` section is not `SEALED` by construction: an envelope is
-ciphertext, and hiding it would prevent the recipient from finding it.
+one of the four keys, carries an extra key, has a field of the wrong type, or has a
+`name_id` outside the `u16` section identity space (**EN5**). The `keys` section is
+not `SEALED` by construction: an envelope is ciphertext, and hiding it would prevent
+the recipient from finding it.
 
 ## 22. Derived flags
 
@@ -2181,9 +2232,12 @@ flag(seed) = base32_lower( HMAC-SHA-256(key = seed, message = "ctf/flag/v1")[0..
 RFC 4648 §6 with the alphabet `abcdefghijklmnopqrstuvwxyz234567`, lowercase, and
 **no** `=` padding.
 
-The flag's length is a per-challenge choice, not a format constant: a challenge
-that needs a 128-bit boundary uses 26 base32 characters. The default derivation
-above yields 80 bits, and §22.5 states the consequence.
+The flag's length is a per-challenge choice, not a format constant: the default
+10-byte prefix of the tag yields 80 bits and 16 symbols, while a challenge that needs
+a 128-bit boundary keeps 16 bytes, which base32 renders as 26 characters. The
+ceiling is the HMAC-SHA-256 tag itself — 32 bytes, or 52 symbols — because a flag can
+never carry more entropy than the tag it is truncated from. §22.5 states the
+consequence.
 
 ### 22.4 Stage keys
 
@@ -2209,6 +2263,12 @@ envelope (§21) delivers, so a stage-gated section is `enc = 1` and
 | DF3 | `flag` is 16 lowercase base32 characters for the default derivation, with no padding. |
 | DF4 | A stage key derives from the previous stage's flag, never from the stage number alone. |
 | DF5 | A validator MUST reject a `stage_gate` declared on a **static** flag: an 80-bit derived flag is an acceptable key, a guessable static string is not. |
+
+A stage gate is declared by `flag.stage_gate` (§7.6). A flag is **derived** when
+`flag` is the shorthand `derived`, or its `derive` is `derived` or `hkdf-sha256`; it
+is **static** otherwise — `static`, `none`, or any derivation name this version does
+not implement, because an unknown derivation cannot be assumed to contribute
+entropy.
 
 **The 80-bit ceiling is real and inherent.** A stage key must be derivable from the
 flag a player submits and nothing else, so stage gating's strength is exactly the

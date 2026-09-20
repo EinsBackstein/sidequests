@@ -128,5 +128,11 @@ fn a_second_positional_is_an_error() {
     let b = TempYaml::new("two", MINIMAL);
     let (ok, _out, err) = validate(a.path(), &[b.path()]);
     assert!(!ok, "a second positional must be rejected");
-    assert!(err.contains("one file"), "{err}");
+    // clap formats the diagnostic; the intent is that the extra argument is
+    // rejected with an explanation, and nothing is validated.
+    assert!(!err.is_empty(), "a usage error must explain itself");
+    assert!(
+        err.contains("unexpected argument"),
+        "the extra argument must be rejected: {err}"
+    );
 }

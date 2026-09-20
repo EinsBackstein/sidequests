@@ -1,8 +1,10 @@
-//! Derived-flag tests (ticket 15, design §7, spec §20).
+//! Derived-flag tests (ticket 15, design §7, spec §20, §22).
 //!
 //! The construction is pinned by independent known-answer vectors (test 5), and by
 //! the leak invariant that a bundle carries the derivation *rule*, never a flag
-//! value or the event secret (test 7).
+//! value or the event secret (test 7). The flag length is a per-challenge choice
+//! (spec §22.3): test 3 covers the default 10-byte flag and test 3b the longer
+//! length a 128-bit boundary needs.
 
 #![allow(
     clippy::unwrap_used,
@@ -11,7 +13,7 @@
     clippy::panic
 )]
 
-use ctf_format::derive::{base32_lower, flag, stage_key, subject_seed};
+use ctf_format::derive::{base32_lower, flag, flag_with_bytes, stage_key, subject_seed};
 use ctf_format::{
     Manifest, Role, SectionFlags, SectionKind, SectionSpec, SuiteError, write_bundle,
 };
@@ -116,6 +118,51 @@ fn flags_are_16_base32_characters() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. The per-challenge longer flag (spec §22.3)
+// ---------------------------------------------------------------------------
+
+/// The flag length is a per-challenge choice, not a format constant: the default
+/// is 10 bytes / 16 symbols / 80 bits, and a challenge that needs a 128-bit
+/// boundary asks for 16 bytes / 26 symbols. `flag` stays the 10-byte default.
+#[test]
+fn flag_with_bytes_covers_the_per_challenge_length_choice() {
+    let alphabet = b"abcdefghijklmnopqrstuvwxyz234567";
+    let seed = subject_seed(&secret(), "whos-that-bird", 3, "team-alpha").unwrap();
+
+    // The default is a call at FLAG_BYTES, byte-for-byte.
+    assert_eq!(flag(&seed), "oil5phz5xep2ss7j");
+    assert_eq!(flag_with_bytes(&seed, 10), flag(&seed));
+
+    // 16 bytes is the 128-bit boundary: exactly 26 base32 symbols.
+    let long = flag_with_bytes(&seed, 16);
+    assert_eq!(long.len(), 26, "a 16-byte flag is 26 symbols");
+    assert!(
+        long.bytes().all(|b| alphabet.contains(&b)),
+        "the longer flag {long:?} left the base32 alphabet"
+    );
+
+    // 32 bytes is the full HMAC-SHA-256 tag: 256 bits, `ceil(256/5)` = 52 symbols.
+    // The full-tag value is pinned independently in
+    // `known_answer_vectors_from_python`; here we nail the shape.
+    assert_eq!(flag_with_bytes(&seed, 32).len(), 52);
+
+    // A longer flag differs from the default and from another length.
+    assert_ne!(long, flag_with_bytes(&seed, 10));
+    assert_ne!(long, flag_with_bytes(&seed, 17));
+
+    // Out of range clamps into 1..=32, so the function stays infallible: `0` reads
+    // as one byte (never empty), and anything past the tag length reads as the full
+    // tag. This is the documented behavior, not a panic and not an `Err`.
+    assert_eq!(flag_with_bytes(&seed, 0), flag_with_bytes(&seed, 1));
+    assert_eq!(flag_with_bytes(&seed, 1).len(), 2);
+    assert_eq!(flag_with_bytes(&seed, 33), flag_with_bytes(&seed, 32));
+    assert_eq!(
+        flag_with_bytes(&seed, usize::MAX),
+        flag_with_bytes(&seed, 32)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 4. Stage keys
 // ---------------------------------------------------------------------------
 
@@ -138,6 +185,29 @@ fn stage_keys_are_deterministic_and_domain_separated() {
         s1, s1_other,
         "different previous flags must derive different keys"
     );
+
+    // DF4 — no stage *N* key without stage *N-1*'s flag. For a fixed *N*, each
+    // distinct previous flag yields a distinct key, so no function of the stage
+    // number alone can produce stage 2's (or any stage's) key. This is the explicit
+    // "stage N is not derivable from N" assertion the rule requires.
+    let prev_alice = flag(&subject_seed(&secret(), "whos-that-bird", 3, "alice").unwrap());
+    let prev_bob = flag(&subject_seed(&secret(), "whos-that-bird", 3, "bob").unwrap());
+    assert_ne!(prev_alice, prev_bob);
+    for n in [1u32, 2, 3, 11, u32::MAX] {
+        assert_ne!(
+            stage_key(&prev_alice, n).unwrap(),
+            stage_key(&prev_bob, n).unwrap(),
+            "stage {n} collided across two previous flags, so it cannot depend on the flag"
+        );
+    }
+
+    // Stage 2 in particular: a key derived from the stage number alone would be the
+    // same for every previous flag, which the loop above already refutes. Pin the
+    // concrete pair as well, so a regression to a number-only derivation is caught
+    // even if the HKDF trade moves.
+    let s2_alice = stage_key(&prev_alice, 2).unwrap();
+    let s2_bob = stage_key(&prev_bob, 2).unwrap();
+    assert_ne!(s2_alice, s2_bob, "stage 2 must depend on stage 1's flag");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,8 +248,11 @@ fn stage_keys_are_deterministic_and_domain_separated() {
 ///     info = lp(chal_id.encode()) + version.to_bytes(8, 'little') + lp(subject.encode())
 ///     return hkdf_sha256(secret, b"ctf/seed/v1", info)
 ///
+/// def flag_n(s, n):
+///     return base32_lower(hmac.new(s, b"ctf/flag/v1", hashlib.sha256).digest()[:n])
+///
 /// def flag(s):
-///     return base32_lower(hmac.new(s, b"ctf/flag/v1", hashlib.sha256).digest()[:10])
+///     return flag_n(s, 10)
 ///
 /// def stage_key(prev, n):
 ///     return hkdf_sha256(prev.encode(), b"ctf/stage/v1", n.to_bytes(4, 'little'))
@@ -189,14 +262,19 @@ fn stage_keys_are_deterministic_and_domain_separated() {
 ///     (bytes([0xAB]) * 32, "baby-rop", 1, "player-7"),
 /// ]:
 ///     s = seed(secret, cid, ver, subj); f = flag(s)
-///     print(s.hex(), f, stage_key(f, 1).hex(), stage_key(f, 2).hex())
+///     print(s.hex(), f, flag_n(s, 16), flag_n(s, 32),
+///           stage_key(f, 1).hex(), stage_key(f, 2).hex())
 ///
 /// # seed1 = 20b0f7556a9de4382cda2501eb74791e85474831adfe1ccf84dab59305099f6e
 /// # flag1 = oil5phz5xep2ss7j
+/// # flag1(16) = oil5phz5xep2ss7jyujd4iktam
+/// # flag1(32) = oil5phz5xep2ss7jyujd4iktap6qsuxjwrgr3jekt7cl7f2xk7rq
 /// # stage1(1) = 08eeb095eab82304c338dc14155b4975ee71523c41dfbca7f90927f46d281552
 /// # stage1(2) = 629c4e12879a15640c3a81b7ef551d08b5b7a0cc979faa6d4b7078e3ecdebf0e
 /// # seed2 = cbc510e9f8a31e9efa8d37893f94dd62f479b60c32c01bd59c9350b7728d49cc
 /// # flag2 = hsd3aynpnbo6z3d6
+/// # flag2(16) = hsd3aynpnbo6z3d6bju46e2nli
+/// # flag2(32) = hsd3aynpnbo6z3d6bju46e2nllxmofdayvtik2gazurvw6bdyaqq
 /// # stage2(1) = 000850deded12cbcd6f9a3edb3f8bda72955e90a4aa3e0acfc8c346b2c1b0ead
 /// # stage2(2) = 295fb759b9073807828da0d25ba7460ffd3515e8b5d24cbc82fb167e7f69377f
 /// ```
@@ -209,6 +287,13 @@ fn known_answer_vectors_from_python() {
     );
     let f1 = flag(&s1);
     assert_eq!(f1, "oil5phz5xep2ss7j");
+    // The longer flags are the same HMAC tag truncated further: 16 bytes is the
+    // 128-bit boundary (26 symbols), 32 bytes is the full tag (52 symbols).
+    assert_eq!(flag_with_bytes(&s1, 16), "oil5phz5xep2ss7jyujd4iktam");
+    assert_eq!(
+        flag_with_bytes(&s1, 32),
+        "oil5phz5xep2ss7jyujd4iktap6qsuxjwrgr3jekt7cl7f2xk7rq"
+    );
     assert_eq!(
         stage_key(&f1, 1).unwrap().to_vec(),
         hex("08eeb095eab82304c338dc14155b4975ee71523c41dfbca7f90927f46d281552")
@@ -225,6 +310,11 @@ fn known_answer_vectors_from_python() {
     );
     let f2 = flag(&s2);
     assert_eq!(f2, "hsd3aynpnbo6z3d6");
+    assert_eq!(flag_with_bytes(&s2, 16), "hsd3aynpnbo6z3d6bju46e2nli");
+    assert_eq!(
+        flag_with_bytes(&s2, 32),
+        "hsd3aynpnbo6z3d6bju46e2nllxmofdayvtik2gazurvw6bdyaqq"
+    );
     assert_eq!(
         stage_key(&f2, 1).unwrap().to_vec(),
         hex("000850deded12cbcd6f9a3edb3f8bda72955e90a4aa3e0acfc8c346b2c1b0ead")

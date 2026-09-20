@@ -272,6 +272,24 @@ impl ChallengeDoc {
             None => {}
         }
 
+        // DF5. A stage key derives from the previous stage's flag (spec §22.4), so
+        // the gate is exactly as strong as that flag's entropy. An 80-bit derived
+        // flag is an acceptable key; a guessable static string is not. The check
+        // lives here, at the authoring boundary, so the author is told before a byte
+        // is packed rather than at the point a player can already read stage 1.
+        if self
+            .flag
+            .as_ref()
+            .is_some_and(|spec| stage_gate_declared(spec) && !flag_is_derived(spec))
+        {
+            issues.push(ValidationIssue::new(
+                "flag.stage_gate",
+                "a stage gate needs a derived flag: a stage key derives from the previous \
+                 stage's flag (spec §22.4), so a static, guessable string is not a key \
+                 (spec §22.5, DF5). Use `derive: hkdf-sha256`, or `flag: derived`",
+            ));
+        }
+
         if let Some(g) = &self.generate {
             one_of(
                 &mut issues,
@@ -393,10 +411,38 @@ impl FlagSpec {
                 if let Some(s) = &d.scope {
                     entries.push(("scope", Value::Text(s.clone())));
                 }
+                if d.stage_gate {
+                    entries.push(("stage_gate", Value::Bool(true)));
+                }
                 map(entries)
             }
         }
     }
+}
+
+/// Whether a flag has entropy from `event_secret` (a *derived* flag), as opposed to
+/// a literal string a player could guess (*static*).
+///
+/// Stage gating builds its key from the previous stage's flag (spec §22.4), so the
+/// gate is exactly as strong as the flag's entropy: an 80-bit derived flag is an
+/// acceptable key, a guessable static string is not (spec §22.5, DF5). The
+/// derivations this build implements are `derived` and `hkdf-sha256`; `static` and
+/// `none` name a literal. Any other value is treated as static, because an unknown
+/// derivation cannot be assumed to contribute entropy.
+fn flag_is_derived(spec: &FlagSpec) -> bool {
+    match spec {
+        FlagSpec::Shorthand(s) => is_derivation(s),
+        FlagSpec::Detailed(d) => is_derivation(&d.derive),
+    }
+}
+
+fn is_derivation(name: &str) -> bool {
+    matches!(name, "derived" | "hkdf-sha256")
+}
+
+/// Whether the document declares a stage gate at all.
+fn stage_gate_declared(spec: &FlagSpec) -> bool {
+    matches!(spec, FlagSpec::Detailed(d) if d.stage_gate)
 }
 
 /// The expanded `flag:` mapping.
@@ -411,6 +457,10 @@ pub struct FlagDetail {
     /// `player`, `team`, or `event`.
     #[serde(default)]
     pub scope: Option<String>,
+    /// Whether a later stage's key derives from this flag. Requires a *derived* flag
+    /// (spec §22.5, DF5): a static string is not a key.
+    #[serde(default)]
+    pub stage_gate: bool,
 }
 
 /// A hand-written deserializer so `flag:` accepts a scalar or a map without the

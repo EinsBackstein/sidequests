@@ -7,6 +7,95 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.8.0] — 2026-09-20
+
+Encrypted sections end to end, the entitlement chain, stage gating, and the last of
+the 0.3 review debt. **No byte-layout change:** `version_minor` stays `3`, and the
+header, section table, footer, commitment root, and signature transcript are
+untouched. Everything here either defines what a previous revision left unspecified
+or *widens* what a reader accepts, so no new feature bit is spent (spec §15).
+
+### Added — encrypted sections, end to end (ticket 16, spec §20.2, §21)
+
+The writer now emits `enc = 1`. `SectionSpec::encrypted(recipients)` draws a fresh
+`content_key`, compresses (`comp = 1` frames one zstd frame per chunk) and then
+seals under the STREAM construction, and wraps the key to each recipient as an
+envelope collected into the bundle's `keys` section (`SectionSpec::envelopes`).
+On the read side `Bundle::section_content_key` finds the envelope naming a section
+and opens it with a recipient secret key, and `Bundle::decrypt_section_bytes`
+verifies the framing per chunk, decompresses `comp = 1` frames, and checks the
+plaintext against `root` before returning it. `section_bytes` still refuses an
+encrypted (or sealed) section, so a keyless reader gets nothing.
+
+**Envelope `name_id` (EN5).** An envelope is now
+`{ name_id, context, ct, wrapped }`. `name_id` is the identity of the section whose
+content key it wraps, so one `keys` section can serve every encrypted section. No
+writer has ever emitted a `keys` section, so no existing file carries the old form.
+
+### Added — stage-gated content keys (spec §20.2, §22.4)
+
+A stage-gated section's content key is `stage_key(flag(N−1), N)` rather than random:
+the derivation is the gate, and no envelope delivers it.
+`SectionSpec::encrypted_with_key` supplies it.
+
+### Added — the entitlement chain (ticket 39, spec §18)
+
+`src/entitlement.rs`: an append-only, hash-chained, hybrid-signed log. Records
+serialize as a canonical-CBOR array (`EntitlementRecord`, `RecordType`), each record
+id is `BLAKE3("ctf/entitlement/record/v1" ‖ cbor-with-sigs-removed)`, and `prev`
+chains to the predecessor. `EntitlementChain::validate` enforces **E1–E8** offline;
+`sign_record` produces both signatures over
+`"ctf/entitlement-sig/v1" ‖ u16_le(suite_id) ‖ u32_le(seq) ‖ record_id`, and
+`verify_signatures` implements **E9**, verifying `sig_platform` always and a
+`transfer`'s `sig_holder` from a holder-key resolver — so §14 shrinks to key
+distribution and the live gate.
+
+### Added — stage-gate validation (tickets 45, 46, 47, spec §7.6, §22)
+
+`flag.stage_gate` is a carried declaration; `derive: static`/`none` (or any
+unimplemented derivation) marks a static flag and **DF5** rejects a stage gate on
+one, naming `flag.stage_gate`. `derive::flag_with_bytes` exposes the per-challenge
+flag length (16 bytes → the 26 symbols of a 128-bit boundary). A test proves stage 3
+stays opaque ciphertext handed over whole, with no gating logic consulted.
+
+### Added — `ctf keys` / `ctf seal` / `ctf unseal` (ticket 18)
+
+`ctf keys --context <storage|seal|stage:N|holder>` generates a hybrid KEM keypair;
+`ctf seal` re-emits a bundle with a named section encrypted to a recipient and a
+`keys` section carrying the envelope; `ctf unseal` recovers the plaintext with the
+matching secret key. The seal key never enters the bundle.
+
+### Changed — CLI argument parsing (ticket 37)
+
+`ctf-cli` moved to `clap`: every subcommand is discoverable through `--help`, a
+`completions <shell>` subcommand generates shell completions, and a second
+positional is a usage error. Exit codes are preserved — `2` still means
+`inspect --verify` on an intact-but-unsigned bundle, and usage errors exit `1`.
+
+### Changed — the last 0.3 review tickets (75, 77, 78, 79, 82)
+
+- **§15's limit row is split by direction** (ticket 75, spec §12/§15). Lowering a
+  limit needs a `feat_incompat` bit; raising one is a relaxation, and §12 no longer
+  says otherwise.
+- **§3's padding clause is gated on `CONTAINER_V1`** (ticket 77), matching §6/§10/§16.
+- **§16's M7 cell no longer claims to name the key** (ticket 78); the no-echo rule is
+  stated in the cell.
+- **§4.5 names the test per vector** (ticket 79), and a dedicated 0.3 header vector
+  test (`tests/container.rs::header_golden_vector_v0_3`) pins the 0.3 bytes.
+- **CLI integration tests** (ticket 82) cover `inspect`, the `--verify` exit path,
+  help discoverability, completions, and the two-positional rejection.
+
+### Spec
+
+Spec revision 0.8.0 adds `name_id` to §21.3, the stage-gate exception to §20.2,
+`flag.stage_gate` to §7.6, E9 to §18.4, the split §12/§15 limit rule, and gates §3's
+padding clause. §14 shrinks to key distribution and the live gate.
+
+### Tests
+
+283 → 331 tests, zero clippy warnings, `unsafe_code = "forbid"`, `cargo fmt
+--check` clean.
+
 ## [0.7.0] — 2026-09-20
 
 Key envelopes, derived flags, bundle signing, `ctf pack`, and the deferred review

@@ -1,9 +1,17 @@
 //! `ctf` — the command-line tool for `.ctf` bundles.
 //!
-//! Subcommands: `inspect`, `validate`, `pack`, `keygen`, `sign`. The rest of
-//! design §10's table arrives with the phases that give it something to do —
-//! `run` needs phase 4's gate, `seal`/`unseal`/`transfer` need the entitlement
-//! chain and seal-release management.
+//! Subcommands: `inspect`, `validate`, `pack`, `keygen`, `keys`, `sign`, `seal`,
+//! `unseal`, and `completions`. The rest of design §10's table arrives with the
+//! phases that give it something to do — `run` needs phase 4's gate, and
+//! `init`/`transfer` need the authoring archetypes and the entitlement and
+//! seal-release management. `completions` is the one §10 CLI item that needs no
+//! runtime behind it, so it lands with the parser.
+//!
+//! The `keys`/`seal`/`unseal` trio is the key-envelope workflow of spec §21: a
+//! recipient's hybrid KEM keypair is generated once, a section's fresh content key
+//! is wrapped to that recipient's public key on `seal`, and recovered with the
+//! matching secret key on `unseal`. The secret key is never written into a bundle;
+//! only the envelope is.
 //!
 //! # What `inspect` will not print
 //!
@@ -14,103 +22,252 @@
 
 use std::process::ExitCode;
 
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
+
 use ctf_format::authoring::ChallengeDoc;
+use ctf_format::cbor::Value;
 use ctf_format::pack::{self, PackError};
 use ctf_format::{
-    Bundle, HEADER_LEN, HybridPublicKey, HybridSigningKey, SECTION_RECORD_LEN, SectionFlags,
-    SectionKind, Signing,
+    Bundle, Compression, Encryption, HEADER_LEN, HybridPublicKey, HybridSigningKey, KemKeyPair,
+    Payload, Recipient, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionSpec, Signing,
 };
 
-const USAGE: &str = "\
-usage: ctf inspect [--hex] [--verify] [--allow-unsigned] <file.ctf>
-       ctf validate <challenge.yaml>
-       ctf pack <challenge.yaml> --out <file.ctf> [--suite <id>]
-       ctf keygen --out-key <signing.key> --out-pub <public.key> [--suite <id>]
-       ctf sign <bundle.ctf> --key <signing.key> --pub <public.key> --out <signed.ctf>
-
-  inspect  parse a bundle and print its structures
-    --hex     annotated hexdump of the header, section table, and footer
-    --verify  re-hash every inline section against its root (reads the whole file).
-              Exits non-zero if any section's bytes are present but unreadable by
-              this build. External payloads are reported, not counted as failures:
-              their bytes are elsewhere by design.
-    --allow-unsigned  accept a bundle that carries no signatures. Without it, a
-              `--verify` run on an unsigned bundle reports it intact but not
-              authentic and exits 2.
-  validate  schema- and policy-check an authoring file, naming every offending key.
-              Exits non-zero if the document is invalid.
-  pack      compile a validated authoring file into an unsigned .ctf bundle.
-    --out <file.ctf>  where to write the bundle (required)
-    --suite <id>      crypto suite id (default 1)
-  keygen    generate a hybrid signing keypair.
-    --out-key <file>  where to write the signing key (required)
-    --out-pub <file>  where to write the public key (required)
-    --suite <id>      crypto suite id (default 1)
-  sign      sign an unsigned .ctf bundle.
-    --key <file>      signing key file (required)
-    --pub <file>      public key file (required)
-    --out <file.ctf>  where to write the signed bundle (required)
-
-Key files are a local convenience, not a container format: two lines of lowercase
-hex, the classical component first and the post-quantum component second.
+/// `ctf` — the command-line tool for `.ctf` challenge bundles.
+#[derive(Parser)]
+#[command(
+    name = "ctf",
+    version,
+    about = "The `ctf` command-line tool for `.ctf` challenge bundles.",
+    after_help = "\
+Key files are a local convenience, not a container format:
+  signing keys  two lines of lowercase hex, the classical component first and
+                the post-quantum component second
+  KEM keys      one line of lowercase hex
 Whitespace and blank lines are ignored.
 
 exit codes:
   0  success
   1  usage, parse, or validation failure
-  2  inspect --verify found an intact but unauthentic (unsigned) bundle
-";
+  2  inspect --verify found an intact but unauthentic (unsigned) bundle"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Parse a bundle and print its structures.
+    Inspect(InspectArgs),
+    /// Schema- and policy-check an authoring file, naming every offending key.
+    Validate(ValidateArgs),
+    /// Compile a validated authoring file into an unsigned `.ctf` bundle.
+    Pack(PackArgs),
+    /// Generate a hybrid signing keypair.
+    Keygen(KeygenArgs),
+    /// Generate a hybrid KEM keypair for a recipient context.
+    Keys(KeysArgs),
+    /// Sign an unsigned `.ctf` bundle.
+    Sign(SignArgs),
+    /// Encrypt a section to a recipient and emit its key envelope.
+    Seal(SealArgs),
+    /// Decrypt a sealed section with a recipient's secret key.
+    Unseal(UnsealArgs),
+    /// Generate a shell completion script to stdout.
+    Completions(CompletionsArgs),
+}
+
+#[derive(Args)]
+struct InspectArgs {
+    /// Annotated hexdump of the header, section table, and footer.
+    #[arg(long)]
+    hex: bool,
+
+    /// Re-hash every inline section against its root (reads the whole file).
+    ///
+    /// Exits non-zero if any section's bytes are present but unreadable by this
+    /// build. External payloads are reported, not counted as failures: their
+    /// bytes are elsewhere by design.
+    #[arg(long)]
+    verify: bool,
+
+    /// Accept a bundle that carries no signatures.
+    ///
+    /// Without it, a `--verify` run on an unsigned bundle reports it intact but
+    /// not authentic and exits 2.
+    #[arg(long)]
+    allow_unsigned: bool,
+
+    /// The `.ctf` bundle to inspect.
+    file: String,
+}
+
+#[derive(Args)]
+struct ValidateArgs {
+    /// The authoring YAML file to check.
+    challenge: String,
+}
+
+#[derive(Args)]
+struct PackArgs {
+    /// The validated authoring YAML file to compile.
+    challenge: String,
+
+    /// Where to write the unsigned `.ctf` bundle.
+    #[arg(long)]
+    out: String,
+
+    /// Crypto suite id.
+    #[arg(long, default_value_t = pack::DEFAULT_SUITE_ID)]
+    suite: u16,
+}
+
+#[derive(Args)]
+struct KeygenArgs {
+    /// Where to write the signing key.
+    #[arg(long)]
+    out_key: String,
+
+    /// Where to write the public key.
+    #[arg(long)]
+    out_pub: String,
+
+    /// Crypto suite id.
+    #[arg(long, default_value_t = pack::DEFAULT_SUITE_ID)]
+    suite: u16,
+}
+
+#[derive(Args)]
+struct SignArgs {
+    /// The unsigned `.ctf` bundle to sign.
+    bundle: String,
+
+    /// The signing key file.
+    #[arg(long)]
+    key: String,
+
+    /// The public key file.
+    #[arg(long = "pub")]
+    public: String,
+
+    /// Where to write the signed bundle.
+    #[arg(long)]
+    out: String,
+}
+
+/// `ctf keys`: a KEM keypair for one recipient context.
+///
+/// The context is metadata for the operator, not part of the key material: a key is
+/// bound to its context later, at envelope-seal time (spec §21).
+#[derive(Args)]
+struct KeysArgs {
+    /// Recipient context: `storage`, `seal`, `holder`, or `stage:<decimal>`.
+    #[arg(long)]
+    context: String,
+
+    /// Where to write the KEM secret key (one line of lowercase hex).
+    #[arg(long)]
+    out_key: String,
+
+    /// Where to write the KEM public key (one line of lowercase hex).
+    #[arg(long)]
+    out_pub: String,
+
+    /// Crypto suite id.
+    #[arg(long, default_value_t = pack::DEFAULT_SUITE_ID)]
+    suite: u16,
+}
+
+/// `ctf seal`: re-emit a bundle with one section encrypted to a recipient.
+#[derive(Args)]
+struct SealArgs {
+    /// The unsigned `.ctf` bundle to seal.
+    bundle: String,
+
+    /// The recipient's hybrid KEM public key file.
+    #[arg(long = "pub")]
+    public: String,
+
+    /// Recipient context: `storage`, `seal`, `holder`, or `stage:<decimal>`.
+    #[arg(long)]
+    context: String,
+
+    /// The name of the section to encrypt.
+    #[arg(long)]
+    section: String,
+
+    /// Where to write the sealed bundle.
+    #[arg(long)]
+    out: String,
+}
+
+/// `ctf unseal`: recover one section's plaintext with a recipient secret key.
+#[derive(Args)]
+struct UnsealArgs {
+    /// The sealed `.ctf` bundle.
+    bundle: String,
+
+    /// The recipient's hybrid KEM secret key file.
+    #[arg(long)]
+    key: String,
+
+    /// Recipient context: `storage`, `seal`, `holder`, or `stage:<decimal>`.
+    #[arg(long)]
+    context: String,
+
+    /// The name of the section to decrypt.
+    #[arg(long)]
+    section: String,
+
+    /// Where to write the recovered plaintext.
+    #[arg(long)]
+    out: String,
+}
+
+#[derive(Args)]
+struct CompletionsArgs {
+    /// The shell to generate a completion script for.
+    #[arg(value_enum)]
+    shell: Shell,
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some((cmd, rest)) = args.split_first() else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
-    match cmd.as_str() {
-        "inspect" => run_inspect(rest),
-        "validate" => run_validate(rest),
-        "pack" => run_pack(rest),
-        "keygen" => run_keygen(rest),
-        "sign" => run_sign(rest),
-        other => {
-            eprintln!("ctf: unknown command `{other}`");
-            eprint!("{USAGE}");
-            ExitCode::FAILURE
+    match Cli::try_parse() {
+        Ok(cli) => run(cli),
+        Err(e) => {
+            // clap exits 2 on a usage error by default, but 2 is reserved here for
+            // `inspect --verify` finding an intact-but-unauthentic bundle. Route
+            // every parse/usage failure to 1 instead. `--help` and `--version` are
+            // not errors (`use_stderr` is false) and still exit 0.
+            let code = if e.use_stderr() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            };
+            let _ = e.print();
+            code
         }
     }
 }
 
-fn run_inspect(args: &[String]) -> ExitCode {
-    let mut hex = false;
-    let mut verify = false;
-    let mut allow_unsigned = false;
-    let mut path: Option<String> = None;
-    for a in args {
-        match a.as_str() {
-            "--hex" => hex = true,
-            "--verify" => verify = true,
-            "--allow-unsigned" => allow_unsigned = true,
-            other if other.starts_with('-') => {
-                eprintln!("ctf: unknown option `{other}`");
-                return ExitCode::FAILURE;
-            }
-            // Not `path = Some(...)` unconditionally: that silently inspected the
-            // last of several paths, so `ctf inspect a.ctf b.ctf` reported on
-            // `b.ctf` while the operator read the output as being about `a.ctf`.
-            _ if path.is_some() => {
-                eprintln!("ctf: inspect takes one file; got `{a}` as well");
-                return ExitCode::FAILURE;
-            }
-            other => path = Some(other.to_owned()),
-        }
+fn run(cli: Cli) -> ExitCode {
+    match cli.command {
+        Commands::Inspect(args) => run_inspect(&args),
+        Commands::Validate(args) => run_validate(&args),
+        Commands::Pack(args) => run_pack(&args),
+        Commands::Keygen(args) => run_keygen(&args),
+        Commands::Keys(args) => run_keys(&args),
+        Commands::Sign(args) => run_sign(&args),
+        Commands::Seal(args) => run_seal(&args),
+        Commands::Unseal(args) => run_unseal(&args),
+        Commands::Completions(args) => run_completions(&args),
     }
-    let Some(path) = path else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
+}
 
-    match inspect(&path, hex, verify, allow_unsigned) {
+fn run_inspect(args: &InspectArgs) -> ExitCode {
+    let path = &args.file;
+    match inspect(path, args.hex, args.verify, args.allow_unsigned) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("ctf: {path}: {e}");
@@ -123,25 +280,10 @@ fn run_inspect(args: &[String]) -> ExitCode {
 /// exit status that reflects validity. The point is that an author learns what is
 /// wrong *before* packing (design §10), which is why the same check is not deferred
 /// to `ctf pack`.
-fn run_validate(args: &[String]) -> ExitCode {
-    let mut path: Option<String> = None;
-    for a in args {
-        if a.starts_with('-') {
-            eprintln!("ctf: unknown option `{a}`");
-            return ExitCode::FAILURE;
-        }
-        if path.is_some() {
-            eprintln!("ctf: validate takes one file; got `{a}` as well");
-            return ExitCode::FAILURE;
-        }
-        path = Some(a.clone());
-    }
-    let Some(path) = path else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
+fn run_validate(args: &ValidateArgs) -> ExitCode {
+    let path = &args.challenge;
 
-    let text = match std::fs::read_to_string(&path) {
+    let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("ctf: {path}: {e}");
@@ -174,50 +316,12 @@ fn run_validate(args: &[String]) -> ExitCode {
 /// Validation happens inside [`pack_with_suite`] — the same schema and policy
 /// checks `ctf validate` runs — so an invalid document is refused here with the key
 /// named, before a byte is written.
-fn run_pack(args: &[String]) -> ExitCode {
-    let mut path: Option<String> = None;
-    let mut out: Option<String> = None;
-    let mut suite = pack::DEFAULT_SUITE_ID;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--out" => match it.next() {
-                Some(v) => out = Some(v.clone()),
-                None => {
-                    eprintln!("ctf: --out needs a file");
-                    return ExitCode::FAILURE;
-                }
-            },
-            "--suite" => {
-                let Some(v) = it.next() else {
-                    eprintln!("ctf: --suite needs an id");
-                    return ExitCode::FAILURE;
-                };
-                match v.parse::<u16>() {
-                    Ok(n) => suite = n,
-                    Err(_) => {
-                        eprintln!("ctf: --suite must be a number; got `{v}`");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            }
-            other if other.starts_with('-') => {
-                eprintln!("ctf: unknown option `{other}`");
-                return ExitCode::FAILURE;
-            }
-            other if path.is_some() => {
-                eprintln!("ctf: pack takes one file; got `{other}` as well");
-                return ExitCode::FAILURE;
-            }
-            other => path = Some(other.to_owned()),
-        }
-    }
-    let (Some(path), Some(out)) = (path, out) else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
+fn run_pack(args: &PackArgs) -> ExitCode {
+    let path = &args.challenge;
+    let out = &args.out;
+    let suite = args.suite;
 
-    let text = match std::fs::read_to_string(&path) {
+    let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("ctf: {path}: {e}");
@@ -244,7 +348,7 @@ fn run_pack(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = std::fs::write(&out, &file) {
+    if let Err(e) = std::fs::write(out, &file) {
         eprintln!("ctf: {out}: {e}");
         return ExitCode::FAILURE;
     }
@@ -257,54 +361,10 @@ fn run_pack(args: &[String]) -> ExitCode {
 }
 
 /// `ctf keygen`: write a fresh hybrid keypair as two hex key files.
-fn run_keygen(args: &[String]) -> ExitCode {
-    let mut key_path: Option<String> = None;
-    let mut pub_path: Option<String> = None;
-    let mut suite = pack::DEFAULT_SUITE_ID;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--out-key" => match it.next() {
-                Some(v) => key_path = Some(v.clone()),
-                None => {
-                    eprintln!("ctf: --out-key needs a file");
-                    return ExitCode::FAILURE;
-                }
-            },
-            "--out-pub" => match it.next() {
-                Some(v) => pub_path = Some(v.clone()),
-                None => {
-                    eprintln!("ctf: --out-pub needs a file");
-                    return ExitCode::FAILURE;
-                }
-            },
-            "--suite" => {
-                let Some(v) = it.next() else {
-                    eprintln!("ctf: --suite needs an id");
-                    return ExitCode::FAILURE;
-                };
-                match v.parse::<u16>() {
-                    Ok(n) => suite = n,
-                    Err(_) => {
-                        eprintln!("ctf: --suite must be a number; got `{v}`");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            }
-            other if other.starts_with('-') => {
-                eprintln!("ctf: unknown option `{other}`");
-                return ExitCode::FAILURE;
-            }
-            other => {
-                eprintln!("ctf: keygen takes no positional arguments; got `{other}`");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-    let (Some(key_path), Some(pub_path)) = (key_path, pub_path) else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
+fn run_keygen(args: &KeygenArgs) -> ExitCode {
+    let key_path = &args.out_key;
+    let pub_path = &args.out_pub;
+    let suite = args.suite;
 
     let (signing_key, public_key) = match keypair(suite) {
         Ok(k) => k,
@@ -314,7 +374,7 @@ fn run_keygen(args: &[String]) -> ExitCode {
         }
     };
     if let Err(e) = write_key_file(
-        &key_path,
+        key_path,
         &hex_encode(&signing_key.classical),
         &hex_encode(&signing_key.pq),
     ) {
@@ -322,7 +382,7 @@ fn run_keygen(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(e) = write_key_file(
-        &pub_path,
+        pub_path,
         &hex_encode(&public_key.classical),
         &hex_encode(&public_key.pq),
     ) {
@@ -334,69 +394,66 @@ fn run_keygen(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `ctf sign`: append both hybrid signatures to an unsigned bundle.
-fn run_sign(args: &[String]) -> ExitCode {
-    let mut bundle: Option<String> = None;
-    let mut key_path: Option<String> = None;
-    let mut pub_path: Option<String> = None;
-    let mut out: Option<String> = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--key" => match it.next() {
-                Some(v) => key_path = Some(v.clone()),
-                None => {
-                    eprintln!("ctf: --key needs a file");
-                    return ExitCode::FAILURE;
-                }
-            },
-            "--pub" => match it.next() {
-                Some(v) => pub_path = Some(v.clone()),
-                None => {
-                    eprintln!("ctf: --pub needs a file");
-                    return ExitCode::FAILURE;
-                }
-            },
-            "--out" => match it.next() {
-                Some(v) => out = Some(v.clone()),
-                None => {
-                    eprintln!("ctf: --out needs a file");
-                    return ExitCode::FAILURE;
-                }
-            },
-            other if other.starts_with('-') => {
-                eprintln!("ctf: unknown option `{other}`");
-                return ExitCode::FAILURE;
-            }
-            other if bundle.is_some() => {
-                eprintln!("ctf: sign takes one file; got `{other}` as well");
-                return ExitCode::FAILURE;
-            }
-            other => bundle = Some(other.to_owned()),
-        }
-    }
-    let (Some(bundle), Some(key_path), Some(pub_path), Some(out)) =
-        (bundle, key_path, pub_path, out)
-    else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
+/// `ctf keys`: generate a fresh hybrid KEM keypair and write it as two single-line
+/// hex files.
+///
+/// The context is validated and printed but is deliberately *not* part of the key
+/// material: a KEM public key is context-independent, and the context is bound into
+/// the KEM combiner only when an envelope is sealed to it (spec §21.1). Generating
+/// one pair and using it for two contexts would therefore work cryptographically but
+/// is not what the command means, so the operator is told which context the pair is
+/// intended for.
+fn run_keys(args: &KeysArgs) -> ExitCode {
+    let key_path = &args.out_key;
+    let pub_path = &args.out_pub;
+    let context = &args.context;
 
-    let file = match std::fs::read(&bundle) {
+    if let Err(e) = check_context(context) {
+        eprintln!("ctf: --context {context}: {e}");
+        return ExitCode::FAILURE;
+    }
+    let pair = match kem_keypair(args.suite) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ctf: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = write_hex_key_file(key_path, &hex_encode(&pair.secret_key)) {
+        eprintln!("ctf: {key_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = write_hex_key_file(pub_path, &hex_encode(&pair.public_key)) {
+        eprintln!("ctf: {pub_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("secret key    {key_path}  ({context})");
+    println!("public key    {pub_path}  ({context})");
+    ExitCode::SUCCESS
+}
+
+/// `ctf sign`: append both hybrid signatures to an unsigned bundle.
+fn run_sign(args: &SignArgs) -> ExitCode {
+    let bundle = &args.bundle;
+    let key_path = &args.key;
+    let pub_path = &args.public;
+    let out = &args.out;
+
+    let file = match std::fs::read(bundle) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("ctf: {bundle}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let signing_key = match read_key_file(&key_path) {
+    let signing_key = match read_key_file(key_path) {
         Ok((classical, pq)) => HybridSigningKey { classical, pq },
         Err(e) => {
             eprintln!("ctf: {key_path}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let public_key = match read_key_file(&pub_path) {
+    let public_key = match read_key_file(pub_path) {
         Ok((classical, pq)) => HybridPublicKey { classical, pq },
         Err(e) => {
             eprintln!("ctf: {pub_path}: {e}");
@@ -410,11 +467,66 @@ fn run_sign(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = std::fs::write(&out, &signed) {
+    if let Err(e) = std::fs::write(out, &signed) {
         eprintln!("ctf: {out}: {e}");
         return ExitCode::FAILURE;
     }
     println!("{out}: {} bytes, signed", signed.len());
+    ExitCode::SUCCESS
+}
+
+/// `ctf seal`: rewrite an unsigned, unencrypted bundle with one more section
+/// encrypted to a recipient, plus the `keys` section carrying its envelope.
+///
+/// A rewrite rather than an in-place patch, because encryption changes a section's
+/// stored bytes, its lengths, its `enc` flag, and the layout around them, and the
+/// writer's parse-back is what enforces every format rule (spec §20.2, §21). The
+/// refusal of an already-signed or already-encrypted input is deliberate: a rewrite
+/// of either would silently invalidate an existing signature or discard an existing
+/// envelope's content key.
+fn run_seal(args: &SealArgs) -> ExitCode {
+    let bundle = &args.bundle;
+    let out = &args.out;
+    match seal_section(bundle, &args.public, &args.context, &args.section, out) {
+        Ok(len) => {
+            println!(
+                "{out}: {len} bytes, `{}` encrypted to {}",
+                args.section, args.context
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("ctf: {bundle}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `ctf unseal`: recover one section's plaintext with the matching recipient key.
+///
+/// Writes nothing unless the envelope opens and every chunk authenticates, so a
+/// wrong or missing key fails at exit 1 and leaves no output file (spec §21.2).
+fn run_unseal(args: &UnsealArgs) -> ExitCode {
+    let bundle = &args.bundle;
+    let out = &args.out;
+    match unseal_section(bundle, &args.key, &args.context, &args.section, out) {
+        Ok(len) => {
+            println!("{out}: {len} bytes, `{}` unsealed", args.section);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("ctf: {bundle}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `ctf completions`: emit a completion script for `shell` to stdout. Built from
+/// the same [`Cli`] the parser uses, so the script can never drift from the flags
+/// this build actually accepts.
+fn run_completions(args: &CompletionsArgs) -> ExitCode {
+    let mut cmd = Cli::command();
+    clap_complete::generate(args.shell, &mut cmd, "ctf", &mut std::io::stdout());
     ExitCode::SUCCESS
 }
 
@@ -426,6 +538,250 @@ fn keypair(
     let suite = ctf_format::suite(suite_id)?;
     let role = suite.signature()?;
     Ok(role.keypair()?)
+}
+
+/// Generate a hybrid KEM keypair for `suite_id`, resolving the `kem` role so an
+/// unimplemented role is reported by name rather than as a missing capability.
+fn kem_keypair(suite_id: u16) -> Result<KemKeyPair, Box<dyn std::error::Error>> {
+    let suite = ctf_format::suite(suite_id)?;
+    let role = suite.kem()?;
+    Ok(role.generate()?)
+}
+
+/// Validate a recipient context: `storage`, `seal`, `holder`, or `stage:<decimal>`
+/// (spec §21.1). The value is carried verbatim into the envelope, so any other shape
+/// is a usage error the operator should see before a bundle is written.
+fn check_context(context: &str) -> Result<(), String> {
+    if matches!(context, "storage" | "seal" | "holder") {
+        return Ok(());
+    }
+    if let Some(n) = context.strip_prefix("stage:")
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+        && n.parse::<u32>().is_ok()
+    {
+        return Ok(());
+    }
+    Err("must be `storage`, `seal`, `holder`, or `stage:<decimal>`".to_owned())
+}
+
+/// Rewrite `path` with `section` encrypted to the recipient in `pub_path`.
+///
+/// Returns the sealed file's length. See [`run_seal`] for the shape of the rewrite;
+/// the work is here so the command wrapper stays a thin error reporter.
+fn seal_section(
+    path: &str,
+    pub_path: &str,
+    context: &str,
+    section: &str,
+    out: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    check_context(context).map_err(|e| format!("--context: {e}"))?;
+    let public_key = read_hex_key_file(pub_path).map_err(|e| format!("{pub_path}: {e}"))?;
+
+    let file = std::fs::read(path)?;
+    let b = Bundle::parse(&file)?;
+
+    // A rewrite reproduces the header's suite and every other section byte-for-byte,
+    // so it must not touch a file whose integrity depends on an existing signature,
+    // and it cannot re-encrypt a section whose content key it does not hold.
+    if b.signing() != Signing::Unsigned {
+        return Err(
+            "refusing to rewrite a bundle that already carries signatures; a rewrite \
+             would invalidate them"
+                .into(),
+        );
+    }
+    if let Some(r) = b.sections.iter().find(|r| r.enc != Encryption::None) {
+        return Err(format!(
+            "refusing to rewrite a bundle that already has an encrypted section \
+             (name_id {})",
+            r.name_id
+        )
+        .into());
+    }
+
+    let target_index = b
+        .sections
+        .iter()
+        .position(|r| b.manifest.name_of(r.name_id) == Some(section))
+        .ok_or_else(|| format!("no section named `{section}`"))?;
+    let target = b
+        .sections
+        .get(target_index)
+        .ok_or("the resolved section vanished from the table")?;
+    if target.kind == SectionKind::Manifest {
+        return Err(format!("`{section}` is the manifest and cannot be encrypted").into());
+    }
+    if target.flags.contains(SectionFlags::EXTERNAL) {
+        return Err(format!(
+            "`{section}` is EXTERNAL; its bytes are not in the file and cannot be encrypted"
+        )
+        .into());
+    }
+    let target_name_id = target.name_id;
+
+    let manifest_record = b
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .ok_or("bundle has no manifest section")?;
+
+    // The `keys` section's `name_id` must index the manifest's `names`. An input
+    // that already has one reuses it; otherwise a fresh name is appended to the
+    // table, which spec §7.2 permits to be longer than the section count.
+    let (keys_name_id, appended_name) =
+        match b.sections.iter().find(|r| r.kind == SectionKind::Keys) {
+            Some(keys) => (keys.name_id, None),
+            None => {
+                let names = b.manifest.names();
+                let next = u16::try_from(names.len())
+                    .map_err(|_| "the manifest name table is full; no room for a keys section")?;
+                (next, Some(unique_keys_name(&names, section)))
+            }
+        };
+
+    // Re-emit the manifest. The decode/encode round trip is byte-identical for an
+    // unchanged manifest, and the append is the only mutation.
+    let manifest_plain = b.section_bytes(manifest_record)?;
+    let mut manifest_value = Value::decode(&manifest_plain)?;
+    if let Some(name) = &appended_name {
+        append_manifest_name(&mut manifest_value, name)?;
+    }
+    let manifest_bytes = manifest_value.encode()?;
+
+    // Every section's plaintext, in table order. The `keys` section is skipped: the
+    // writer regenerates it from the envelopes.
+    let mut payloads: Vec<std::borrow::Cow<'_, [u8]>> = Vec::with_capacity(b.sections.len());
+    let mut kept: Vec<usize> = Vec::with_capacity(b.sections.len());
+    for (i, r) in b.sections.iter().enumerate() {
+        if r.kind == SectionKind::Keys {
+            continue;
+        }
+        kept.push(i);
+        if r.kind == SectionKind::Manifest {
+            payloads.push(std::borrow::Cow::Owned(manifest_bytes.clone()));
+        } else if r.flags.contains(SectionFlags::EXTERNAL) {
+            // Never read; the external branch below uses only the record's metadata.
+            payloads.push(std::borrow::Cow::Owned(Vec::new()));
+        } else {
+            payloads.push(b.section_bytes(r)?);
+        }
+    }
+
+    let recipients = [Recipient {
+        context,
+        public_key: &public_key,
+    }];
+    let mut specs: Vec<SectionSpec<'_>> = Vec::with_capacity(kept.len() + 1);
+    for (slot, &i) in kept.iter().enumerate() {
+        let Some(r) = b.sections.get(i) else {
+            continue;
+        };
+        let plain = payloads.get(slot).map_or(&[][..], |c| c.as_ref());
+        if r.flags.contains(SectionFlags::EXTERNAL) {
+            specs.push(SectionSpec {
+                kind: r.kind,
+                name_id: r.name_id,
+                flags: r.flags,
+                chunk_size: r.chunk_size,
+                comp: r.comp,
+                payload: Payload::External {
+                    len_plain: r.len_plain,
+                    root: r.root,
+                },
+                chunk_index: None,
+                encryption: None,
+            });
+        } else {
+            // R15: encryption needs a non-zero chunk_size, so a target that was a
+            // single chunk is chunked at the minimum. Every other inline section
+            // keeps the chunking it had.
+            let chunk_size = if r.name_id == target_name_id {
+                r.chunk_size.max(ctf_format::MIN_CHUNK_SIZE)
+            } else {
+                r.chunk_size
+            };
+            let mut spec =
+                SectionSpec::inline(r.kind, r.name_id, r.flags, plain).chunked(chunk_size);
+            if r.comp == Compression::Zstd {
+                spec = spec.compressed();
+            }
+            if r.name_id == target_name_id {
+                spec = spec.encrypted(&recipients);
+            }
+            specs.push(spec);
+        }
+    }
+    specs.push(SectionSpec::envelopes(SectionKind::Keys, keys_name_id));
+
+    let sealed = ctf_format::write_bundle(b.header.suite_id, &specs)?;
+    std::fs::write(out, &sealed)?;
+    Ok(sealed.len())
+}
+
+/// Recover `section`'s plaintext from a sealed bundle with the recipient's secret
+/// key, writing it to `out`. Returns the plaintext length.
+fn unseal_section(
+    path: &str,
+    key_path: &str,
+    context: &str,
+    section: &str,
+    out: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    check_context(context).map_err(|e| format!("--context: {e}"))?;
+    let secret_key = read_hex_key_file(key_path).map_err(|e| format!("{key_path}: {e}"))?;
+
+    let file = std::fs::read(path)?;
+    let b = Bundle::parse(&file)?;
+    let record = b
+        .sections
+        .iter()
+        .find(|r| b.manifest.name_of(r.name_id) == Some(section))
+        .ok_or_else(|| format!("no section named `{section}`"))?;
+
+    let content_key = b.section_content_key(record, &secret_key, context)?;
+    let plain = b.decrypt_section_bytes(record, &content_key)?;
+    std::fs::write(out, &plain)?;
+    Ok(plain.len())
+}
+
+/// A `keys` name that is not already in the manifest's table and that passes the
+/// manifest's name-shape rules. `keys` is the preferred name; a collision falls back
+/// to `<section>.keys`, then to a numbered `keys.N`.
+fn unique_keys_name(existing: &[&str], section: &str) -> String {
+    if !existing.contains(&"keys") {
+        return "keys".to_owned();
+    }
+    let dotted = format!("{section}.keys");
+    if dotted.len() <= ctf_format::manifest::MAX_NAME_LEN && !existing.contains(&dotted.as_str()) {
+        return dotted;
+    }
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("keys.{n}");
+        if !existing.contains(&candidate.as_str()) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
+}
+
+/// Append `name` to the manifest value's `names` array, in place.
+fn append_manifest_name(value: &mut Value, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let Value::Map(entries) = value else {
+        return Err("manifest is not a CBOR map".into());
+    };
+    for (key, val) in entries.iter_mut() {
+        if key.as_text() == Some("names") {
+            let Value::Array(items) = val else {
+                return Err("manifest `names` is not an array".into());
+            };
+            items.push(Value::Text(name.to_owned()));
+            return Ok(());
+        }
+    }
+    Err("manifest has no `names` array".into())
 }
 
 /// Write one key file: classical component, then post-quantum, each on its own line.
@@ -452,6 +808,31 @@ fn read_key_file(path: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
     let classical = hex_decode(classical)?;
     let pq = hex_decode(pq)?;
     Ok((classical, pq))
+}
+
+/// Write a KEM key file: a single line of lowercase hex. Unlike a signing key file
+/// there is no classical/post-quantum split to preserve — the hybrid key is one
+/// concatenated blob (spec §20.1).
+fn write_hex_key_file(path: &str, hex: &str) -> std::io::Result<()> {
+    std::fs::write(path, format!("{hex}\n"))
+}
+
+/// Read a KEM key file: exactly one non-empty line of hex. Blank lines and
+/// surrounding whitespace are ignored, matching [`read_key_file`].
+fn read_hex_key_file(path: &str) -> Result<Vec<u8>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let [line] = lines.as_slice() else {
+        return Err(format!(
+            "a KEM key file has exactly one non-empty line of hex; found {}",
+            lines.len()
+        ));
+    };
+    hex_decode(line)
 }
 
 /// Lowercase hex. The encoding side of [`hex_decode`].

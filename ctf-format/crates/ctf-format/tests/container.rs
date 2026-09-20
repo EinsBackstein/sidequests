@@ -12,8 +12,8 @@
 )]
 
 use ctf_format::{
-    Compression, Encryption, Error, HEADER_LEN, Header, MAGIC, MAX_SECTIONS, RuleSet,
-    SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionRecord, section,
+    Compression, Encryption, Error, FEAT_RO_COMPAT_CONTAINER_V1, HEADER_LEN, Header, MAGIC,
+    MAX_SECTIONS, RuleSet, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionRecord, section,
 };
 
 const PAYLOAD_OFF: u64 = 4096;
@@ -122,6 +122,42 @@ fn header_golden_vector_v0_1() {
     // Identical to the 0.2 fixture in every field that describes the layout.
     assert_eq!(h.section_table_off, good_header().section_table_off);
     assert_eq!(h.footer_off, good_header().footer_off);
+}
+
+/// The 0.3 golden header of spec §4.5, asserted directly rather than only through
+/// `minimal_bundle_golden_vector`. It differs from the 0.2 fixture in three fields:
+/// `version_minor` 3, the layout offsets of the minimal bundle (table 4160, footer
+/// 4288), and `feat_ro_compat` bit 0 (`CONTAINER_V1`), which every 0.3 writer sets.
+#[test]
+fn header_golden_vector_v0_3() {
+    let expected: [u8; 64] = [
+        0x89, b'C', b'T', b'F', 0x0d, 0x0a, 0x1a, 0x0a, //
+        0x00, 0x00, // version_major = 0
+        0x03, 0x00, // version_minor = 3
+        0x40, 0x00, 0x00, 0x00, // header_len = 64
+        0x01, 0x00, // suite_id = 1
+        0x00, 0x00, // flags = 0
+        0x01, 0x00, 0x00, 0x00, // section_table_count = 1
+        0x40, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // section_table_off = 4160
+        0xc0, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // footer_off = 4288
+        0x00, 0x00, 0x00, 0x00, // feat_incompat = 0
+        0x01, 0x00, 0x00, 0x00, // feat_ro_compat = CONTAINER_V1
+        // 16 reserved bytes, all zero
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let header = Header {
+        version_major: 0,
+        version_minor: 3,
+        suite_id: 1,
+        flags: 0,
+        section_table_count: 1,
+        section_table_off: 4160,
+        footer_off: 4288,
+        feat_incompat: 0,
+        feat_ro_compat: FEAT_RO_COMPAT_CONTAINER_V1,
+    };
+    assert_eq!(header.to_bytes(), expected);
+    assert_eq!(Header::parse(&expected).unwrap(), header);
 }
 
 #[test]

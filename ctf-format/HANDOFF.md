@@ -13,9 +13,10 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 / release 0.7.0 (phase 1
-complete; phase 2 complete except entitlement signatures, key distribution, and the
-live gate; `ctf pack`/`keygen`/`sign` landed; `cargo test` 283 pass).
+**Last updated:** 2026-09-20, at format version 0.3 / release 0.8.0 (phase 1
+complete; phase 2 complete except key distribution and the live gate; encrypted
+sections, the entitlement chain, stage gating, `ctf keys`/`seal`/`unseal`, and the
+`clap` CLI landed; `cargo test` 331 pass).
 
 ## Where this lives
 
@@ -42,10 +43,12 @@ ctf-format/
     src/bundle.rs       whole-file read and write  spec §10
     src/envelope.rs     key envelopes              spec §21
     src/derive.rs       derived flags, stage keys  spec §22
+    src/entitlement.rs  entitlement chain     spec §18
     src/pack.rs         YAML -> .ctf               design §10
     examples/demo.rs    writes a demo .ctf to try the CLI against
     tests/              container, cbor, chunk, bundle, mutation, fuzzmirror
-  crates/ctf-cli/       the `ctf` binary — inspect, validate, pack, keygen, sign
+  crates/ctf-cli/       the `ctf` binary — inspect, validate, pack, keygen, sign,
+                        keys, seal, unseal, completions (clap)
   fuzz/                 cargo-fuzz targets + committed seed corpus
   spec/SPEC.md          normative byte-level spec — wins over the design doc
   docs/FORMAT-DESIGN.md design rationale and threat model
@@ -140,7 +143,7 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 234 tests, 0 clippy warnings, `unsafe_code =
+parses them back before returning. 331 tests, 0 clippy warnings, `unsafe_code =
 "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
@@ -172,10 +175,23 @@ recipient), **derived flags and stage keys** (`derive.rs`, spec §22 — a bundl
 carries the rule, never the flag), and **`ctf pack`** (`pack.rs`, ticket 35), with
 `ctf keygen`/`ctf sign` as CLI conveniences.
 
-Not implemented: entitlement signature verification, key distribution, and the live
-gate. No generator, no solver gate. The writer still emits `enc = 0` only, but it
-*does* write `comp = 1` zstd sections: the reader enforces an absolute output cap
-and an expansion-ratio cap before running the decoder (spec §5.4, D1–D2).
+Not implemented: key distribution and the live gate. No generator, no solver gate.
+The writer now emits `enc = 1` for an encrypted section — compress, then encrypt —
+as well as `comp = 1` zstd sections; the reader enforces an absolute output cap and
+an expansion-ratio cap before running the decoder (spec §5.4, D1–D2), and a
+`comp = 1` + `enc = 1` body seals one zstd frame per STREAM chunk.
+
+Implemented since 0.8.0: **encrypted sections end to end** (ticket 16; the writer
+seals, wraps the content key in a per-recipient envelope in the `keys` section, and
+a key holder can recover and verify the plaintext), the **entitlement chain** E1–E9
+(ticket 39, `entitlement.rs`), **stage gating** (tickets 45–47, `flag.stage_gate`),
+`ctf keys`/`seal`/`unseal` (ticket 18), and the **`clap`** CLI with completions and
+integration tests (tickets 37, 83).
+
+**The envelope gained a `name_id` (spec §21.3, EN5)** — the identity of the section
+whose content key it wraps — so one `keys` section serves every encrypted section.
+No writer had ever emitted a `keys` section, so no existing file carried the old
+three-key form.
 
 ### What 0.3 changed, and why the bit is `ro_compat`
 
@@ -213,15 +229,12 @@ big, that is the wrong reason; run the four clauses.
 signing (§20.3), cross-library vectors, and `ctf pack`/`keygen`/`sign`. What
 remains, in order:
 
-1. **Encrypted sections end to end** (ticket 16). The AEAD-STREAM construction
-   (spec §20.2) and the envelopes (spec §21) both exist; the writer still emits
-   `enc = 0` only. Wiring `enc = 1` into `write_bundle` — compress, then encrypt,
-   then wrap the content key in envelopes — is the integration.
-2. **The entitlement chain implementation** (ticket 39). The record format is
-   specified (spec §18) and the signature primitive now exists (spec §20.3), so E9
-   is implementable.
-3. **The generator host** (phase 3): Wasmtime, the determinism config, and the WIT
+1. **The generator host** (phase 3): Wasmtime, the determinism config, and the WIT
    interface, which is what `ctf run` and `ctf init` need.
+2. **The offline solvability gate** (phase 4): run `solver.wasm` against generated
+   artifacts with no network, and assert its output equals the derived flag.
+3. **The platform ingest path** (phase 5): the Postgres schema, the ingest pipeline,
+   and the admin TUI — the first point the system is operable end to end.
 
 ## Gotchas that will bite you
 
@@ -318,7 +331,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 234 tests
+cargo test                    # 331 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 

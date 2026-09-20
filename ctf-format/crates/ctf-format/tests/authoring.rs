@@ -175,3 +175,70 @@ fn rejects_a_newer_authoring_spec() {
     let err = ChallengeDoc::from_yaml("spec: 99\nid: x\nname: X\n").unwrap_err();
     assert!(err.message().contains("99"));
 }
+
+/// DF5: a stage gate on a **derived** flag is legal — the 80-bit derived flag is an
+/// acceptable stage key.
+#[test]
+fn a_stage_gate_on_a_derived_flag_is_accepted() {
+    let yaml = "\
+spec: 1
+id: staged
+name: Staged
+flag:
+  derive: hkdf-sha256
+  stage_gate: true
+";
+    let doc = ChallengeDoc::from_yaml(yaml).unwrap();
+    assert!(doc.validate().is_empty(), "{:?}", doc.validate());
+}
+
+/// DF5: a stage gate on a **static** flag is rejected, and the rejection says why —
+/// a stage key derives from the previous stage's flag, so a guessable string is not
+/// a key.
+#[test]
+fn a_stage_gate_on_a_static_flag_is_rejected_and_explains() {
+    let yaml = "\
+spec: 1
+id: staged
+name: Staged
+flag:
+  derive: static
+  stage_gate: true
+";
+    let doc = ChallengeDoc::from_yaml(yaml).unwrap();
+    let issues = doc.validate();
+    let issue = issues
+        .iter()
+        .find(|i| i.key() == "flag.stage_gate")
+        .unwrap_or_else(|| panic!("expected a flag.stage_gate finding, got {issues:?}"));
+    assert!(
+        issue.message().contains("derived"),
+        "the finding must explain why a static flag cannot key a gate: {}",
+        issue.message()
+    );
+}
+
+/// The declaration is carried into the manifest as an ordinary `flag` sub-key, so a
+/// platform can read it and a reader carries it.
+#[test]
+fn a_stage_gate_round_trips_into_the_manifest() {
+    let yaml = "\
+spec: 1
+id: staged
+name: Staged
+flag:
+  derive: hkdf-sha256
+  stage_gate: true
+";
+    let doc = ChallengeDoc::from_yaml(yaml).unwrap();
+    let entries = doc.manifest_entries();
+    let flag = entries
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("flag"))
+        .map(|(_, v)| v)
+        .unwrap();
+    let entries = flag.as_map().unwrap();
+    assert!(entries.iter().any(
+        |(k, v)| k.as_text() == Some("stage_gate") && *v == ctf_format::cbor::Value::Bool(true)
+    ));
+}

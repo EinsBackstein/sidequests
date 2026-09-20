@@ -20,6 +20,10 @@ use ctf_format::suite::{KemKeyPair, suite};
 /// The contexts design §7 names, each round-tripped verbatim.
 const CONTEXTS: [&str; 4] = ["storage", "seal", "stage:3", "holder"];
 
+/// The section identity an envelope is bound to (spec §21.3). One `keys` section
+/// may carry envelopes for several sections, so each names the one it unlocks.
+const SECTION: u16 = 7;
+
 fn keypair(suite_id: u16) -> KemKeyPair {
     suite(suite_id).unwrap().kem().unwrap().generate().unwrap()
 }
@@ -34,7 +38,7 @@ fn content_key() -> [u8; 32] {
 fn round_trip(suite_id: u16, context: &str) -> Envelope {
     let recipient = keypair(suite_id);
     let key = content_key();
-    let envelope = seal(&key, &recipient.public_key, suite_id, 0, context).unwrap();
+    let envelope = seal(&key, &recipient.public_key, suite_id, 0, SECTION, context).unwrap();
     let recovered = envelope
         .open(&recipient.secret_key, suite_id, 0, context)
         .unwrap();
@@ -42,6 +46,10 @@ fn round_trip(suite_id: u16, context: &str) -> Envelope {
     assert_eq!(
         envelope.context, context,
         "context must be carried verbatim"
+    );
+    assert_eq!(
+        envelope.name_id, SECTION,
+        "name_id must be carried verbatim"
     );
     envelope
 }
@@ -78,7 +86,7 @@ fn a_recipient_without_the_matching_secret_key_cannot_unwrap() {
         let other = keypair(suite_id);
         let key = content_key();
 
-        let envelope = seal(&key, &intended.public_key, suite_id, 0, "storage").unwrap();
+        let envelope = seal(&key, &intended.public_key, suite_id, 0, SECTION, "storage").unwrap();
         let result = envelope.open(&other.secret_key, suite_id, 0, "storage");
         assert!(
             result.is_err(),
@@ -95,7 +103,7 @@ fn a_wrong_context_is_refused_even_with_a_valid_key() {
         let recipient = keypair(suite_id);
         let key = content_key();
 
-        let envelope = seal(&key, &recipient.public_key, suite_id, 0, "storage").unwrap();
+        let envelope = seal(&key, &recipient.public_key, suite_id, 0, SECTION, "storage").unwrap();
         let result = envelope.open(&recipient.secret_key, suite_id, 0, "seal");
         assert!(
             result.is_err(),
@@ -111,7 +119,8 @@ fn an_envelope_round_trips_through_canonical_cbor() {
         for context in CONTEXTS {
             let recipient = keypair(suite_id);
             let key = content_key();
-            let envelope = seal(&key, &recipient.public_key, suite_id, 0, context).unwrap();
+            let envelope =
+                seal(&key, &recipient.public_key, suite_id, 0, SECTION, context).unwrap();
 
             let via_value = Envelope::from_cbor(&envelope.to_cbor()).unwrap();
             assert_eq!(via_value, envelope);
@@ -133,7 +142,15 @@ fn an_envelope_round_trips_through_canonical_cbor() {
 /// A map missing a required key is rejected.
 #[test]
 fn a_cbor_map_missing_a_key_is_rejected() {
-    let envelope = seal(&content_key(), &keypair(1).public_key, 1, 0, "storage").unwrap();
+    let envelope = seal(
+        &content_key(),
+        &keypair(1).public_key,
+        1,
+        0,
+        SECTION,
+        "storage",
+    )
+    .unwrap();
 
     let Value::Map(mut entries) = envelope.to_cbor() else {
         panic!("envelope must encode as a map");
@@ -142,10 +159,47 @@ fn a_cbor_map_missing_a_key_is_rejected() {
     assert!(Envelope::from_cbor(&Value::Map(entries)).is_err());
 }
 
-/// An extra key is rejected: the schema is exactly three keys.
+/// A missing `name_id` is rejected, and a value outside the u16 identity space is
+/// too: the field names a section, so it cannot name one that does not exist.
+#[test]
+fn a_missing_or_out_of_range_name_id_is_rejected() {
+    let envelope = seal(
+        &content_key(),
+        &keypair(1).public_key,
+        1,
+        0,
+        SECTION,
+        "storage",
+    )
+    .unwrap();
+
+    let Value::Map(mut entries) = envelope.to_cbor() else {
+        panic!("envelope must encode as a map");
+    };
+    entries.retain(|(k, _)| k.as_text() != Some("name_id"));
+    assert!(Envelope::from_cbor(&Value::Map(entries)).is_err());
+
+    let mut entries = envelope.to_cbor().as_map().unwrap().to_vec();
+    for (key, value) in entries.iter_mut() {
+        if key.as_text() == Some("name_id") {
+            *value = Value::Uint(u64::from(u16::MAX) + 1);
+        }
+    }
+    assert!(Envelope::from_cbor(&Value::Map(entries)).is_err());
+}
+
+/// An extra key is rejected: the schema is exactly four keys.
 #[test]
 fn a_cbor_map_with_an_extra_key_is_rejected() {
-    let envelope = seal(&content_key(), &keypair(1).public_key, 1, 0, "storage").unwrap();
+    let envelope = seal(
+        &content_key(),
+        &keypair(1).public_key,
+        1,
+        0,
+        SECTION,
+        "storage",
+    )
+    .unwrap();
     let Value::Map(mut entries) = envelope.to_cbor() else {
         panic!("envelope must encode as a map");
     };
@@ -156,7 +210,15 @@ fn a_cbor_map_with_an_extra_key_is_rejected() {
 /// A field of the wrong type is rejected.
 #[test]
 fn a_cbor_map_with_a_wrong_typed_field_is_rejected() {
-    let envelope = seal(&content_key(), &keypair(1).public_key, 1, 0, "storage").unwrap();
+    let envelope = seal(
+        &content_key(),
+        &keypair(1).public_key,
+        1,
+        0,
+        SECTION,
+        "storage",
+    )
+    .unwrap();
     let Value::Map(mut entries) = envelope.to_cbor() else {
         panic!("envelope must encode as a map");
     };
@@ -179,7 +241,15 @@ fn a_non_map_envelope_is_rejected() {
 /// Truncated or trailing bytes are rejected by the canonical decoder.
 #[test]
 fn corrupted_cbor_bytes_are_rejected() {
-    let envelope = seal(&content_key(), &keypair(1).public_key, 1, 0, "storage").unwrap();
+    let envelope = seal(
+        &content_key(),
+        &keypair(1).public_key,
+        1,
+        0,
+        SECTION,
+        "storage",
+    )
+    .unwrap();
     let bytes = envelope.to_bytes().unwrap();
 
     let truncated = &bytes[..bytes.len() - 1];
