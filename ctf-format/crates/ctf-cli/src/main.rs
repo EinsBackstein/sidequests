@@ -169,12 +169,19 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
             }
         }
         if r.chunk_size != 0 {
-            println!(
-                "      chunks  {} × {} bytes, index at {}",
-                b.chunk_index(r)?.map_or(0, |i| i.entries().len()),
-                r.chunk_size,
-                r.chunk_index_off
-            );
+            // A sealed or unknown-kind section's index is deliberately not read
+            // (C8). Report where it is, not what is in it, rather than failing the
+            // whole inspection over one unreadable section.
+            match b.chunk_index(r) {
+                Ok(Some(i)) => println!(
+                    "      chunks  {} × {} bytes, index at {}",
+                    i.entries().len(),
+                    r.chunk_size,
+                    r.chunk_index_off
+                ),
+                Ok(None) => println!("      chunks  none × {} bytes", r.chunk_size),
+                Err(_) => println!("      chunks  index at {} (not read)", r.chunk_index_off),
+            }
         }
     }
 

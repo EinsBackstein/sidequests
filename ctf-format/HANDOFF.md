@@ -14,7 +14,7 @@ Cold-start context for whoever picks this up. Read this, then
 > proposed.
 
 **Last updated:** 2026-09-20, at format version 0.3 (phase 1 complete, all review
-debt closed; `cargo test` 161 pass).
+debt closed; `cargo test` 163 pass).
 
 ## Where this lives
 
@@ -133,7 +133,7 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 161 tests, 0 clippy warnings, one dependency
+parses them back before returning. 163 tests, 0 clippy warnings, one dependency
 (`blake3`), `unsafe_code = "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
@@ -186,19 +186,18 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**Review debt is closed and 0.3 is tagged.** All first-review findings are fixed;
-the post-fix re-review's new findings are tickets 70–97, deferred with the reasoning
-in `docs/reviews/0.3-phase1/post-fix/REVIEW.md`. Before phase 2 builds on the
-footer, settle **ticket 71**: the signature-slot lengths are in neither the
-commitment root nor the transcript, so the slot split is unauthenticated.
+**Review debt is closed, 0.3.1 was tagged, and 0.4.0 fixes the two post-fix
+blockers.** All first-review findings are fixed; the post-fix re-review's new
+findings are tickets 70–97. **70 and 71 are fixed in 0.4.0** — a sealed or
+unknown-kind section's chunk index is withheld (C8), and the signature transcript is
+now `v2`, binding both slot lengths. The rest are deferred with the reasoning in
+`docs/reviews/0.3-phase1/post-fix/REVIEW.md`.
 
 1. **Phase 2 crypto.** The footer's signature slots, the transcript, and
    `suite_id` are all fixed and testable already — `Footer::sig_input` produces the
-   exact 59 bytes phase 2 must sign. What is missing is the suite registry, the
+   exact 67 bytes phase 2 must sign. What is missing is the suite registry, the
    hybrid KEM combiner, AEAD-STREAM, and the key envelopes. Start with the
    registry behind one trait per primitive role, so ML-DSA stays retireable.
-   Ticket 71 decides the slot-length binding; ticket 70 decides whether a sealed
-   section's chunk index is servable.
 2. **zstd**, which is blocked on nothing but the two limits spec §14 leaves open:
    an absolute output cap and an expansion ratio cap. Pick both, write them into
    the spec, then implement — in that order, because a reader that decompresses
@@ -304,7 +303,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 161 tests
+cargo test                    # 163 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 

@@ -105,6 +105,24 @@ fn mark_encrypted(file: &mut [u8], i: usize) {
     file[footer..footer + 32].copy_from_slice(&root);
 }
 
+/// Make the section at table index `i` `SEALED` **and** `AEAD-STREAM`, re-rooting the
+/// commitment so the file still opens. R21 requires the pair, so a sealed section
+/// the phase-1 writer cannot emit has to be built by hand.
+fn mark_sealed_encrypted(file: &mut [u8], i: usize) {
+    let header = Header::parse(file).unwrap();
+    let table = header.section_table_off as usize;
+    let at = table + i * SECTION_RECORD_LEN;
+    // Replace the flags outright: R5 forbids SEALED together with PLAYER_VISIBLE.
+    file[at + 4..at + 6].copy_from_slice(&SectionFlags::SEALED.to_le_bytes());
+    file[at + 6] = 1; // OFF_ENC, Encryption::AeadStream
+    let root = commitment_root(
+        &file[..HEADER_LEN as usize],
+        &file[table..table + header.section_table_count as usize * SECTION_RECORD_LEN],
+    );
+    let footer = header.footer_off as usize;
+    file[footer..footer + 32].copy_from_slice(&root);
+}
+
 // ---------------------------------------------------------------------------
 // Round trips
 // ---------------------------------------------------------------------------
@@ -402,15 +420,21 @@ fn commitment_root_is_the_documented_construction() {
 
 /// The transcript is fixed by design §6 and both signatures cover it identically.
 /// Phase 1 cannot sign, but it can pin the bytes phase 2 will sign.
+///
+/// v2 binds the two signature-slot lengths. F3–F5 leave the split between the two
+/// slots free, and §8.1 locates the slots from those fields, so without this the
+/// same bytes could be read with two different slot boundaries.
 #[test]
 fn signature_transcript_is_the_documented_construction() {
     let root = [0xab; 32];
-    let t = sig_input(1, &root, 8448);
-    assert_eq!(&t[..17], b"ctf/footer-sig/v1");
+    let t = sig_input(1, 64, 3309, &root, 8448);
+    assert_eq!(&t[..17], b"ctf/footer-sig/v2");
     assert_eq!(&t[17..19], &1u16.to_le_bytes());
-    assert_eq!(&t[19..51], &root);
-    assert_eq!(&t[51..59], &8448u64.to_le_bytes());
-    assert_eq!(t.len(), 59);
+    assert_eq!(&t[19..23], &64u32.to_le_bytes());
+    assert_eq!(&t[23..27], &3309u32.to_le_bytes());
+    assert_eq!(&t[27..59], &root);
+    assert_eq!(&t[59..67], &8448u64.to_le_bytes());
+    assert_eq!(t.len(), 67);
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,6 +1539,82 @@ fn a_sealed_section_is_never_served() {
         b.section_bytes(&record),
         Err(Error::Inconsistent { .. })
     ));
+}
+
+/// C8: the chunk index of a section the serving boundary refuses is withheld too.
+/// An entry is a chaining value of the section's plaintext (§9.1), so exposing it
+/// would hand out a plaintext-derived guess-confirmation oracle for a section whose
+/// bytes `section_bytes` refuses.
+#[test]
+fn a_sealed_sections_chunk_index_is_not_served() {
+    let mut file = artifact_bundle();
+    mark_sealed_encrypted(&mut file, 1);
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert!(record.flags.sealed());
+    assert_ne!(record.chunk_index_off, 0, "the fixture must carry an index");
+    assert!(matches!(
+        b.chunk_index(&record),
+        Err(Error::Inconsistent { .. })
+    ));
+}
+
+/// The same guard for a kind this build does not implement. The section is still
+/// committed to and still verified against its root; only the plaintext-derived
+/// index is withheld.
+#[test]
+fn an_unknown_kinds_chunk_index_is_not_served() {
+    let manifest = Manifest::decode(
+        &Value::Map(vec![
+            (Value::Text("spec".into()), Value::Uint(1)),
+            (
+                Value::Text("id".into()),
+                Value::Text("from-the-future".into()),
+            ),
+            (
+                Value::Text("name".into()),
+                Value::Text("From The Future".into()),
+            ),
+            (
+                Value::Text("names".into()),
+                Value::Array(vec![
+                    Value::Text("manifest".into()),
+                    Value::Text("mystery".into()),
+                ]),
+            ),
+        ])
+        .encode()
+        .unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let payload = vec![0x77u8; 5000];
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::unknown(9).unwrap(),
+                1,
+                SectionFlags(SectionFlags::OPTIONAL | SectionFlags::PLAYER_VISIBLE),
+                &payload,
+            )
+            .chunked(4096),
+        ],
+    )
+    .unwrap();
+
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert!(!record.kind.is_known());
+    assert_ne!(record.chunk_index_off, 0, "the fixture must carry an index");
+    assert!(matches!(
+        b.chunk_index(&record),
+        Err(Error::Inconsistent { .. })
+    ));
+    // Still committed and still verified — only the index is withheld.
+    assert_eq!(b.verify_inline_sections().unwrap().verified, 2);
 }
 
 /// R21's deliberate consequence, asserted rather than left in a comment: R6 forces

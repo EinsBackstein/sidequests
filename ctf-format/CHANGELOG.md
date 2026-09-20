@@ -7,6 +7,44 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.4.0] — 2026-09-20
+
+Closes the two post-fix issues that phase 2 must settle before building on the
+footer and the serving boundary: 70 (a sealed section's chunk index was servable)
+and 71 (the footer's signature-slot lengths were unauthenticated).
+
+**No byte-layout change.** `version_minor` stays `3` and every `.ctf` file is
+byte-identical. This is a version break rather than a patch only because §15
+reserves a change to the signature transcript construction for one.
+
+### Fixed
+
+- **A `SEALED` section's chunk index is no longer served (C8).** `Bundle::chunk_index`
+  returned a root-verified index for a `SEALED` record, or for one whose kind this
+  build does not implement, while `section_bytes` refused the same record. Each
+  entry is a chaining value of the section's **plaintext** (spec §9.1), so the index
+  is a plaintext-derived guess-confirmation oracle: a caller with no key could
+  confirm guesses about contents the serving boundary refuses to hand over. The
+  guards now mirror `section_bytes`, and `ctf inspect` reports that an index was not
+  read instead of failing the whole inspection. New rule C8 states it normatively.
+- **The two signature-slot lengths are now signed (transcript `v1` → `v2`).** F3–F5
+  bound each length, require both-or-neither, and fix their sum, but leave the split
+  between the classical and post-quantum slots free — and §8.1 locates the slots
+  from those very fields, while nothing else (not the §8.3 root, which covers the
+  header and table only) commits to them. An attacker could exchange the two lengths
+  and steer a verifier that trusted the fields to different slot boundaries. The
+  §8.4 transcript now covers `sig_classical_len` and `sig_pq_len` as well; any change
+  to the split fails both signatures. A `v1` transcript is not accepted, and a
+  verifier must derive slot boundaries from `suite_id`'s suite rather than the
+  fields.
+
+Neither change can invalidate an existing artifact: phase 1 produces unsigned
+bundles and does not verify signatures, so no signed bundle exists for the transcript
+change to break, and C8 only withholds an index from a section no 0.3 writer can
+emit.
+
+163 tests, zero clippy warnings, `unsafe_code = forbid`, one dependency.
+
 ## [0.3.1] — 2026-09-20
 
 The review-debt release. Everything the first multi-agent review found is now

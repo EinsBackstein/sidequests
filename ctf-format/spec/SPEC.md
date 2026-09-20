@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.3.1
+**Version:** 0.3 (major 0, minor 3); document revision 0.4.0
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, and footer. The crypto suite registry, the AEAD
 construction, key management, and signature *verification* are **not** specified
@@ -963,6 +963,16 @@ Padding inside the footer would be bytes belonging to no structure and covered b
 no commitment, which is the trailing-data ambiguity of §3 moved eight bytes to the
 left.
 
+**The two length fields locate the signature slots, and both the suite and the
+transcript constrain them.** For a reader that implements `suite_id`'s suite, the
+signature sizes are a property of the suite (§8.1's opening paragraph); a declared
+length that disagrees with the suite MUST be rejected rather than used, and a
+verifier MUST derive the slot boundaries from the suite rather than from the
+fields. The §8.4 transcript additionally covers both declared lengths, so any change
+to the split between the slots is detectable even without a suite registry. The
+fields are therefore a bounded declaration, never the sole authority for where the
+signatures begin and end.
+
 The footer's fields are **not** naturally aligned in the file, because
 `footer_off` carries no alignment requirement (§4.3). They MUST be decoded through
 alignment-independent little-endian reads.
@@ -1050,13 +1060,16 @@ signature`, and a reader MUST verify each link before relying on the next.
 ### 8.4 The signature transcript
 
 ```text
-sig_input = "ctf/footer-sig/v1" ‖ u16_le(suite_id) ‖ root ‖ u64_le(total_len)
+sig_input = "ctf/footer-sig/v2" ‖ u16_le(suite_id)
+            ‖ u32_le(sig_classical_len) ‖ u32_le(sig_pq_len)
+            ‖ root ‖ u64_le(total_len)
 ```
 
-`"ctf/footer-sig/v1"` is 17 ASCII bytes; `suite_id` is the header's; `root` is the
-32 bytes of §8.3; `total_len` is the footer's. The transcript is 59 bytes and every
-element after the label is fixed-width, so no length prefixes are needed (design
-§7's `LP` rule applies to constructions with a variable-width element).
+`"ctf/footer-sig/v2"` is 17 ASCII bytes; `suite_id` is the header's; the two
+lengths are the footer's; `root` is the 32 bytes of §8.3; `total_len` is the
+footer's. The transcript is **67 bytes** and every element after the label is
+fixed-width, so no length prefixes are needed (design §7's `LP` rule applies to
+constructions with a variable-width element).
 
 Both the classical and the post-quantum signature are computed over this identical
 transcript, and **both MUST verify**. Binding `suite_id` is what stops a signature
@@ -1064,6 +1077,17 @@ being replayed under a downgraded suite; the domain label is what stops it being
 replayed against an entitlement record, which is signed with the same keys
 (design §9). Binding `total_len` is what makes F9 enforceable rather than
 advisory.
+
+**Binding the two slot lengths is the v2 change, and it closes a real gap.** F3–F5
+bound each length, require both-or-neither, and fix their sum, but they leave the
+split between the two slots free; §8.1 locates the slots from those very fields.
+Nothing else commits to the split — not the §8.3 root, which covers the header and
+the section table only. An attacker could therefore exchange `sig_classical_len`
+and `sig_pq_len` while preserving their sum, and two readers that trusted the fields
+would slice the slot bytes differently. Signing both lengths removes the ambiguity:
+any change to the split changes the transcript and fails both signatures. A verifier
+of this version MUST NOT accept a transcript bearing the v1 label, and MUST NOT
+locate the slots from the fields alone (§8.1).
 
 Producing and checking the signatures is not specified in this version (§14). A
 reader of this version MUST NOT report a bundle as authentic on any grounds.
@@ -1189,6 +1213,17 @@ why §8.3 forbids adding the index to the root construction.
 | C5 | A chunk whose plaintext does not reproduce its entry MUST be rejected. |
 | C6 | **C4 MUST be checked before C5.** Per-chunk checks against an unverified index prove only that the payload matches whatever the attacker wrote there. |
 | C7 | A reader MUST NOT expose a chunk's bytes to a caller before that chunk passes C5. |
+| C8 | A reader MUST NOT expose the chunk index of a `SEALED` section, nor of a section whose `kind` it does not implement. |
+
+**C8 is the serving boundary applied to the index.** An entry is a chaining value of
+the section's **plaintext** (§9.1), so the index is information about contents the
+reader must not serve: exposing it for a `SEALED` section, or for a kind this reader
+does not implement, would leak a plaintext-derived guess-confirmation oracle while
+§10 forbids serving the section itself. It is a rule a reader applies when it hands
+an index to a caller, not a parser rule; the reference implementation enforces it in
+`Bundle::chunk_index`. An `EXTERNAL` section's index is unaffected — external
+verification is what the index is for (§9.4) — provided the section is neither
+sealed nor of an unimplemented kind.
 
 ### 9.4 External payloads
 
@@ -1258,6 +1293,10 @@ Further requirements, all normative:
   unencrypted sealed section unrepresentable, so a conforming file cannot reach this
   case; the requirement is stated separately because the serving boundary must not
   depend on a record rule having been applied upstream.
+- A reader MUST NOT expose a `SEALED` section's chunk index, nor the chunk index of
+  a section whose kind it does not implement (C8). An entry is a chaining value of
+  the plaintext (§9.1), so the index is information about the section's contents even
+  though it is not the contents.
 - A reader MUST NOT rewrite a file when §4.4 forbids it, or when it cannot
   preserve every unimplemented section and every carried manifest key
   byte-for-byte.
@@ -1589,3 +1628,4 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.2 | Compatibility model (§2.3): `feat_incompat` and `feat_ro_compat` carved from header reserved space, `OPTIONAL` section flag, extension policy (§15), compatibility matrix (§16). Adds H14, R18; narrows R3 to `kind = 0` and R4 to bits above 3. Redefines `SEALED` by who cannot open a section. Names `name_id` the section's cryptographic identity. Fixes the commitment root, the signature transcript, the no-trailing-bytes rule, and record-over-manifest precedence. No field moved; the section-record golden vector is unchanged and the 0.1 header remains valid. |
 | 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; narrows the `names` shape rule (§7.2) to reject the explicit Unicode bidi formatting characters (a manifest-level rule, so no 0.1 or 0.2 file is affected — neither version defined a manifest); R21 and T8 apply only to files setting `CONTAINER_V1`, so the §16 guarantee to 0.2 files is preserved rather than narrowed; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
 | 0.3.1 | Review-debt release. **No byte-layout change:** `version_minor` stays `3` and every 0.3 file is byte-identical. Corrects false claims (§7.3's `crit`-typo claim, §8.2's F4 citation and key-distribution statement), pins §9.2's merge to BLAKE3 specification revision `20211102173700` with full parent-node pseudocode and a worked example, and states that `cv(i)` is a **non-root** subtree chaining value. Reference implementation: chunk-verification ordering is type-enforced (`VerifiedChunkIndex`), manifest diagnostics carry an entry index/`name_id`, `ctf inspect` prints each section's `root`, `ChunkIndex::parse` requires its exact derived length, and `Manifest::validate_against` is linear. Closes every first-review finding; the post-fix re-review's new findings are recorded as tickets 70–97 and deferred. |
+| 0.4.0 | Closes post-fix tickets 70 and 71. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file is byte-identical; this is a version break only because §15 reserves a change to the signature transcript for one. Adds **C8**: a reader MUST NOT expose a `SEALED` section's chunk index, nor one for a section whose `kind` it does not implement, because an entry is a chaining value of the plaintext (§9.1). Changes the §8.4 transcript from `v1` (59 bytes) to `v2` (67 bytes), adding `u32_le(sig_classical_len) ‖ u32_le(sig_pq_len)` after `suite_id`: F3–F5 left the split between the two signature slots free while §8.1 located the slots from those fields, so neither signature covered the split. A verifier MUST NOT accept a `v1` transcript and MUST NOT locate the slots from the fields alone (§8.1). Producing and checking signatures remains unspecified (§14), so no signed bundle exists for the change to invalidate. |

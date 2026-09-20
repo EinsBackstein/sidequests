@@ -50,7 +50,11 @@ const ROOT_LABEL: &[u8] = b"ctf/root/v1";
 /// Domain-separated label for the signature transcript. The label is what stops a
 /// footer signature being replayed against an entitlement record, which is signed
 /// with the same keys (design §9).
-const SIG_LABEL: &[u8] = b"ctf/footer-sig/v1";
+///
+/// `v2` binds the two signature-slot lengths, which `v1` did not. Without them the
+/// split between the classical and post-quantum slots was constrained only by F3–F5
+/// (range, parity, and sum), so neither signature covered it.
+const SIG_LABEL: &[u8] = b"ctf/footer-sig/v2";
 
 const OFF_ROOT: usize = 0;
 /// Length of the commitment root, and of every section `root`. 32 bytes in the
@@ -249,24 +253,52 @@ impl Footer {
 
     /// The transcript both signatures are computed over. Phase 2 signs and verifies
     /// this; phase 1 can already produce it, which is what lets a test pin it.
+    ///
+    /// The two signature lengths are taken from the slots this footer actually
+    /// carries, so the transcript binds the split between them (see [`sig_input`]).
     pub fn sig_input(&self, suite_id: u16) -> Vec<u8> {
-        sig_input(suite_id, &self.root, self.total_len)
+        sig_input(
+            suite_id,
+            u32::try_from(self.sig_classical.len()).unwrap_or(u32::MAX),
+            u32::try_from(self.sig_pq.len()).unwrap_or(u32::MAX),
+            &self.root,
+            self.total_len,
+        )
     }
 }
 
-/// `"ctf/footer-sig/v1" ‖ u16_le(suite_id) ‖ root ‖ u64_le(total_len)`.
+/// `"ctf/footer-sig/v2" ‖ u16_le(suite_id) ‖ u32_le(sig_classical_len) ‖
+/// u32_le(sig_pq_len) ‖ root ‖ u64_le(total_len)`.
 ///
-/// Every element after the label is fixed width, so the concatenation is
-/// unambiguous without length prefixes (design §7's `LP` rule applies to inputs
-/// with a variable-width element).
+/// Every element after the label is fixed width, so the concatenation is unambiguous
+/// without length prefixes (design §7's `LP` rule applies to inputs with a
+/// variable-width element). The transcript is 67 bytes.
 ///
 /// `suite_id` is inside the transcript so a signature cannot be replayed under a
 /// downgraded suite, and `total_len` is inside it so the no-trailing-bytes rule is
 /// enforceable rather than advisory.
-pub fn sig_input(suite_id: u16, root: &[u8; ROOT_LEN], total_len: u64) -> Vec<u8> {
-    let mut v = Vec::with_capacity(SIG_LABEL.len() + 2 + ROOT_LEN + 8);
+///
+/// **The two slot lengths are inside it too, and that is the v2 change.** F3–F5
+/// bound each length, require both-or-neither, and fix their sum, but leave the
+/// split between the two slots free. §8.1 locates the slots from those fields, so
+/// without binding them the same bytes could be read with two different slot
+/// boundaries. Signing the lengths removes the ambiguity: any change to the split
+/// invalidates both signatures.
+///
+/// `v1` was 59 bytes (`label ‖ suite_id ‖ root ‖ total_len`) and is not produced or
+/// accepted by this version.
+pub fn sig_input(
+    suite_id: u16,
+    sig_classical_len: u32,
+    sig_pq_len: u32,
+    root: &[u8; ROOT_LEN],
+    total_len: u64,
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(SIG_LABEL.len() + 2 + 4 + 4 + ROOT_LEN + 8);
     v.extend_from_slice(SIG_LABEL);
     v.extend_from_slice(&suite_id.to_le_bytes());
+    v.extend_from_slice(&sig_classical_len.to_le_bytes());
+    v.extend_from_slice(&sig_pq_len.to_le_bytes());
     v.extend_from_slice(root);
     v.extend_from_slice(&total_len.to_le_bytes());
     v

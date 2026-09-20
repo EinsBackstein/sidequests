@@ -12,7 +12,7 @@ L7 — and recorded 28 new tickets (70–97) rather than folding them in; see
 accurate; each closed item keeps its original text and gains a note saying what
 actually shipped, because in two cases what shipped is not what the entry proposed.
 
-Current tree: `cargo test` 161 pass (was 139 after Tier 1, 124 at `9f50d84`),
+Current tree: `cargo test` 163 pass (was 139 after Tier 1, 124 at `9f50d84`),
 `cargo clippy --all-targets` 0 warnings, `cargo fmt --check` clean.
 
 ---
@@ -651,17 +651,16 @@ read-only agent sessions using the prompts verbatim; see
 `docs/reviews/0.3-phase1/post-fix/REVIEW.md`.)
 
 **Every finding above is closed.** The re-review's new findings are recorded as
-tickets **70–97** in the ticket tracker, not fixed inline, and are explicitly
-deferred. The two that phase 2 must settle before building on them are:
+tickets **70–97** in the ticket tracker, not fixed inline. **70 and 71 were fixed in
+0.4.0**, the two that phase 2 would otherwise have had to settle before building on
+them:
 
-- **Ticket 71** — the footer's `sig_classical_len`/`sig_pq_len` are inside neither
-  the commitment root nor the signature transcript, so the slot split is
-  unauthenticated. Harmless while signatures are unverified; phase 2 must pin
-  per-suite signature sizes or bind the lengths.
-- **Ticket 70** — `Bundle::chunk_index` returns a verified index for a `SEALED`
-  record whose plaintext `section_bytes` refuses, exposing plaintext-derived chaining
-  values. Phase 2 decides whether a sealed index is intentionally exposed.
+- **Ticket 71 — fixed in 0.4.0 (transcript `v1` → `v2`).** The §8.4 transcript now
+  covers `sig_classical_len` and `sig_pq_len`, so the split between the classical
+  and post-quantum slots is authenticated.
+- **Ticket 70 — fixed in 0.4.0 (rule C8).** `Bundle::chunk_index` refuses a `SEALED`
+  section's index, or one for a kind this build does not implement, matching
+  `section_bytes`.
 
-The rest span spec wording, the authoring surface, and test/tooling gaps; none is
-ship-blocking for phase 1. Deferring them was the deliberate choice so that the tagged
-0.3 is exactly the tree both reviews saw.
+The remaining tickets span spec wording, the authoring surface, and test/tooling
+gaps; none is ship-blocking for phase 1.

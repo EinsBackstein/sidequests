@@ -167,10 +167,12 @@ The dynamic range is roughly 2 KB → 40 GB. Three mechanisms cover it:
 
 ```
 root      = BLAKE3("ctf/root/v1" ‖ header[0,64) ‖ section_table_bytes)
-sig_input = "ctf/footer-sig/v1" ‖ u16_le(suite_id) ‖ root ‖ u64_le(total_len)
+sig_input = "ctf/footer-sig/v2" ‖ u16_le(suite_id)
+            ‖ u32_le(sig_classical_len) ‖ u32_le(sig_pq_len)
+            ‖ root ‖ u64_le(total_len)
 ```
 
-Both signatures cover the identical `sig_input`. Four properties, each of which
+Both signatures cover the identical `sig_input`. Five properties, each of which
 was a gap worth closing before anything depends on the bytes:
 
 - **The header is inside the root.** Otherwise the feature words (spec §4.1) are
@@ -187,6 +189,11 @@ was a gap worth closing before anything depends on the bytes:
   an entitlement record — those share the same keys.
 - **`total_len` is signed**, which is what makes the no-trailing-bytes rule
   (spec §3) enforceable rather than advisory.
+- **The two signature-slot lengths are signed** (spec §8.4). F3–F5 bound each
+  length, require both-or-neither, and fix their sum, but leave the split between
+  the two slots free, and those fields are what locate the slots. Binding them is
+  what stops a swap of the two lengths steering a verifier to different slot
+  boundaries. This is the `v1` → `v2` transcript change.
 
 The chunk index must also be committed; how is settled when its format is, in
 phase 1. Nothing else may be added to the root without a format version bump —

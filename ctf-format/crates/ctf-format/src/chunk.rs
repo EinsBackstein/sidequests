@@ -1,6 +1,6 @@
 //! Chunk indices: verified streaming without a second commitment.
 //!
-//! Normative: `spec/SPEC.md` §9, rules C1–C7.
+//! Normative: `spec/SPEC.md` §9, rules C1–C8.
 //!
 //! # What a chunk index is
 //!

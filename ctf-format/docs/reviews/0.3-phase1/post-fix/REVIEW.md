@@ -61,8 +61,8 @@ Recorded as tickets (70+), **not** fixed inline, per the seventh-lane contract.
 
 | Ticket | Severity | Finding |
 |---|---|---|
-| 70 | MEDIUM | `Bundle::chunk_index` serves a `SEALED` (or unknown-kind) section's plaintext chaining values without the `section_bytes` guard |
-| 71 | MEDIUM | footer `sig_classical_len` / `sig_pq_len` lie outside the commitment root **and** the signature transcript, so the slot split is unauthenticated |
+| 70 | MEDIUM | **Fixed in 0.4.0 (C8).** `Bundle::chunk_index` served a `SEALED` (or unknown-kind) section's plaintext chaining values without the `section_bytes` guard |
+| 71 | MEDIUM | **Fixed in 0.4.0 (transcript v2).** footer `sig_classical_len` / `sig_pq_len` lay outside the commitment root **and** the signature transcript, so the slot split was unauthenticated |
 | 72 | MEDIUM | R20 applies to legacy files, contradicting §16's "0.2 accepted in full" |
 | 73 | MEDIUM | `EXTERNAL` sections may carry `comp`/`enc` while external verification is defined over plaintext |
 | 74 | MEDIUM | §5.5/R19/T6 divide by `chunk_size` with no stated non-zero precondition |
@@ -90,7 +90,7 @@ Recorded as tickets (70+), **not** fixed inline, per the seventh-lane contract.
 | 96 | LOW | a pre-0.3 file is reported as a feature-bits problem rather than a version one |
 | 97 | NIT | long names truncate to indistinguishable 20-char labels in `inspect` |
 
-None is ship-blocking for phase 1. The two that phase 2 must resolve before it
-builds on them are **71** (bind the signature-slot lengths) and **70** (decide
-whether a sealed section's index is servable). Ticket 08 defers them with that
-reason recorded.
+None is ship-blocking for phase 1. The two that phase 2 would have had to settle
+before building on them — **70** and **71** — were fixed in **0.4.0**: C8 withholds
+a sealed or unimplemented-kind section's chunk index, and the signature transcript
+moved to `v2`, which binds both slot lengths. The rest remain deferred.
