@@ -38,7 +38,7 @@ fn bundle(data: &[u8]) {
     let bytes = b
         .section_bytes(record)
         .expect("manifest was verified in parse");
-    assert_eq!(b.manifest.encode().expect("re-encode"), bytes);
+    assert_eq!(b.manifest.encode().expect("re-encode"), bytes.as_ref());
 }
 
 fn header(data: &[u8]) {

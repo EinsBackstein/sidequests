@@ -13,8 +13,8 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 (phase 1 complete, all review
-debt closed; `cargo test` 163 pass).
+**Last updated:** 2026-09-20, at format version 0.3 / release 0.5.0 (phase 1
+complete, phase 2 groundwork landed; `cargo test` 191 pass).
 
 ## Where this lives
 
@@ -35,6 +35,9 @@ ctf-format/
     src/manifest.rs     manifest schema            spec §7
     src/footer.rs       footer + commitment root   spec §8
     src/chunk.rs        chunk index                spec §9
+    src/compress.rs     zstd framing + caps        spec §5.4
+    src/suite.rs        crypto suite registry      spec §19
+    src/authoring.rs    YAML authoring schema      spec §7.8
     src/bundle.rs       whole-file read and write  spec §10
     examples/demo.rs    writes a demo .ctf to try the CLI against
     tests/              container, cbor, chunk, bundle, mutation, fuzzmirror
@@ -133,8 +136,8 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 163 tests, 0 clippy warnings, one dependency
-(`blake3`), `unsafe_code = "forbid"`.
+parses them back before returning. 190 tests, 0 clippy warnings, `unsafe_code =
+"forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
 and commitment root, with `--verify` to re-hash every inline section and `--hex`
@@ -151,9 +154,14 @@ is deliberately no API that reports a bundle as authentic.
 > else's, and that step does not exist yet, so nothing downstream may consume this
 > crate as an authentication boundary today.
 
-Not implemented: **everything cryptographic beyond BLAKE3.** No signatures, no
-KEM, no AEAD, no zstd, no generator, no solver gate. The writer emits `enc = 0`
-and `comp = 0` only; the reader parses both fields and refuses to act on them.
+Not implemented: **signatures, KEM, and AEAD** — everything cryptographic beyond
+BLAKE3. No generator, no solver gate. The suite registry exists (spec §19) with one
+trait per primitive role and the BLAKE3 `hash` role implemented; resolving `kem`,
+`kdf`, `aead`, or `signature` reports `NotImplemented` at the point of use. The
+writer emits `enc = 0` only, but it *does* write `comp = 1` zstd sections now: the
+reader enforces an absolute output cap and an expansion-ratio cap before running the
+decoder (spec §5.4, D1–D2). The authoring surface (`authoring.rs`) parses design
+§10 YAML and rejects unknown keys; `ctf pack` is not wired up yet.
 
 ### What 0.3 changed, and why the bit is `ro_compat`
 
@@ -186,27 +194,20 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**Review debt is closed, 0.3.1 was tagged, and 0.4.0 fixes the two post-fix
-blockers.** All first-review findings are fixed; the post-fix re-review's new
-findings are tickets 70–97. **70 and 71 are fixed in 0.4.0** — a sealed or
-unknown-kind section's chunk index is withheld (C8), and the signature transcript is
-now `v2`, binding both slot lengths. The rest are deferred with the reasoning in
-`docs/reviews/0.3-phase1/post-fix/REVIEW.md`.
+**0.5.0 lands the phase 2 groundwork and the authoring surface** (tickets 9, 19,
+32, 33, 36, 38, 57): the suite registry, zstd with its caps, the YAML schema with
+strict key rejection, the declaration keys and `platform` overlay, the entitlement
+record format, and inspector regression tests. What remains, in order:
 
-1. **Phase 2 crypto.** The footer's signature slots, the transcript, and
-   `suite_id` are all fixed and testable already — `Footer::sig_input` produces the
-   exact 67 bytes phase 2 must sign. What is missing is the suite registry, the
-   hybrid KEM combiner, AEAD-STREAM, and the key envelopes. Start with the
-   registry behind one trait per primitive role, so ML-DSA stays retireable.
-2. **zstd**, which is blocked on nothing but the two limits spec §14 leaves open:
-   an absolute output cap and an expansion ratio cap. Pick both, write them into
-   the spec, then implement — in that order, because a reader that decompresses
-   before the caps exist is the exact thing spec §13 forbids.
-3. **`ctf pack`**, the YAML authoring surface of design §10. The manifest's `crit`
-   mechanism already carries the later phases' keys (`flag`, `generate`, `runtime`,
-   `sealed`, `verify`) as ignorable unknowns, so `pack` can emit them before
-   anything consumes them. The `names` typo/duplicate and directory-tree tickets
-   (88) belong here too.
+1. **Phase 2 crypto proper.** The registry is in place (spec §19); the next tickets
+   fill its roles: hybrid KEM (11/14), AEAD-STREAM (12/16), hybrid signatures
+   (10/13), flag derivation (15). Each plugs into an existing trait and needs no
+   byte-layout change.
+2. **`ctf pack`** (ticket 35). The authoring schema and the manifest declaration
+   keys now exist, so `pack` is the wiring: YAML → manifest + sections, resolving
+   output names to `name_id`s and external entries to records.
+3. **The entitlement chain implementation** (ticket 39). The record format is
+   specified (spec §18); implementing it depends on the signature role.
 
 ## Gotchas that will bite you
 
@@ -303,7 +304,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 163 tests
+cargo test                    # 191 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 

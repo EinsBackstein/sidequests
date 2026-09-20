@@ -134,6 +134,19 @@ pub enum Error {
     /// CBOR nesting past the depth cap. Unbounded recursion over attacker-supplied
     /// nesting is a stack-overflow DoS.
     CborTooDeep { max: u32 },
+    /// A compressed section's declared plaintext exceeds the absolute output cap
+    /// (spec §5.4). Checked before any decompression runs.
+    CompressionOutputTooLarge { got: u64, max: u64 },
+    /// A compressed section's declared plaintext is more than the permitted multiple
+    /// of its stored size (spec §5.4). Checked before any decompression runs.
+    CompressionRatioExceeded { plain: u64, stored: u64, max: u64 },
+    /// The input was not a valid zstd stream, or it ended before producing the
+    /// declared plaintext length.
+    DecompressionFailed,
+    /// A decompressed section produced a different number of bytes than its record
+    /// declares. The plaintext length is committed (the root is over the plaintext),
+    /// so a mismatch means the stored bytes do not decode to what was signed.
+    DecompressedLength { got: u64, want: u64 },
 }
 
 impl fmt::Display for Error {
@@ -237,6 +250,19 @@ impl fmt::Display for Error {
             Self::CborUnsortedKeys => write!(f, "cbor: map keys are not in canonical order"),
             Self::CborBadUtf8 => write!(f, "cbor: text string is not valid UTF-8"),
             Self::CborTooDeep { max } => write!(f, "cbor: nesting deeper than {max}"),
+            Self::CompressionOutputTooLarge { got, max } => write!(
+                f,
+                "compressed section would decompress to {got} bytes, above the {max}-byte cap"
+            ),
+            Self::CompressionRatioExceeded { plain, stored, max } => write!(
+                f,
+                "compressed section declares {plain} plaintext bytes from {stored} stored, above the {max}:1 ratio cap"
+            ),
+            Self::DecompressionFailed => write!(f, "compressed section did not decode as zstd"),
+            Self::DecompressedLength { got, want } => write!(
+                f,
+                "compressed section decompressed to {got} bytes, record declares {want}"
+            ),
         }
     }
 }

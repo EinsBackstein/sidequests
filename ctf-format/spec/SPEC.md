@@ -1,10 +1,12 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.4.0
+**Version:** 0.3 (major 0, minor 3); document revision 0.5.0
 **Status:** The container is complete and specified: header, section table,
-manifest, chunk index, and footer. The crypto suite registry, the AEAD
-construction, key management, and signature *verification* are **not** specified
-yet; see §14.
+manifest, chunk index, footer, zstd compression (§5.4), and the entitlement record
+format (§18). The crypto suite registry is specified (§19) and its dispatch surface
+exists in the reference implementation, but only the BLAKE3 hash role is
+implemented; the AEAD construction, key management, and signature *verification*
+are still not implemented. See §14.
 **Reference implementation:** `crates/ctf-format`.
 **Rationale, threat model, and design history:** `docs/FORMAT-DESIGN.md`. Where
 that document and this one disagree, this one wins.
@@ -541,13 +543,46 @@ limits that make doing so safe.
 
 Both transforms apply to the plaintext in a fixed order: **compress, then
 encrypt.** `len_plain` is the length before either; `len_stored` is the length
-after both. When `comp = 1` and the section is chunked, a writer MUST emit zstd
-frames aligned to chunk boundaries, so that a single chunk can be decompressed
-without the preceding ones — this is what keeps a large section seekable.
+after both. The `comp = 1` framing and the decompression caps a reader must
+enforce follow.
 
-The AEAD construction itself, its nonce and AAD derivation, and the zstd
-decompression limits a reader must impose are not specified in this version
-(§14).
+The AEAD construction itself and its nonce and AAD derivation are not specified in
+this version (§14).
+
+#### zstd framing (`comp = 1`)
+
+**Frames align to chunk boundaries.** When `comp = 1` and `chunk_size ≠ 0`, the
+stored bytes are the concatenation of one zstd frame per chunk, in address order:
+frame *i* covers `[i × chunk_size, min((i+1) × chunk_size, len_plain))` of the
+plaintext and decodes without its predecessors. When `chunk_size = 0`, the stored
+bytes are a single zstd frame covering the whole plaintext. `len_stored` is the
+total stored length; `len_plain` is the total decompressed length.
+
+#### Decompression caps
+
+A reader MUST reject a `comp = 1` section if either of the following holds, and
+MUST apply both checks **before invoking any decompressor**:
+
+| # | Rule |
+|---:|---|
+| D1 | `len_plain > MAX_DECOMPRESSED_SECTION` (§12). |
+| D2 | `len_plain > len_stored × MAX_DECOMPRESSION_RATIO` (§12). |
+
+`len_plain` is authenticated twice over: it lives in the section table, which the
+commitment root covers, and `root` is `BLAKE3` of exactly that many plaintext
+bytes. A reader may therefore refuse an output it is not allowed to produce
+without decoding a byte. The rule exists because a small stored size can otherwise
+name an unbounded output — the classic decompression bomb — so checking the
+declaration first bounds both the allocation and the work.
+
+A reader MUST additionally reject a section whose decompressed output is not
+exactly `len_plain` bytes, and MUST verify that plaintext against `root` before
+returning any of it (§5.1, §10). Because the caps are checked first, a reader MAY
+decompress an untrusted `comp = 1` section; that is a relaxation of the 0.3
+position, which decompressed nothing.
+
+The manifest is exempt from all of this rather than from the rule: R20 forbids it a
+codec.
 
 ### 5.5 Chunking
 
@@ -808,6 +843,12 @@ Keys defined by manifest `spec` 1. Every key is a text string.
 | `description` | tstr | | Markdown description |
 | `crit` | array of tstr | | Keys a reader MUST understand (§7.3) |
 | `external` | map | | Mirror metadata, keyed by `name_id` (§7.4) |
+| `flag` | tstr or map | | Flag derivation rule; never a flag value (§7.6) |
+| `generate` | map | | Deterministic generator declaration (§7.6) |
+| `runtime` | map | | Runtime contract (§7.6) |
+| `sealed` | map | | Sealed-release declaration (§7.6) |
+| `verify` | map | | Solvability-gate declaration (§7.6) |
+| `platform` | map | | Platform overlay, namespaced (§7.7) |
 
 `id` MUST be 1 to 64 bytes of lowercase ASCII letters, ASCII digits, and hyphens,
 and MUST NOT begin or end with a hyphen. It is an input to the seed derivation
@@ -934,6 +975,75 @@ M7 SHOULD be evaluated before M9–M18: if the manifest requires an understandin
 this reader does not have, every other diagnostic is noise about a schema that was
 never meant for it. M19–M21 need the section table and are therefore evaluated
 after it (§10 step 8).
+
+### 7.6 Declaration keys for the later phases
+
+Five keys declare behaviour the container itself does not perform: `flag`,
+`generate`, `runtime`, `sealed`, and `verify` (design §10). They are carried,
+committed, and re-emitted byte-for-byte like any other key; the platform consumes
+them. This section fixes their shapes so two authors, and two implementations,
+agree about them.
+
+| Key | Type | Required sub-keys | Optional sub-keys |
+|---|---|---|---|
+| `flag` | tstr **or** map | — (a tstr is a derivation name, e.g. `derived`) | `derive` tstr, `template` tstr, `scope` tstr |
+| `generate` | map | `wasm` tstr, `determinism` tstr, `outputs` array | — |
+| `runtime` | map | `image` tstr, `ports` array, `resources` map, `instancing` tstr, `ttl` tstr, `readiness` map | — |
+| `sealed` | map | `release` tstr, `members` array of tstr | — |
+| `verify` | map | `solver` tstr, `expect` tstr, `offline` bool | `live` map with `interval` tstr |
+
+Within `generate.outputs`, each entry is a map with `name` (tstr) and
+`player_visible` (bool). Within `runtime.ports`, each entry is a map with
+`container` (uint) and `protocol` (tstr). `runtime.resources` is a map with `cpu`
+(tstr), `memory` (tstr), and `pids` (uint). `runtime.readiness` is a map with `tcp`
+(uint) and `timeout` (tstr). `flag.scope`, when present, is one of `player`,
+`team`, or `event`; `generate.determinism` is one of `strict`, `flag_only`, or
+`none`; `runtime.instancing` is `shared` or `per_team`; `sealed.release` is
+`event_end`, `manual`, or `stage:<id>`.
+
+**The container carries these keys; it does not act on them.** A reader of this
+version MUST preserve them byte-for-byte (they are ordinary manifest keys) and MUST
+NOT reject a file because one is present. It MUST also reject one named in `crit`
+only if it does not understand the key — and this version *does* understand these
+five, so a writer that needs them interpreted may list them in `crit` and rely on a
+reader that predates this section to refuse the file cleanly (M7). That is the
+`crit` mechanism working, not an exception to it.
+
+### 7.7 Platform overlay
+
+The format does not own platform concepts such as track level or scoring weights.
+They travel in a single top-level key, `platform`, whose value is a map from a
+**namespace** (a non-empty text string naming the owning platform, by convention a
+reversed domain such as `example.org`) to that platform's opaque data.
+
+- The overlay is an ordinary manifest key. A reader that does not understand any of
+  it MUST carry it and re-emit it byte-for-byte (§7.3).
+- The format MUST NOT interpret or validate the namespaced values beyond the
+  canonical-CBOR subset of §7.1. A platform may add a field inside its namespace
+  without a format change and without a feature bit, because it is adding data to a
+  key the format already treats as opaque.
+- The container MUST NOT require `crit` for a `platform` field, and a reader MUST
+  NOT reject a `platform` key merely for carrying a namespace it does not know.
+  Platform data is not format semantics, so it is exactly the kind of unknown a
+  reader is supposed to carry.
+
+### 7.8 Authoring surface
+
+Authors do not write canonical CBOR by hand; they write YAML and `ctf pack`
+compiles it (design §10). The YAML schema is independent of this document and of
+`MANIFEST_SPEC`, but two properties are normative for the authoring front end:
+
+- **Unknown keys are rejected.** Every structure in the authoring schema MUST
+  reject a key it does not define, at every nesting level. This is the typo guard
+  §7.3 assigns to the authoring tool: a misspelled *optional* key (`visibilty` for
+  `visibility`) is carried silently by a reader and must be caught here, before a
+  byte is packed.
+- **The error names the offending key.** Authoring input is the author's own file,
+  not a hostile byte stream, so the diagnostic MUST name the key rather than
+  restating the rule abstractly.
+
+`crit` is *reader* forward compatibility and is not a substitute for this; the two
+mechanisms answer different questions (§7.3).
 
 ## 8. Footer
 
@@ -1282,6 +1392,9 @@ Further requirements, all normative:
 
 - A reader MUST NOT return any section's bytes to a caller before that section's
   `root` verifies for those bytes, whole or per chunk (§5.1, C7).
+- A reader MUST apply D1 and D2 (§5.4) to a `comp = 1` section before invoking a
+  decompressor, and MUST reject a decompressed output that is not exactly
+  `len_plain` bytes.
 - A reader MUST NOT serve, execute, decompress, or decrypt a section whose kind it
   does not implement (§5.2). This list is exhaustive and deliberately excludes
   hashing: a reader MAY verify such a section's stored bytes against its `root`, and
@@ -1399,6 +1512,8 @@ measured against.
 | `ROOT_LEN` | `32` | Size of every `root` and every chunk index entry |
 | `MIN_FOOTER_LEN` | `56` | Footer size with no signatures |
 | `MAX_SIG_LEN` | `65536` | Cap on either signature |
+| `MAX_DECOMPRESSED_SECTION` | `68719476736` | Absolute cap on a compressed section's plaintext (D1), 64 GiB |
+| `MAX_DECOMPRESSION_RATIO` | `65536` | Cap on `len_plain / len_stored` for a compressed section (D2) |
 | `MAX_DEPTH` (`cbor`) | `16` | Manifest nesting cap |
 | `MAX_NAME_LEN` | `255` | Longest name table entry |
 | `MAX_ID_LEN` | `64` | Longest challenge `id` |
@@ -1413,6 +1528,12 @@ Every limit above is **normative, not an implementation detail**: a writer that
 exceeds one produces a file that every conforming reader rejects. Raising any of
 them is therefore an incompatible change (§15). At the cap the section table is
 512 KiB, which is four orders of magnitude above what a real challenge uses.
+
+`MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` are the exception, and the
+direction is the reason: they bound what a *reader* will expand rather than what a
+writer may emit, so **raising** either accepts more files and is a relaxation
+(§15's "relaxations are free"), while lowering either rejects files that were legal
+and needs a feature bit.
 
 `root` is 32 bytes in the frozen layout, so **every present and future crypto
 suite MUST use a 32-byte digest.** A suite with a different digest size requires
@@ -1483,10 +1604,14 @@ The customary filename extension is `.ctf`. No media type is registered.
 - **Error reporting must not become an oracle.** A reader's diagnostics SHOULD
   carry offending offsets and lengths, and MUST NOT carry bytes from a sealed
   section — nor from the manifest, whose text is attacker-controlled.
-- **Decompression is unbounded in this version.** No limit on zstd output size or
-  expansion ratio is specified yet (§14). A reader MUST NOT decompress untrusted
-  input. The manifest is exempt from the problem rather than from the rule: R20
-  forbids it a codec.
+- **Decompression is bounded before it runs.** A compressed section's declared
+  plaintext is checked against an absolute cap and an expansion-ratio cap (D1, D2)
+  before any decoder is invoked, so a decompression bomb is refused rather than
+  expanded. The declaration is authenticated — `len_plain` is in the committed
+  section table and `root` covers exactly that many plaintext bytes — which is what
+  makes checking it first sound. The decoded output is then length-checked and
+  hashed against `root` before a caller sees it. The manifest is exempt from the
+  problem rather than from the rule: R20 forbids it a codec.
 - **An unsigned bundle authenticates nothing** and MUST NOT be served, executed,
   or trusted, however intact it is.
 
@@ -1498,20 +1623,13 @@ NOT claim conformance to a later version by guessing.
 - **Signature production and verification.** The footer's slots are located and
   bounded (§8.1, §8.2) and the transcript is fixed (§8.4), but the algorithms,
   the encoding of a signature within its slot, and key distribution are not
-  specified.
-- **The crypto suite registry** that `suite_id` selects.
+  implemented. The suite registry that selects them *is* specified (§19).
 - **The AEAD-STREAM construction**, nonce and AAD derivation, key envelopes, and
   every rule for `enc = 1`. Consequently a reader of this version cannot read the
   plaintext of an encrypted section at all, and MUST NOT try.
-- **zstd rules for `comp = 1`**: framing details beyond the chunk-alignment
-  requirement of §5.4, an absolute output cap, and an expansion ratio cap.
-- **Manifest keys for the later phases** — `flag`, `generate`, `runtime`,
-  `sealed`, `verify` (design §10). They are unknown keys under this version and
-  are therefore carried and ignored unless a writer lists them in `crit`, which
-  makes a file requiring them fail cleanly against a reader that does not
-  implement them. This is the extension mechanism working, not a gap.
-- **The entitlement chain record format** for `kind = entitlement`, and the
-  progress blob for `kind = progress`.
+- **The entitlement chain's signatures.** The record format, ordering, and genesis
+  binding are specified (§18), but verifying `sig_holder` and `sig_platform`
+  requires the suite registry's signature role, which is not implemented (§19).
 - **The live solvability gate's socket contract** (design §3, pillar 5).
 
 ## 15. Extension policy
@@ -1629,3 +1747,131 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.3 | Completes the container. Adds the manifest (§7, M1–M21), the footer (§8, F1–F9), and the chunk index (§9, C1–C7); adds R19, R20, **R21**, T6, T7, **T8**; narrows the `names` shape rule (§7.2) to reject the explicit Unicode bidi formatting characters (a manifest-level rule, so no 0.1 or 0.2 file is affected — neither version defined a manifest); R21 and T8 apply only to files setting `CONTAINER_V1`, so the §16 guarantee to 0.2 files is preserved rather than narrowed; assigns `feat_ro_compat` bit 0, `CONTAINER_V1` — `ro_compat` rather than `incompat` because a 0.2 reader gets a correct if incomplete answer about a 0.3 file, while a 0.2 *rewriter* would silently drop the footer, so 0.3 files stay readable by 0.2 readers and unrewritable by them. The full-file golden vector (§11) replaces the header and record vectors as the primary conformance target. **No field moved** and no existing rule changed meaning — R19, R20, T6 and T7 constrain structures 0.2 declared unspecified and forbade writing, which is why the narrowing is announced by a feature bit rather than a major version, and why that bit does not have to be incompatible. R21 and T8 do narrow structures 0.2 defined, and ride the same `CONTAINER_V1` bit rather than taking one of their own: both were folded in before 0.3 was ever tagged, so no file they would invalidate has ever existed. §15's requirement protects published files, and there were none. T8 in particular could not wait: it closes a signature malleability that phase 2 cannot close, because the transcript is already correct and the padding was never in scope of anything. `footer_off` keeps its lack of an alignment requirement, so the footer is decoded through alignment-independent reads. |
 | 0.3.1 | Review-debt release. **No byte-layout change:** `version_minor` stays `3` and every 0.3 file is byte-identical. Corrects false claims (§7.3's `crit`-typo claim, §8.2's F4 citation and key-distribution statement), pins §9.2's merge to BLAKE3 specification revision `20211102173700` with full parent-node pseudocode and a worked example, and states that `cv(i)` is a **non-root** subtree chaining value. Reference implementation: chunk-verification ordering is type-enforced (`VerifiedChunkIndex`), manifest diagnostics carry an entry index/`name_id`, `ctf inspect` prints each section's `root`, `ChunkIndex::parse` requires its exact derived length, and `Manifest::validate_against` is linear. Closes every first-review finding; the post-fix re-review's new findings are recorded as tickets 70–97 and deferred. |
 | 0.4.0 | Closes post-fix tickets 70 and 71. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file is byte-identical; this is a version break only because §15 reserves a change to the signature transcript for one. Adds **C8**: a reader MUST NOT expose a `SEALED` section's chunk index, nor one for a section whose `kind` it does not implement, because an entry is a chaining value of the plaintext (§9.1). Changes the §8.4 transcript from `v1` (59 bytes) to `v2` (67 bytes), adding `u32_le(sig_classical_len) ‖ u32_le(sig_pq_len)` after `suite_id`: F3–F5 left the split between the two signature slots free while §8.1 located the slots from those fields, so neither signature covered the split. A verifier MUST NOT accept a `v1` transcript and MUST NOT locate the slots from the fields alone (§8.1). Producing and checking signatures remains unspecified (§14), so no signed bundle exists for the change to invalidate. |
+| 0.5.0 | Phase 2 groundwork and the authoring surface. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Defines zstd framing and the two decompression caps (§5.4, D1–D2), adds `MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` to §12, and implements compression in the reference reader and writer. Specifies the five declaration keys `flag`, `generate`, `runtime`, `sealed`, `verify` (§7.6) and the namespaced `platform` overlay (§7.7), and makes strict key rejection normative for the authoring front end (§7.8). Specifies the entitlement record format, ordering, genesis binding, and signature transcript (§18), and the crypto suite registry with its failure timing (§19); only the BLAKE3 hash role is implemented. Nothing here narrows what is legal — each change either defines a structure a previous version left unspecified or widens what a reader accepts — so no feature bit is spent. |
+
+## 18. Entitlement records
+
+An `entitlement` section (kind `6`, §5.2) carries an append-only, hash-chained,
+hybrid-signed log (design §9). Its plaintext is a single canonical CBOR **array**
+(§7.1) of record maps, so it is one CBOR value decoded under the same rules as the
+manifest; a reader MUST reject any byte after the array.
+
+### 18.1 Fields
+
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `seq` | uint | ● | Sequence number; the authoritative ordering |
+| `type` | tstr | ● | `grant`, `transfer`, `revoke`, or `progress` |
+| `challenge` | tstr | ● | Challenge `id` the record is about |
+| `subject` | tstr | ● | Subject the record binds |
+| `holder` | bstr, 32 bytes | ● | Holder public-key hash (design §9) |
+| `prev` | bstr, 32 bytes | ● | Record id of the previous record; 32 zero bytes at genesis |
+| `root` | bstr, 32 bytes | ● at genesis only | Commitment root (§8.3) of the bundle the genesis grant was issued for |
+| `timestamp` | int (uint or nint) | | Platform-issued; **advisory only** |
+| `payload` | bstr | | Opaque bytes, e.g. a `progress` blob sealed to the new holder |
+| `sig_holder` | map | required for `transfer` | Current holder's hybrid signature |
+| `sig_platform` | map | ● | Platform's hybrid signature |
+
+A signature map has exactly two keys, `classical` and `pq`, each a byte string.
+
+### 18.2 Chaining and ordering
+
+- `seq` MUST start at `0` and increase by exactly one per record, in array order.
+  Ordering is by `seq`; `timestamp` MUST NOT be used for ordering or validation —
+  clocks drift and clients lie, and the field exists for human audit display only.
+- The **record id** of record *n* is
+  `BLAKE3("ctf/entitlement/record/v1" ‖ cbor)`, where `cbor` is the canonical
+  encoding of the record map with both `sig_*` keys removed.
+  `"ctf/entitlement/record/v1"` is the 24 ASCII bytes, with no terminator.
+- `prev` of record *n* (n > 0) MUST equal the record id of record *n−1*; `prev` of
+  the genesis record (n = 0) MUST be 32 zero bytes.
+- The genesis record MUST be a `grant` and MUST carry `root` equal to the
+  commitment root of the bundle version it was issued for. This is what stops a
+  grant for challenge version 3 being replayed as one for version 4 (design §9). No
+  later record may carry `root`.
+
+### 18.3 Signatures
+
+Both signatures cover the identical transcript:
+
+```text
+sig_input = "ctf/entitlement-sig/v1" ‖ u16_le(suite_id) ‖ u32_le(seq) ‖ record_id
+```
+
+`"ctf/entitlement-sig/v1"` is 22 ASCII bytes. `suite_id` is the enclosing bundle's
+header field, and both components of that suite's hybrid signature MUST verify
+(§19). The label differs from §8.4's, so a footer signature can never be replayed as
+an entitlement signature even though the two share keys (design §9). `sig_holder` is
+required only for `transfer`, which is what makes a handoff non-repudiable: the
+current holder cannot later claim another player took the challenge.
+
+### 18.4 Validation rules
+
+A reader that understands entitlement records MUST reject the section if any of the
+following holds.
+
+| # | Rule |
+|---:|---|
+| E1 | The plaintext is not canonical CBOR per §7.1, or is not an array, or has bytes after it. |
+| E2 | A record is not a map, a field has the wrong type, a required field is absent, or a 32-byte field is not exactly 32 bytes. |
+| E3 | `seq` values are not exactly `0, 1, …, count−1` in array order. |
+| E4 | `type` is not one of the four names. |
+| E5 | The genesis record is not a `grant`, does not carry `root`, or has a non-zero `prev`. |
+| E6 | A non-genesis record carries `root`. |
+| E7 | `prev` of a record does not equal the record id of its predecessor. |
+| E8 | `sig_platform` is absent; or `type` is `transfer` and `sig_holder` is absent. |
+
+Signature verification is **E9** and is not implemented in this version (§14): it
+needs the suite registry's signature role (§19). A reader MUST NOT report a chain
+as authenticated until it is.
+
+### 18.5 Offline validation
+
+Everything except E9 is checkable with no platform reachable: the records are
+inside the bundle, the chain is a hash chain, and the genesis binds the bundle's
+commitment root. That is why the chain lives in the format rather than in a
+database table — an air-gapped forensics workstation on USB media has to validate
+it, and it has to stay auditable even if the platform's database is later found to
+be wrong (design §9).
+
+## 19. Crypto suite registry
+
+`suite_id` (§4.1) selects one crypto suite. A suite provides one implementation of
+each primitive role, and a file MUST NOT mix primitives from different suites. The
+registry is what lets a suite be retired — if ML-DSA's youth becomes a problem, for
+example (design §7) — without moving a field or changing a record.
+
+### 19.1 Roles and suites
+
+| Role | Meaning |
+|---|---|
+| `hash` | Content hashing and the commitment |
+| `kdf` | Key derivation |
+| `kem` | Key encapsulation |
+| `aead` | Authenticated encryption |
+| `signature` | Digital signatures |
+
+| `suite_id` | `kem` | `aead` | `hash` | `kdf` | `signature` |
+|---:|---|---|---|---|---|
+| 1 (default) | X25519 + ML-KEM-768 | AES-256-GCM | BLAKE3 | HKDF-SHA-256 | Ed25519 + ML-DSA-65 |
+| 2 | X25519 + ML-KEM-768 | XChaCha20-Poly1305 | BLAKE3 | HKDF-SHA-256 | Ed25519 + ML-DSA-65 |
+| 3 (archive) | X25519 + ML-KEM-768 | AES-256-GCM | BLAKE3 | HKDF-SHA-256 | Ed25519 + ML-DSA-65 + SLH-DSA |
+
+Suite 3 is for the long-term archive copy only; its signature is larger and slower
+to verify (design §7).
+
+### 19.2 Rules
+
+| # | Rule |
+|---:|---|
+| S1 | A reader MUST NOT reject a file during header parsing because `suite_id` is unrecognized (§4.3). |
+| S2 | A reader MUST resolve `suite_id` through the registry at the first point a primitive is needed. |
+| S3 | An id absent from the registry MUST be rejected at that point, naming the suite. |
+| S4 | A suite's `hash` MUST produce 32 bytes; `root` and the chunk-index entries are fixed at 32 bytes (§12). |
+| S5 | A suite selects **all** roles; mixing roles across suites MUST be rejected. |
+
+This section specifies the registry and its failure timing. Only the `hash` role is
+implemented in this version — BLAKE3 is the one primitive the container already
+needs — so resolving a `kem`, `kdf`, `aead`, or `signature` role reports that the
+role is not implemented, at the point of use. Implementing those roles is tickets
+10–17 and requires no change to any byte of this document.

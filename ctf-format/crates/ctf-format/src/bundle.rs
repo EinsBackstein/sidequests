@@ -6,13 +6,16 @@
 //! them is checking one structure against another structure's unvalidated claims.
 
 use crate::{
-    Error, HEADER_LEN, Header, Result, SECTION_RECORD_LEN, SectionFlags, SectionKind,
+    Compression, Error, HEADER_LEN, Header, Result, SECTION_RECORD_LEN, SectionFlags, SectionKind,
     SectionRecord,
     chunk::{self, ChunkIndex, VerifiedChunkIndex},
+    compress,
     footer::{Footer, MIN_FOOTER_LEN, ROOT_LEN, Signing, commitment_root},
     manifest::Manifest,
     section::{parse_table, validate_layout},
 };
+
+use std::borrow::Cow;
 
 /// A parsed bundle, borrowing the file it was parsed from.
 ///
@@ -90,7 +93,7 @@ impl<'a> Bundle<'a> {
             .find(|r| r.kind == SectionKind::Manifest)
             .ok_or(Error::ManifestCount { got: 0 })?;
         let bytes = Self::verified_bytes(file, record)?;
-        let manifest = Manifest::decode(bytes)?;
+        let manifest = Manifest::decode(&bytes)?;
         manifest.validate_against(&sections)?;
 
         Ok(Self {
@@ -129,11 +132,15 @@ impl<'a> Bundle<'a> {
     /// distinction is not pedantry.
     ///
     /// `Err` for an external section (its bytes are not here — stream them through
-    /// [`chunk::verify_stream`]), for an encrypted or compressed one, whose
-    /// transforms land in phase 2 along with the decompression limits that make
-    /// running them on untrusted input safe, for a section whose kind this build
-    /// does not implement, and for a sealed section.
-    pub fn section_bytes(&self, record: &SectionRecord) -> Result<&'a [u8]> {
+    /// [`chunk::verify_stream`]), for an encrypted one, whose transforms land in
+    /// phase 2 along with the key envelopes that make reading it meaningful, for a
+    /// section whose kind this build does not implement, and for a sealed section.
+    ///
+    /// A compressed section is decompressed transparently: the returned [`Cow`]
+    /// borrows the file for an uncompressed section and owns the decoded bytes for
+    /// one with `comp = 1`. The root check runs over the plaintext either way, so
+    /// the caller never sees bytes that were not verified.
+    pub fn section_bytes(&self, record: &SectionRecord) -> Result<Cow<'a, [u8]>> {
         // Spec §10, normative: "A reader MUST NOT serve, execute, decompress, or
         // decrypt a section whose kind it does not implement (§5.2)." §5.2 is
         // equally explicit that `PLAYER_VISIBLE` on an unknown kind "confers nothing
@@ -147,9 +154,9 @@ impl<'a> Bundle<'a> {
         }
         // Belt and braces behind R21. R21 makes `SEALED` with `enc = 0`
         // unrepresentable, so this is unreachable through `Bundle::parse` today —
-        // which is exactly why it is cheap to keep. A phase 1 reader can never
-        // legitimately return sealed plaintext, and stating that at the boundary
-        // means a future relaxation of R21 cannot silently turn this into a leak.
+        // which is exactly why it is cheap to keep. A reader can never legitimately
+        // return sealed plaintext, and stating that at the boundary means a future
+        // relaxation of R21 cannot silently turn this into a leak.
         if record.flags.sealed() {
             return Err(Error::Inconsistent {
                 what: "a SEALED section's plaintext is not readable in this version",
@@ -195,11 +202,15 @@ impl<'a> Bundle<'a> {
         Ok(Some(index.verify_root(&record.root, record.chunk_size)?))
     }
 
-    /// Verify every inline, unencrypted, uncompressed section against its root.
+    /// Verify every inline, unencrypted section against its root.
     ///
     /// Not part of [`Bundle::parse`]: a bundle referencing gigabytes of inline
     /// payload should not be hashed merely to open it, so the cost is the caller's
     /// to ask for.
+    ///
+    /// A compressed section is decompressed and checked here too — the caps of
+    /// [`compress::check_caps`] run before the decoder, so verifying untrusted input
+    /// is safe. Only an *encrypted* section is unverifiable by this build.
     ///
     /// Returns a [`VerifyReport`] rather than a count, because a count cannot
     /// distinguish "checked everything" from "checked what I could". See that
@@ -211,7 +222,7 @@ impl<'a> Bundle<'a> {
                 report.external += 1;
                 continue;
             }
-            if !is_plain(r) {
+            if r.enc != crate::Encryption::None {
                 report.unverifiable += 1;
                 continue;
             }
@@ -221,7 +232,7 @@ impl<'a> Bundle<'a> {
         Ok(report)
     }
 
-    /// Hash a section's stored bytes and check them against its `root`.
+    /// Hash a section's plaintext and check it against its `root`.
     ///
     /// **Integrity only.** This deliberately does *not* refuse an unknown section
     /// kind, and [`Bundle::section_bytes`] carries that guard instead. Spec §10
@@ -235,15 +246,15 @@ impl<'a> Bundle<'a> {
     /// Consequence: [`Bundle::verify_inline_sections`] verifies unknown-kind
     /// sections and counts them as verified, while [`Bundle::section_bytes`] refuses
     /// to hand them to a caller.
-    fn verified_bytes(file: &'a [u8], record: &SectionRecord) -> Result<&'a [u8]> {
+    fn verified_bytes(file: &'a [u8], record: &SectionRecord) -> Result<Cow<'a, [u8]>> {
         if record.flags.contains(SectionFlags::EXTERNAL) {
             return Err(Error::Inconsistent {
                 what: "an EXTERNAL section's bytes are not in the file",
             });
         }
-        if !is_plain(record) {
+        if record.enc != crate::Encryption::None {
             return Err(Error::Inconsistent {
-                what: "encrypted and compressed sections are not readable in this version",
+                what: "encrypted sections are not readable in this version",
             });
         }
         let end = record
@@ -252,11 +263,15 @@ impl<'a> Bundle<'a> {
             .ok_or(Error::LengthOverflow {
                 at: "section range",
             })?;
-        let bytes = slice(file, record.offset, end, "section payload")?;
-        if blake3::hash(bytes).as_bytes() != &record.root {
+        let stored = slice(file, record.offset, end, "section payload")?;
+        let plain: Cow<'a, [u8]> = match record.comp {
+            Compression::None => Cow::Borrowed(stored),
+            Compression::Zstd => Cow::Owned(compress::decompress(stored, record.len_plain)?),
+        };
+        if blake3::hash(&plain).as_bytes() != &record.root {
             return Err(Error::RootMismatch { at: "section" });
         }
-        Ok(bytes)
+        Ok(plain)
     }
 }
 
@@ -285,11 +300,6 @@ pub struct VerifyReport {
     /// Sections whose bytes are in this file and which this build cannot check.
     /// Non-zero means the file was **not** fully verified.
     pub unverifiable: usize,
-}
-
-/// A section whose stored bytes are its plaintext.
-fn is_plain(r: &SectionRecord) -> bool {
-    r.enc == crate::Encryption::None && r.comp == crate::Compression::None
 }
 
 fn slice<'a>(file: &'a [u8], start: u64, end: u64, what: &'static str) -> Result<&'a [u8]> {
@@ -337,17 +347,22 @@ pub struct SectionSpec<'a> {
     /// `0` for a single unit. A non-zero value emits a chunk index whenever the
     /// section spans two chunks or more.
     pub chunk_size: u32,
+    /// zstd compression of the inline payload (spec §5.4). [`Compression::Zstd`]
+    /// frames per chunk, so a chunk decodes without its predecessors. The manifest
+    /// must never use it (R20); the writer's parse-back catches that.
+    pub comp: Compression,
     pub payload: Payload<'a>,
 }
 
 impl<'a> SectionSpec<'a> {
-    /// An inline, unencrypted, uncompressed section — everything phase 1 writes.
+    /// An inline, unencrypted, uncompressed section.
     pub fn inline(kind: SectionKind, name_id: u16, flags: SectionFlags, bytes: &'a [u8]) -> Self {
         Self {
             kind,
             name_id,
             flags,
             chunk_size: 0,
+            comp: Compression::None,
             payload: Payload::Inline(bytes),
         }
     }
@@ -355,6 +370,12 @@ impl<'a> SectionSpec<'a> {
     /// Chunk this section, so it carries a verified-streaming index.
     pub fn chunked(mut self, chunk_size: u32) -> Self {
         self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Compress this section's inline payload with zstd.
+    pub fn compressed(mut self) -> Self {
+        self.comp = Compression::Zstd;
         self
     }
 }
@@ -390,11 +411,22 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
         let (offset, len_stored, len_plain, root) = match s.payload {
             Payload::External { len_plain, root } => (0, 0, len_plain, root),
             Payload::Inline(bytes) => {
+                // Compress before placing: `len_plain` stays the pre-compression
+                // length and `root` commits to the plaintext (spec §5.4), so
+                // compression is invisible to the commitment.
+                let stored: Cow<'_, [u8]> = match s.comp {
+                    Compression::None => Cow::Borrowed(bytes),
+                    Compression::Zstd => Cow::Owned(compress::compress(bytes, s.chunk_size)?),
+                };
                 pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
                 let offset = u64::from(HEADER_LEN) + body.len() as u64;
-                body.extend_from_slice(bytes);
-                let len = bytes.len() as u64;
-                (offset, len, len, *blake3::hash(bytes).as_bytes())
+                body.extend_from_slice(&stored);
+                (
+                    offset,
+                    stored.len() as u64,
+                    bytes.len() as u64,
+                    *blake3::hash(bytes).as_bytes(),
+                )
             }
         };
         if s.chunk_size != 0
@@ -408,7 +440,7 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
             name_id: s.name_id,
             flags: s.flags,
             enc: crate::Encryption::None,
-            comp: crate::Compression::None,
+            comp: s.comp,
             offset,
             len_stored,
             len_plain,

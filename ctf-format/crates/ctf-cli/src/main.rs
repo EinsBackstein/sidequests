@@ -231,7 +231,7 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
             dump(
                 "manifest (canonical CBOR)",
                 r.offset as usize,
-                b.section_bytes(r)?,
+                &b.section_bytes(r)?,
             );
         }
     }
