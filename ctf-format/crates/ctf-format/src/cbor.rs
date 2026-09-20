@@ -292,7 +292,11 @@ impl Decoder<'_> {
             }
             // 31 is indefinite length, which has no canonical form at all; 28–30
             // are reserved. Both are rejects rather than something to skip.
-            _ => return Err(Error::CborUnsupported { initial: ib }),
+            _ => {
+                return Err(Error::CborUnsupported {
+                    what: "additional-information value (indefinite length or reserved)",
+                });
+            }
         };
         Ok((major, arg))
     }
@@ -301,7 +305,6 @@ impl Decoder<'_> {
         if depth > MAX_DEPTH {
             return Err(Error::CborTooDeep { max: MAX_DEPTH });
         }
-        let start = self.pos;
         let (major, arg) = self.head()?;
         Ok(match major {
             0 => Value::Uint(arg),
@@ -362,7 +365,7 @@ impl Decoder<'_> {
                 // admitting floats would mean adopting their determinism problems.
                 _ => {
                     return Err(Error::CborUnsupported {
-                        initial: *self.b.get(start).unwrap_or(&0),
+                        what: "major type 7 value (undefined, float, or simple-value escape)",
                     });
                 }
             },
@@ -370,9 +373,7 @@ impl Decoder<'_> {
             // interpreted, so an unknown one is exactly the kind of thing a reader
             // must not carry blindly.
             _ => {
-                return Err(Error::CborUnsupported {
-                    initial: *self.b.get(start).unwrap_or(&0),
-                });
+                return Err(Error::CborUnsupported { what: "tag" });
             }
         })
     }

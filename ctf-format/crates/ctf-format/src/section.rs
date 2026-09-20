@@ -717,6 +717,13 @@ pub fn parse_table_with(b: &[u8], count: u32, rules: RuleSet) -> Result<Vec<Sect
 /// Overlap matters beyond tidiness: two sections sharing bytes is exactly the
 /// ambiguity that turns into a parser-differential exploit, where two readers
 /// disagree about what a bundle contains.
+///
+/// The inline payload and chunk-index bounds enforced below are against
+/// `footer_off`, not `file.len()`: everything the table describes must live
+/// before the footer, and only the footer itself may follow it. When either
+/// bound fires, [`Error::ExceedsFile`] reports `file_len` as the real file
+/// length (`file.len()`) and names the `footer_off` bound in `at`, so the
+/// diagnostic does not claim the file is shorter than it is.
 pub fn validate_layout(records: &[SectionRecord], header: &Header, file: &[u8]) -> Result<()> {
     let file_len = file.len() as u64;
     header.check_file_len(file_len)?;
@@ -745,9 +752,9 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file: &[u8]) 
         if let Some((start, end)) = r.stored_range() {
             if end > header.footer_off {
                 return Err(Error::ExceedsFile {
-                    at: "section payload",
+                    at: "section payload beyond footer_off",
                     end,
-                    file_len: header.footer_off,
+                    file_len,
                 });
             }
             if end > start {
@@ -757,9 +764,9 @@ pub fn validate_layout(records: &[SectionRecord], header: &Header, file: &[u8]) 
         if let Some((start, end)) = r.index_range()? {
             if end > header.footer_off {
                 return Err(Error::ExceedsFile {
-                    at: "chunk index",
+                    at: "chunk index beyond footer_off",
                     end,
-                    file_len: header.footer_off,
+                    file_len,
                 });
             }
             ranges.push((start, end, Region::Index(r.name_id)));

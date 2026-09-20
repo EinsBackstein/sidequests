@@ -105,7 +105,11 @@ fn a_critical_unimplemented_key_is_rejected() {
     ]);
     assert!(matches!(
         Manifest::decode(&v.encode().unwrap()),
-        Err(Error::Manifest { .. })
+        Err(Error::ManifestEntry {
+            index: Some(0),
+            name_id: None,
+            ..
+        })
     ));
 }
 

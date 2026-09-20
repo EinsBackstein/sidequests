@@ -13,10 +13,11 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 / release 0.8.0 (phase 1
+**Last updated:** 2026-09-20, at format version 0.3 / release 0.9.0 (phase 1
 complete; phase 2 complete except key distribution and the live gate; encrypted
 sections, the entitlement chain, stage gating, `ctf keys`/`seal`/`unseal`, and the
-`clap` CLI landed; `cargo test` 331 pass).
+`clap` CLI landed; the post-fix review tickets 81–97 closed; `cargo test` 339
+pass).
 
 ## Where this lives
 
@@ -192,6 +193,18 @@ integration tests (tickets 37, 83).
 whose content key it wraps — so one `keys` section serves every encrypted section.
 No writer had ever emitted a `keys` section, so no existing file carried the old
 three-key form.
+
+Implemented since 0.9.0: the last of the post-fix review tickets. The one normative
+addition is the optional **`paths`** manifest key (spec §7.2, M22–M25), which
+represents a directory tree without widening `names`: a relative POSIX path per
+`name_id`, checked component-by-component so `.`, `..`, an absolute path, and a `\`
+are unrepresentable. `ctf pack` does not emit it yet — that is phase 3 — but
+`Manifest::path_of` exposes it. Everything else is diagnostic or test work: a
+section root mismatch names its `name_id` and the verify pass reports every
+mismatch; `crit` errors carry an entry index; `ExceedsFile` reports the real file
+length; a pre-0.3 file is diagnosed as an older format; errors no longer echo input
+bytes; and `ctf inspect` prints each section's full name. No byte-layout change and
+no feature bit.
 
 ### What 0.3 changed, and why the bit is `ro_compat`
 

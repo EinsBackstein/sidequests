@@ -7,6 +7,70 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.9.0] — 2026-09-20
+
+The remaining post-fix review tickets — 81, 83, 86–88, 90–92, 95–97. **No
+byte-layout change:** `version_minor` stays `3`, and the header, section table,
+footer, commitment root, and signature transcript are untouched. The one normative
+addition is the optional `paths` manifest key; everything else is a diagnostic, a
+test, or a documentation correction.
+
+### Added — `paths`: directory trees without widening `names` (ticket 88, spec §7.2, §7.5)
+
+`names` is flat and unique, so it cannot express `src/main.c` and cannot
+disambiguate two `main.c` files in different directories. `paths` is an optional
+map from `name_id` to a relative POSIX path, checked component-by-component with
+the name-shape rule, so `.`, `..`, an absolute path, an empty component, and a `\`
+are unrepresentable rather than filtered. Paths must be unique (M24) and name a
+real section (M25). A section with no entry extracts under its flat name, so the
+key is additive; it is an ordinary manifest key and spends no feature bit — a
+reader that does not implement it carries it byte-for-byte (§7.3). `Manifest::path_of`
+exposes it.
+
+### Changed — diagnostics that name the thing that failed
+
+- **A section root mismatch names the section (ticket 81).** `Error::SectionRootMismatch`
+  carries the `name_id` — a number, not attacker text — and `verify_inline_sections`
+  now reports **every** mismatch in `VerifyReport::mismatches` instead of aborting on
+  the first, so an operator does not bisect a 50-artifact bundle by hand. `ctf
+  inspect --verify` prints each failing section and exits non-zero.
+- **`crit` list errors carry an entry index (ticket 91).** M6–M8 return
+  `Error::ManifestEntry { index, .. }` like the sibling list rules M15, M17, and M18,
+  and never the key text.
+- **`ExceedsFile` reports the real file length (ticket 90).** The T3/T6 bounds in
+  `validate_layout` pass `file.len()`, and `at` names `footer_off` — the bound that
+  actually fired — instead of claiming the file is shorter than it is.
+- **A pre-0.3 file is diagnosed as an older format (ticket 96).** A whole-container
+  read of a file whose `version_minor` predates the container and which lacks
+  `CONTAINER_V1` returns `Error::LegacyContainer { minor }`, naming what is absent
+  instead of reading as a feature-negotiation failure. The bit still decides; the
+  minor only selects the message (§2.3).
+- **No input bytes in an error `Display` (ticket 95).** `Error::BadMagic` carries no
+  bytes, and `CborUnsupported` carries the *kind* of unsupported item rather than its
+  initial byte. Debug formatting still shows the value for developers; operator
+  output is value-agnostic.
+
+### Changed — serving boundary and API hygiene
+
+- **A record must belong to the bundle (ticket 92).** `section_bytes`,
+  `chunk_index`, and `decrypt_section_bytes` now check the caller's record against
+  the table's record for that `name_id` before verifying anything, so a
+  hand-built record whose `root` the footer never committed to proves nothing.
+- **Dead API removed, live API pinned (ticket 87).** `Bundle::sig_input` had no
+  caller and is deleted; `Manifest::description` is now pinned by a test.
+- **`ctf inspect` prints each section's full name (ticket 97).** The truncated
+  table column can map two long names sharing a prefix to one label; the full,
+  Debug-escaped name is printed on its own line.
+
+### Fixed — tests and docs
+
+- **The header commitment test now proves the commitment (ticket 83).** It asserts
+  `RootMismatch { at: "commitment root" }` for the two header offsets no earlier
+  rule constrains, and separately that the mutation moves the root.
+- **The design note no longer claims thread-parallel BLAKE3 (ticket 86).** The
+  reference implementation hashes on the calling thread; `rayon` is not enabled and
+  thread-parallel verification is deferred to a caller.
+
 ## [0.8.0] — 2026-09-20
 
 Encrypted sections end to end, the entitlement chain, stage gating, and the last of

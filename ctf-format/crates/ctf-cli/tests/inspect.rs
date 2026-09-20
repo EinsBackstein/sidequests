@@ -173,6 +173,103 @@ fn external_sections_show_size_mirrors_and_root() {
     assert!(out.contains("1 external"), "{out}");
 }
 
+/// Ticket 97: the section table truncates a name to 20 characters, so two distinct
+/// long names sharing a 19-character prefix render to the same label and the
+/// operator cannot tell them apart. `inspect` must also print each section's full
+/// name, Debug-escaped, so the names stay distinguishable.
+#[test]
+fn long_shared_prefix_names_are_disambiguated() {
+    // A 19-character shared prefix: `truncate(name, 20)` turns both into the same
+    // `aaaaaaaaaaaaaaaaaaa…` label.
+    let prefix = "a".repeat(19);
+    let name_one = format!("{prefix}-one");
+    let name_two = format!("{prefix}-two");
+    let m = Manifest::build(
+        "chal",
+        "Title",
+        &["manifest", name_one.as_str(), name_two.as_str()],
+        vec![],
+    )
+    .unwrap();
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &m.encode().unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"one",
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                2,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"two",
+            ),
+        ],
+    )
+    .unwrap();
+    let t = TempFile::new("long-names");
+    std::fs::write(t.path(), &file).unwrap();
+
+    let (ok, out) = inspect(t.path(), &[]);
+    assert!(ok, "inspect failed:\n{out}");
+    assert!(
+        out.contains(&name_one),
+        "first full name missing from inspect output:\n{out}"
+    );
+    assert!(
+        out.contains(&name_two),
+        "second full name missing from inspect output:\n{out}"
+    );
+}
+
+/// Ticket 81: a section whose bytes do not match its root is named by `name_id` in
+/// the report, and `--verify` fails rather than reporting success.
+#[test]
+fn verify_names_a_section_whose_bytes_do_not_match() {
+    let m = manifest_with(None);
+    let mut file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &m.encode().unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"hello",
+            ),
+        ],
+    )
+    .unwrap();
+    // Flip a byte inside the artifact payload; the table is untouched, so the file
+    // still opens and only that section's root disagrees.
+    let b = ctf_format::Bundle::parse(&file).unwrap();
+    let off = b.section(1).unwrap().offset as usize;
+    drop(b);
+    file[off] ^= 1;
+
+    let t = TempFile::new("mismatch");
+    std::fs::write(t.path(), &file).unwrap();
+    let (code, out) = inspect_status(t.path(), &["--verify", "--allow-unsigned"]);
+    assert_ne!(code, 0, "a root mismatch must fail --verify:\n{out}");
+    assert!(
+        out.contains("section 1") && out.contains("does NOT match its root"),
+        "the failing section must be named:\n{out}"
+    );
+}
+
 /// `category` is free-form text from an attacker-controllable manifest. Debug
 /// formatting must escape it, so an embedded ESC cannot spoof the operator's
 /// terminal — the L1 failure mode.

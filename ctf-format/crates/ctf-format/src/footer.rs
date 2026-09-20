@@ -188,7 +188,7 @@ impl Footer {
             .and_then(|s| s.try_into().ok())
             .ok_or_else(trunc)?;
         if magic != MAGIC {
-            return Err(Error::BadMagic { got: magic });
+            return Err(Error::BadMagic);
         }
         let total_len = u64_at(b, trailer).ok_or_else(trunc)?;
         if total_len != file_len {

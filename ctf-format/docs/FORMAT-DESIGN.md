@@ -319,9 +319,15 @@ machine indices gives a deterministic commitment *and* a zero-parse hot path.
   indices are fixed-width and aligned so they are read by cast, not by parse.
 - Hash is **BLAKE3**, which is already a Merkle tree — verified streaming and
   incremental verification come free. Do not hand-roll a Merkle tree.
-  Verification is SIMD- and thread-parallel.
+  BLAKE3 itself is SIMD-parallel within a single call, but the reference
+  implementation hashes on the calling thread; thread-parallel verification is
+  deferred, not delivered. Per-chunk verification (`chunk.rs`) and per-section
+  roots mean a caller that needs it can parallelize across chunks or sections
+  without a format change — the reference build just does not, and its hashing is
+  single-threaded.
 - Chunk size 1 MiB default. Nonce and chunk index derive from position, so
-  verification and decryption parallelize across chunks.
+  verification and decryption are independent across chunks; parallel scheduling
+  of them is left to the caller.
 - AES-256-GCM where AES-NI / ARMv8 crypto extensions exist (≈GB/s), ChaCha20 suite
   otherwise.
 - **Zero-copy and verify-first conflict.** Resolution, normative: plaintext public
@@ -476,7 +482,7 @@ the length is a per-challenge choice, not a format constant.
 
 | Role | Crate | Status |
 |---|---|---|
-| BLAKE3 | `blake3` | Reference implementation, SIMD + rayon |
+| BLAKE3 | `blake3` | Reference implementation, SIMD-parallel; thread-parallel use deferred (`rayon` feature not enabled) |
 | Verified streaming | `bao` | Bao encoding lives here, not in `blake3` — audit its maturity before depending on it |
 | AES-256-GCM, Ed25519 | `aws-lc-rs` | Audited, FIPS track, AES-NI |
 | STREAM chunking | `aead::stream` (RustCrypto) | Implements Hoang et al. directly |

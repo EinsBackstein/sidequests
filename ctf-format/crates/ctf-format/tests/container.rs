@@ -164,7 +164,7 @@ fn header_golden_vector_v0_3() {
 fn header_rejects_bad_magic() {
     let mut b = good_header().to_bytes();
     b[0] = 0x88;
-    assert!(matches!(Header::parse(&b), Err(Error::BadMagic { .. })));
+    assert!(matches!(Header::parse(&b), Err(Error::BadMagic)));
 }
 
 /// A text-mode transfer that eats the high bit or rewrites CRLF must be caught by
@@ -173,17 +173,11 @@ fn header_rejects_bad_magic() {
 fn header_magic_catches_transfer_mangling() {
     let mut stripped = good_header().to_bytes();
     stripped[0] = MAGIC[0] & 0x7f;
-    assert!(matches!(
-        Header::parse(&stripped),
-        Err(Error::BadMagic { .. })
-    ));
+    assert!(matches!(Header::parse(&stripped), Err(Error::BadMagic)));
 
     let mut crlf_eaten = good_header().to_bytes();
     crlf_eaten[4] = 0x0a; // \r\n collapsed to \n
-    assert!(matches!(
-        Header::parse(&crlf_eaten),
-        Err(Error::BadMagic { .. })
-    ));
+    assert!(matches!(Header::parse(&crlf_eaten), Err(Error::BadMagic)));
 }
 
 #[test]
