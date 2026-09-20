@@ -7,6 +7,104 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.7.0] — 2026-09-20
+
+Key envelopes, derived flags, bundle signing, `ctf pack`, and the deferred review
+tickets 72–97. **No byte-layout change:** `version_minor` stays `3`, and every
+`.ctf` file this version's writer produces is byte-identical to a 0.6 file's for the
+same inputs. Nothing here moves a field or changes the meaning of a value already
+assigned, so no new feature bit is spent (spec §15).
+
+### Added — key envelopes (ticket 14, spec §21)
+
+`src/envelope.rs`: a section's 32-byte `content_key` is delivered to a named
+recipient by a KEM-DEM construction. The recipient's hybrid KEM public key
+encapsulates a per-envelope key (`kek`), and that key seals the content key under
+the suite's AEAD with `aad = "ctf/envelope/v1" ‖ u16_le(suite_id) ‖ LP(context)`
+and an all-zero nonce — safe because every envelope's `kek` is fresh. The context
+(`storage`, `seal`, `stage:<n>`, `holder`) is bound three times: into the KEM
+combiner's transcript, into the AAD, and as an explicit check on unwrap. A
+recipient without the matching secret key fails; so does an envelope for the wrong
+context, even with a valid key. Envelopes serialize as a canonical-CBOR map
+(`context`, `ct`, `wrapped`), the plaintext of a `keys` section (kind 7).
+
+### Added — derived flags and stage keys (ticket 15, spec §22)
+
+`src/derive.rs`: `seed(challenge, subject) = HKDF-SHA-256(event_secret, salt =
+"ctf/seed/v1", info = LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id))`;
+`flag = base32_lower(HMAC-SHA-256(seed, "ctf/flag/v1")[0..10])` (16 chars, 80 bits);
+`stage_key(flag(N-1), N) = HKDF-SHA-256(ikm = flag, salt = "ctf/stage/v1",
+info = u32_le(N))`. `event_secret` must be 32 bytes and never enters a bundle; a
+test asserts no byte of a written bundle contains the flag or the secret.
+`chal_version` is a fixed-width `u64_le` and is deliberately not length-prefixed,
+where the design sketch wrote `LP(chal_version)`.
+
+### Added — bundle signing (ticket 13, spec §20.3)
+
+`bundle::sign_bundle` produces both hybrid signatures over the §8.4 transcript and
+appends them to an unsigned bundle, changing no byte outside the footer (the
+commitment root covers the header and table, which do not move). The footer's two
+length fields and `total_len` grow and are inside the transcript, which is why the
+lengths are fixed before signing. The result is parsed back and verified with the
+caller's public key before it is returned. `write_signed_bundle` is `write_bundle`
+then `sign_bundle`; the unsigned form remains a valid intermediate state.
+
+### Added — `ctf pack` (ticket 35, design §10)
+
+`src/pack.rs` compiles a validated authoring document into an unsigned bundle: the
+required manifest keys plus the §7.6 declaration keys, and a synthesized name table
+(`manifest` first, then the generator module and outputs, sealed members, and the
+solver). A name that violates the manifest's shape rules is refused with the
+authoring key named. `ctf pack <yaml> --out <file> [--suite <id>]` wires it up, and
+`ctf keygen` / `ctf sign` produce and apply a keypair (two-line hex key files, a
+local convenience rather than a container format).
+
+### Added — cross-library primitive vectors (ticket 17)
+
+`spec/vectors/generate.py` produces committed vectors for every suite role from a
+second, independent implementation: a pure-Python BLAKE3 for `hash`, Python
+`hmac`/`hashlib` HKDF for `kdf`, Python `cryptography` for the AEADs and Ed25519,
+and `openssl` 3.6 for ML-KEM-768 and ML-DSA-65 (wired into the §20.1 combiner for
+`kem`). `tests/vectors.rs` checks each against the crate and asserts that a
+one-bit corruption of every vector fails.
+
+### Changed — review tickets 72–97
+
+- **R20 gated on `CONTAINER_V1`** (ticket 72, spec §5.6/§16). R20 applies to the
+  manifest's codec only when the file sets the bit, so a 0.2 file keeps the rules it
+  was written under — the same treatment R21 and T8 get.
+- **R22 added** (ticket 73, spec §5.6/§5.7). An `EXTERNAL` record MUST NOT carry
+  `enc` or `comp`: external verification is over the plaintext, and nothing said
+  what a mirror serves otherwise. Gated on `CONTAINER_V1`.
+- **`chunk_size ≠ 0` stated before every division** (ticket 74, spec §5.5, §5.6,
+  §9.3). R16 is ordered before R19, T6, C1, and C3, and before the index-length
+  formula.
+- **C1–C7 placed explicitly on-use** (ticket 76, spec §9.3/§10). A malformed index
+  does not reject the file; it is evaluated when the index is used.
+  `VerifyReport` gained `chunk_indices`, disclosing indices the pass did not check.
+- **A chunked inline payload is hashed once** (ticket 85). The writer takes the
+  section's `root` from the index it already built; the golden vector does not move.
+- **`EXTERNAL` sections can carry a written chunk index** (ticket 89).
+  `SectionSpec::with_chunk_index` supplies a precomputed index the writer validates
+  against the root before emitting.
+- **The CLI distinguishes intact from authentic** (ticket 93). `ctf inspect
+  --verify` on an unsigned bundle reports it intact but not authentic and exits 2;
+  `--allow-unsigned` accepts it explicitly.
+- **Stale spec cross-references corrected** (ticket 94) in `footer.rs`,
+  `section.rs`, and a `container.rs` test.
+
+### Spec
+
+Spec revision 0.7.0 adds §21 (key envelopes) and §22 (derived flags), specifies the
+production half of §20.3, adds R22, gates R20, orders R16 before the chunk-index
+divisions, and moves C1–C7 to on-use. §14 shrinks to entitlement signatures, key
+distribution, and the live gate.
+
+### Tests
+
+234 → 283 tests, zero clippy warnings, `unsafe_code = "forbid"`, `cargo fmt
+--check` clean.
+
 ## [0.6.0] — 2026-09-20
 
 Phase 2 constructions: tickets 10 (hybrid signature verification), 11 (hybrid KEM

@@ -1,11 +1,12 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.6.0
+**Version:** 0.3 (major 0, minor 3); document revision 0.7.0
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
-format (§18), the crypto suite registry (§19), and the phase 2 constructions — the
-hybrid KEM combiner, the AEAD-STREAM construction, and hybrid signature verification
-(§20). Key envelopes, derived flags, entitlement signature verification, and the
+format (§18), the crypto suite registry (§19), the phase 2 constructions — the
+hybrid KEM combiner, the AEAD-STREAM construction, and hybrid signature production
+and verification (§20) — the key-envelope construction (§21), and derived flags and
+stage keys (§22). Entitlement signature verification, key distribution, and the
 live gate remain unspecified. See §14.
 **Reference implementation:** `crates/ctf-format`.
 **Rationale, threat model, and design history:** `docs/FORMAT-DESIGN.md`. Where
@@ -66,7 +67,7 @@ RFC 8174) when, and only when, they appear in all capitals.
 ### 2.1 Conformance and error identity
 
 A reader MAY perform the checks in this document in any order, except where an
-ordering is stated normatively (§4.3, H14; §5.6, R4; §9, C6; §10). Error
+ordering is stated normatively (§4.3, H14; §5.6, R4 and R16; §9, C6; §10). Error
 identity — which specific error a reader reports — is **not** normative; only the
 accept or reject decision is. Consequently, a conformance vector that asserts a
 *specific* rejection reason is only meaningful when the input violates exactly
@@ -606,6 +607,13 @@ chunked section that happens to fit in one chunk.
 0.2 could do neither, because the entry format was undefined; that is the change
 `CONTAINER_V1` announces.
 
+**The formula is defined only for a non-zero `chunk_size`.** A `chunk_size = 0`
+section is stored as a single unit and has no index. R16 therefore MUST be applied
+before this formula is evaluated and before R19, T6, C1, and C3, each of which
+divides by `chunk_size` or reuses the same count (§2.1). Without that ordering a
+spec-faithful implementation evaluating R19 or T6 first would divide by zero on
+hostile input.
+
 ### 5.6 Record validation rules
 
 A reader MUST reject the file if any of the following holds for any record.
@@ -622,8 +630,9 @@ A reader MUST reject the file if any of the following holds for any record.
 | R7 | `kind` is `manifest` and `SEALED` is set. |
 | R8 | `kind` is `manifest` and `PLAYER_VISIBLE` is set. |
 | R9 | `kind` is `manifest` and `EXTERNAL` is set. |
-| R20 | `kind` is `manifest` and `enc ≠ 0`, or `kind` is `manifest` and `comp ≠ 0`. |
+| R20 | `kind` is `manifest` and `enc ≠ 0`, or `kind` is `manifest` and `comp ≠ 0`. **Applies only when `CONTAINER_V1` is set** (§16). |
 | R21 | `SEALED` is set and `enc = 0`. **Applies only when `CONTAINER_V1` is set** (§16). |
+| R22 | `EXTERNAL` is set and `enc ≠ 0`, or `EXTERNAL` is set and `comp ≠ 0`. **Applies only when `CONTAINER_V1` is set** (§16). |
 | R10 | `enc` is not `0` or `1`; or `comp` is not `0` or `1`. |
 | R11 | `EXTERNAL` is set and `offset ≠ 0`, or `EXTERNAL` is set and `len_stored ≠ 0`. |
 | R12 | `EXTERNAL` is not set and: `offset < 64`, or `offset` is not aligned to 4096, or `offset + len_stored` overflows `u64`. |
@@ -635,9 +644,11 @@ A reader MUST reject the file if any of the following holds for any record.
 | R19 | `chunk_index_off ≠ 0` and `ceil(len_plain / chunk_size) < 2`. |
 
 R4 MUST be evaluated before R3 and R18, since whether an undefined `kind` is a
-rejection or a skippable section depends on a flag bit. Rules keep the numbers
-they were given in 0.1 even where later versions inserted or narrowed one, so that
-a conformance vector citing a rule keeps citing the same rule; see §15 and §17.
+rejection or a skippable section depends on a flag bit. R16 MUST be evaluated
+before R19 (and before the §5.5 length formula), since both divide by
+`chunk_size`. Rules keep the numbers they were given in 0.1 even where later
+versions inserted or narrowed one, so that a conformance vector citing a rule
+keeps citing the same rule; see §15 and §17.
 
 Notes, all normative:
 
@@ -651,6 +662,16 @@ Notes, all normative:
   cannot be behind a codec; it carries the flag template for every other section,
   so it is never served to players; and it must be present to make the file
   self-describing, so it is never external.
+- **R20 and R22 are gated on `CONTAINER_V1`** (§16), like R21 and T8. R20 forbids
+  the manifest a codec so the file stays self-describing with no key and no
+  decoder; 0.2 defined no manifest codec carve-out, and §10 step 2 refuses a
+  whole-container read of a file without the bit before any manifest is read, so
+  the rule protects nothing on the legacy path. R22 forbids an `EXTERNAL` record a
+  codec because §5.7 and §9.4 verify an external payload against the record's
+  plaintext `root` and `len_plain` and nothing states what a mirror serves
+  otherwise — with `comp = 1` or `enc = 1` allowed, two implementations would
+  disagree about the bytes behind `root`. 0.1 and 0.2 did not forbid the
+  combination, and §10 step 2 refuses a legacy file before any payload is fetched.
 - **R12.** Because a non-external `offset` must be both `≥ 64` and aligned to
   4096, the smallest legal value is 4096. Payloads start on a page boundary so a
   section can be memory-mapped without a misaligned first page.
@@ -670,6 +691,12 @@ Notes, all normative:
 An `EXTERNAL` section stores no bytes in the file. Its record still carries the
 section's `root` and `len_plain`, and the manifest additionally carries mirror
 metadata — a URL list and a copy of the payload's size and root (§7.4).
+
+The mirror serves the payload's **plaintext**: `root` is `BLAKE3` of exactly
+`len_plain` bytes, verified by streaming or per chunk (§9.4). An `EXTERNAL` record
+therefore MUST NOT carry a codec (**R22**): `comp` and `enc` would describe a
+transform over bytes that are not in the file, and no rule says the mirror applies
+it, so the bytes behind `root` would be ambiguous.
 
 **The section record is authoritative.** Where the manifest's copy of a root or
 length disagrees with the record, the file MUST be rejected rather than resolved
@@ -1331,6 +1358,17 @@ why §8.3 forbids adding the index to the root construction.
 | C7 | A reader MUST NOT expose a chunk's bytes to a caller before that chunk passes C5. |
 | C8 | A reader MUST NOT expose the chunk index of a `SEALED` section, nor of a section whose `kind` it does not implement. |
 
+C1 and C3 divide by `chunk_size` and are therefore defined only for a non-zero
+value: R16 MUST be applied first (§5.5, §5.6). A `chunk_size = 0` section has no
+index.
+
+**C1–C7 are on-use rules, not parse-time rules** (§10). A reader MUST evaluate them
+when it hands out or relies on an index — that is, when it performs the §9.4
+verification or returns the index to a caller — and MUST NOT reject the file at
+`Bundle::parse` time merely because an index is malformed. C6's ordering and C8's
+serving boundary are the parts that carry the security weight; C1–C5 are what a
+verification performs once it has the index.
+
 **C8 is the serving boundary applied to the index.** An entry is a chaining value of
 the section's **plaintext** (§9.1), so the index is information about contents the
 reader must not serve: exposing it for a `SEALED` section, or for a kind this reader
@@ -1378,8 +1416,9 @@ MAY NOT, because each depends on values the previous one validated.
    step 4.
 3. Record whether the file is rewritable (§4.4).
 4. Read `section_table_count × 128` bytes at `section_table_off` and apply
-   R1–R21 to every record; then apply T1–T8. **R21 and T8 are applied only if the
-   header sets `CONTAINER_V1`** (§16); every other rule applies to every file.
+   R1–R22 to every record; then apply T1–T8. **R20, R21, R22 and T8 are applied
+   only if the header sets `CONTAINER_V1`** (§16); every other rule applies to
+   every file. R4 MUST precede R3 and R18, and R16 MUST precede R19.
 5. Parse the footer and apply F1–F7 and F9.
 6. Recompute the commitment root per §8.3 and apply F8.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
@@ -1389,6 +1428,17 @@ MAY NOT, because each depends on values the previous one validated.
    signatures over the transcript of §8.4 (§20.3). A reader that does not take this
    step, or that takes it without a trusted key, has established only that the file
    is intact.
+
+**The chunk-index rules C1–C7 are on-use, not parse-time, and are deliberately
+absent from the ordered steps above.** They are evaluated when a reader hands out
+or relies on an index — §9.4's verification, or a call that returns the index to a
+caller — because an index is not needed to open a bundle and a bundle referencing
+gigabytes of payload should not read its indices merely to parse. This placement is
+normative so two conforming readers do not disagree about whether a malformed index
+rejects the *file*: it does not. The reference implementation's whole-file
+verification pass therefore reports the number of indices it did **not** evaluate
+rather than implying it checked them, and [`Bundle::chunk_index`] is where C4 (and
+C8's serving boundary) is applied.
 
 A reader that completes steps 1–8 has established that the file is **intact**. It
 has *not* established that the file is **authentic** unless it also completes step 9
@@ -1628,11 +1678,6 @@ The customary filename extension is `.ctf`. No media type is registered.
 An implementation MUST NOT invent behaviour for any of the following, and MUST
 NOT claim conformance to a later version by guessing.
 
-- **Key envelopes.** How a section's `content_key` is wrapped to a named recipient
-  (`storage`, `seal`, `stage:N`) is not specified. §20.1 fixes the KEM combiner the
-  envelopes will use, but not the envelope format.
-- **Flag derivation from `event_secret`.** The derivation of a per-subject flag, and
-  of a stage key from the previous stage's flag, is not specified in this version.
 - **The entitlement chain's signatures (E9).** The record format, ordering, and
   genesis binding are specified (§18), but verifying `sig_holder` and `sig_platform`
   is not implemented. The signature primitive itself is specified (§20.3).
@@ -1701,7 +1746,7 @@ Rules for the editor, all normative:
 |---|---|---|
 | 0.1 | 0.2+ | Header and table accepted. `[40, 64)` reads as "no features in use", which is what 0.1 wrote |
 | 0.2, no features, no unknown kinds | 0.1 | Header and table accepted. `version_minor` is not validated and the feature words are zero |
-| 0.2 | 0.3 | Header and table accepted in full; a whole-container read is refused at §10 step 2, because a 0.2 file has no footer or manifest to read. R21 and T8 are **not** applied — see below |
+| 0.2 | 0.3 | Header and table accepted in full; a whole-container read is refused at §10 step 2, because a 0.2 file has no footer or manifest to read. R20, R21, R22 and T8 are **not** applied — see below |
 | **0.3** | **0.2** | **Accepted, read-only.** `feat_incompat` is zero, so nothing stops the read; `CONTAINER_V1` is an unimplemented `ro_compat` bit, so the file MUST NOT be rewritten (§4.4) |
 | 0.3 | 0.1 | Rejected, as `reserved not zero`. 0.1 predates the feature words entirely; see below |
 | 0.3, plus a `ro_compat` bit from a later version | 0.3 | Accepted, read-only (§4.4) |
@@ -1711,19 +1756,28 @@ Rules for the editor, all normative:
 | Manifest `spec` 2+, no `crit` | 0.3 | Accepted; unknown keys carried byte-for-byte |
 | Manifest `spec` 2+, unknown key in `crit` | 0.3 | Rejected, naming the key (M7) |
 
-**R21 and T8 are conditional on `CONTAINER_V1`, and this is what the bit is for.**
-Both narrow rules a 0.1 or 0.2 file could satisfy legally, so applying them
-unconditionally would make a 0.3 reader reject files its predecessors called valid —
-breaking the row above rather than honouring it. A reader MUST determine the rule set
-from the file's own header and MUST NOT apply either rule to a file that does not set
-the bit.
+**R20, R21, R22 and T8 are conditional on `CONTAINER_V1`, and this is what the bit
+is for.** Each narrows what a 0.1 or 0.2 file could legally contain, so applying
+them unconditionally would make a 0.3 reader reject files its predecessors called
+valid — breaking the row above rather than honouring it. A reader MUST determine
+the rule set from the file's own header and MUST NOT apply any of them to a file
+that does not set the bit.
 
-Neither exemption weakens a 0.3 file, and neither is a concession:
+None of the exemptions weakens a 0.3 file, and none is a concession:
 
+- **R20** forbids the manifest a codec so the file stays self-describing with no key
+  and no decoder. 0.2 defined no manifest codec carve-out, and §10 step 2 refuses a
+  whole-container read of a file without `CONTAINER_V1` before any manifest is read,
+  so the rule protects nothing on the legacy path.
 - **R21** rejects `SEALED` with `enc = 0` because the flag then claims a key that
   does not exist. 0.2 specified no encryption at all, so *every* sealed section a 0.2
   writer could produce carried `enc = 0`. Enforcing R21 on such a file would reject
   the only form `solver`, `writeup`, and `progress` could take, not an abuse of it.
+- **R22** forbids an `EXTERNAL` record a codec because §5.7 and §9.4 verify an
+  external payload against the record's plaintext `root` and `len_plain`. 0.1 and
+  0.2 did not forbid the combination, and §10 step 2 refuses a legacy file before any
+  external payload is fetched, so the mirror bytes were never interpreted on the
+  legacy path.
 - **T8** requires unclaimed bytes to be zero because a mutable padding byte is a
   channel that survives signing. It is a statement about the commitment root of §8.3
   and the transcript of §8.4. A 0.2 file has no footer, no root, and no signature, so
@@ -1757,6 +1811,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.4.0 | Closes post-fix tickets 70 and 71. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file is byte-identical; this is a version break only because §15 reserves a change to the signature transcript for one. Adds **C8**: a reader MUST NOT expose a `SEALED` section's chunk index, nor one for a section whose `kind` it does not implement, because an entry is a chaining value of the plaintext (§9.1). Changes the §8.4 transcript from `v1` (59 bytes) to `v2` (67 bytes), adding `u32_le(sig_classical_len) ‖ u32_le(sig_pq_len)` after `suite_id`: F3–F5 left the split between the two signature slots free while §8.1 located the slots from those fields, so neither signature covered the split. A verifier MUST NOT accept a `v1` transcript and MUST NOT locate the slots from the fields alone (§8.1). Producing and checking signatures remains unspecified (§14), so no signed bundle exists for the change to invalidate. |
 | 0.5.0 | Phase 2 groundwork and the authoring surface. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Defines zstd framing and the two decompression caps (§5.4, D1–D2), adds `MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` to §12, and implements compression in the reference reader and writer. Specifies the five declaration keys `flag`, `generate`, `runtime`, `sealed`, `verify` (§7.6) and the namespaced `platform` overlay (§7.7), and makes strict key rejection normative for the authoring front end (§7.8). Specifies the entitlement record format, ordering, genesis binding, and signature transcript (§18), and the crypto suite registry with its failure timing (§19); only the BLAKE3 hash role is implemented. Nothing here narrows what is legal — each change either defines a structure a previous version left unspecified or widens what a reader accepts — so no feature bit is spent. |
 | 0.6.0 | Phase 2 constructions. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Specifies and implements the hybrid KEM combiner (§20.1), the AEAD-STREAM construction with its nonce, AAD, and per-chunk length framing (§20.2) — including the composition of `comp = 1` with `enc = 1` — and hybrid signature production and verification over the §8.4 transcript (§20.3), for suites 1 and 2; suite 3's SLH-DSA signature role remains unimplemented. Nothing here narrows what is legal: it defines structures 0.5 left unspecified, and the 0.5 writer emits `enc = 0` only, so no feature bit is spent (§15). §14 shrinks accordingly — key envelopes, derived flags, entitlement signatures, key distribution, and the live gate remain unspecified. |
+| 0.7.0 | Key envelopes, derived flags, and the review-debt tickets 72–97. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file this version's writer produces is byte-identical to a 0.6 file's for the same inputs. Specifies the key-envelope construction (§21) and the derived-flag and stage-key derivations (§22), and the production side of the hybrid signature — signing a bundle in place, changing no byte outside the footer (§20.3). Adds **R22** (an `EXTERNAL` record carries no codec) and gates **R20** on `CONTAINER_V1`; both ride the existing bit rather than spending a new one, because the mirror bytes R22 rules out were never well-defined (§5.7, §9.4) and no writer has produced the combination, while R20 on the legacy path protects nothing (§16). Places the C1–C7 chunk-index rules explicitly **on-use** in §10, and states `chunk_size ≠ 0` as a precondition of the §5.5 index-length formula, R19, T6, C1, and C3, with R16 ordered before them (§2.1, §5.6). §14 shrinks to entitlement signatures, key distribution, and the live gate. |
 
 ## 18. Entitlement records
 
@@ -2017,3 +2072,148 @@ Suite 3 adds SLH-DSA to the signature set (§19). That role is not implemented i
 version, so a suite-3 file cannot be authenticated; resolving the role reports the
 suite and the role rather than silently reducing the hybrid to two of its three
 components.
+
+## 21. Key envelopes
+
+A section's `content_key` is a fresh random 32-byte key, drawn per encryption
+(§20.2). It is delivered to a named recipient by a **key envelope**: the hybrid KEM
+of §20.1 establishes a per-envelope key-encryption key, and that key wraps the
+content key. One envelope carries one recipient context; a section readable by
+several contexts carries one envelope per context.
+
+### 21.1 Construction
+
+`context` is one of `storage`, `seal`, `stage:N` (with `N` in decimal), or
+`holder` (design §7). `LP(x) = u32_le(len(x)) ‖ x` (§20).
+
+```text
+(ct, kek) = KEM.encapsulate(recipient_public_key,
+                            KemContext { suite_id, version_major, label = context })
+
+aad       = "ctf/envelope/v1" ‖ u16_le(suite_id) ‖ LP(context)
+wrapped   = AEAD.seal(kek, nonce, aad, content_key)      # content_key is 32 bytes
+```
+
+`"ctf/envelope/v1"` is 15 ASCII bytes with no terminator. `nonce` is
+`AEAD.nonce_len()` **zero** bytes.
+
+**A zero nonce is safe here, and the reason is the construction, not an
+assumption.** The AEAD requires a nonce unique under its key; `kek` is fresh for
+every envelope, because every `KEM.encapsulate` draws new randomness, so no two
+envelopes ever share a `(kek, nonce)` pair. Reusing an envelope's `ct` under a
+different `wrapped` would repeat a nonce, which is why a rewriter MUST NOT
+re-encapsulate under an unchanged `ct`.
+
+### 21.2 Unwrapping
+
+A recipient holding the matching hybrid secret key recovers the content key by
+reversing §21.1, with four checks, all required:
+
+| # | Rule |
+|---|---|
+| EN1 | `context` MUST equal the caller's expected context. |
+| EN2 | `ct` MUST be exactly the suite's `kem.ciphertext_len()`. |
+| EN3 | `kek = KEM.decapsulate(secret_key, ct, KemContext { suite_id, version_major, label = context })` MUST be derived over the *same* transcript. |
+| EN4 | `AEAD.open(kek, nonce, aad, wrapped)` MUST authenticate, and MUST yield exactly 32 bytes. |
+
+EN1 and EN3 are independent, and that is deliberate. EN1 refuses an envelope whose
+declared context is not the one the caller wants, before any key is derived. EN3
+binds the label into the KEM combiner's `info` (§20.1), so even an envelope that
+passed a laxer EN1 derives a different `kek` and EN4 fails. A recipient without the
+matching secret key fails EN4 as well: decapsulation yields a different `kek`, and
+the tag does not verify.
+
+### 21.3 `keys` section encoding
+
+A `keys` section (kind 7, §5.2) carries envelopes as the plaintext of a single
+canonical CBOR **array** (§7.1), one element per envelope, with no bytes after it.
+Each element is a map with exactly three keys:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `context` | tstr | The recipient context, carried verbatim; §21.1 names the contexts in use |
+| `ct` | bstr | The hybrid KEM ciphertext |
+| `wrapped` | bstr | The content key sealed under the KEM-derived key |
+
+A reader MUST reject a `keys` section whose plaintext is not canonical CBOR, is not
+an array, has bytes after it, or contains an element that is not a map, is missing
+one of the three keys, carries an extra key, or has a field of the wrong type
+(**EN5**). The `keys` section is not `SEALED` by construction: an envelope is
+ciphertext, and hiding it would prevent the recipient from finding it.
+
+## 22. Derived flags
+
+A bundle MUST NOT carry a flag value or the event secret. It carries a derivation
+rule, and the platform derives the per-subject flag from an `event_secret` that
+never enters a bundle, never enters git, and lives in a KMS or HSM (design §4, §7).
+This section fixes the derivations, so two implementations agree on the flag a
+subject receives.
+
+### 22.1 Encoding
+
+`LP(x) = u32_le(len(x)) ‖ x` (§20). Every variable-length input is length-prefixed
+so that, for example, `("ab", "c")` and `("a", "bc")` cannot derive the same flag.
+
+### 22.2 The per-subject seed
+
+```text
+seed(challenge, subject) = HKDF-SHA-256(
+    ikm  = event_secret,
+    salt = "ctf/seed/v1",
+    info = LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id) )
+```
+
+`"ctf/seed/v1"` is 11 ASCII bytes. `chal_id` is the manifest `id` (§7.2) as UTF-8,
+and `subject_id` is the subject's identifier as UTF-8; both are length-prefixed.
+`chal_version` is the manifest `version` (§7.2) as a **fixed-width** `u64`
+little-endian, and is therefore **not** length-prefixed — the design sketch wrote
+`LP(chal_version)` for a variable-width reading, and this document fixes the
+unambiguous fixed-width encoding instead. `seed` is 32 bytes.
+
+### 22.3 The flag
+
+```text
+flag(seed) = base32_lower( HMAC-SHA-256(key = seed, message = "ctf/flag/v1")[0..10] )
+```
+
+`"ctf/flag/v1"` is 11 ASCII bytes, the HMAC message; `seed` is the key. The first
+10 bytes are 80 bits and encode to exactly 16 base32 symbols. `base32_lower` is
+RFC 4648 §6 with the alphabet `abcdefghijklmnopqrstuvwxyz234567`, lowercase, and
+**no** `=` padding.
+
+The flag's length is a per-challenge choice, not a format constant: a challenge
+that needs a 128-bit boundary uses 26 base32 characters. The default derivation
+above yields 80 bits, and §22.5 states the consequence.
+
+### 22.4 Stage keys
+
+```text
+stage_key(flag(N-1), N) = HKDF-SHA-256(
+    ikm  = flag(N-1).as_bytes(),
+    salt = "ctf/stage/v1",
+    info = u32_le(N) )
+```
+
+`"ctf/stage/v1"` is 12 ASCII bytes. The key for stage *N* derives from the **flag**
+of stage *N-1*, so unlocking order is enforced by the derivation, not by platform
+logic. The resulting 32 bytes are a `content_key` that a section's `stage:N`
+envelope (§21) delivers, so a stage-gated section is `enc = 1` and
+`PLAYER_VISIBLE`, never `SEALED` (§5.3).
+
+### 22.5 Rules and the entropy ceiling
+
+| # | Rule |
+|---|---|
+| DF1 | A bundle MUST NOT contain the flag, the event secret, or any stage key. It carries only the derivation rule. |
+| DF2 | `chal_version` is `u64_le` and is not length-prefixed; `chal_id` and `subject_id` are length-prefixed. |
+| DF3 | `flag` is 16 lowercase base32 characters for the default derivation, with no padding. |
+| DF4 | A stage key derives from the previous stage's flag, never from the stage number alone. |
+| DF5 | A validator MUST reject a `stage_gate` declared on a **static** flag: an 80-bit derived flag is an acceptable key, a guessable static string is not. |
+
+**The 80-bit ceiling is real and inherent.** A stage key must be derivable from the
+flag a player submits and nothing else, so stage gating's strength is exactly the
+entropy of that flag: 2^80 against an attacker who holds the bundle offline and
+wants to open stage *N* without solving stage *N-1*. That is far out of reach for a
+48-hour event and far short of the 128-bit floor the rest of the stack targets. A
+challenge that needs a real cryptographic boundary uses a longer derived flag
+(§22.3); the length is a per-challenge choice.

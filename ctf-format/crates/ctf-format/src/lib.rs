@@ -45,14 +45,20 @@ pub mod cbor;
 pub mod chunk;
 pub mod compress;
 pub mod crypto;
+pub mod derive;
+pub mod envelope;
 pub mod error;
 pub mod footer;
 pub mod header;
 pub mod manifest;
+pub mod pack;
 pub mod section;
 pub mod suite;
 
-pub use bundle::{Bundle, Payload, SectionSpec, VerifyReport, write_bundle};
+pub use bundle::{
+    Bundle, Payload, SectionSpec, VerifyReport, sign_bundle, write_bundle, write_signed_bundle,
+};
+pub use chunk::ChainingValue;
 pub use crypto::sign::{Authentication, verify_footer};
 pub use error::{Error, Result};
 pub use footer::{Footer, Signing};

@@ -13,8 +13,9 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 / release 0.6.0 (phase 1
-complete, phase 2 constructions landed; `cargo test` 234 pass).
+**Last updated:** 2026-09-20, at format version 0.3 / release 0.7.0 (phase 1
+complete; phase 2 complete except entitlement signatures, key distribution, and the
+live gate; `ctf pack`/`keygen`/`sign` landed; `cargo test` 283 pass).
 
 ## Where this lives
 
@@ -39,9 +40,12 @@ ctf-format/
     src/suite.rs        crypto suite registry      spec §19
     src/authoring.rs    YAML authoring schema      spec §7.8
     src/bundle.rs       whole-file read and write  spec §10
+    src/envelope.rs     key envelopes              spec §21
+    src/derive.rs       derived flags, stage keys  spec §22
+    src/pack.rs         YAML -> .ctf               design §10
     examples/demo.rs    writes a demo .ctf to try the CLI against
     tests/              container, cbor, chunk, bundle, mutation, fuzzmirror
-  crates/ctf-cli/       the `ctf` binary — `inspect` only so far
+  crates/ctf-cli/       the `ctf` binary — inspect, validate, pack, keygen, sign
   fuzz/                 cargo-fuzz targets + committed seed corpus
   spec/SPEC.md          normative byte-level spec — wins over the design doc
   docs/FORMAT-DESIGN.md design rationale and threat model
@@ -161,13 +165,17 @@ token whose only constructor is a successful two-component check, so there is st
 no API that reports a bundle authentic without having verified it. Suite 3's SLH-DSA
 signature role reports `NotImplemented`.
 
-Not implemented: **key envelopes**, **derived flags**, entitlement signature
-verification, key distribution, and the live gate. No generator, no solver gate.
-The writer still emits `enc = 0` only, but it *does*
-write `comp = 1` zstd sections: the reader enforces an absolute output cap and an
-expansion-ratio cap before running the decoder (spec §5.4, D1–D2). The authoring
-surface (`authoring.rs`) parses design §10 YAML, rejects unknown keys, and now
-policy-checks via `ctf validate`; `ctf pack` is not wired up yet.
+Implemented since 0.7.0: **bundle signing** (`bundle::sign_bundle`, the production
+half of §20.3 — no byte outside the footer changes), **key envelopes**
+(`envelope.rs`, spec §21 — a KEM-DEM wrap of a section's `content_key` to a named
+recipient), **derived flags and stage keys** (`derive.rs`, spec §22 — a bundle
+carries the rule, never the flag), and **`ctf pack`** (`pack.rs`, ticket 35), with
+`ctf keygen`/`ctf sign` as CLI conveniences.
+
+Not implemented: entitlement signature verification, key distribution, and the live
+gate. No generator, no solver gate. The writer still emits `enc = 0` only, but it
+*does* write `comp = 1` zstd sections: the reader enforces an absolute output cap
+and an expansion-ratio cap before running the decoder (spec §5.4, D1–D2).
 
 ### What 0.3 changed, and why the bit is `ro_compat`
 
@@ -200,21 +208,20 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**0.5.0 lands the phase 2 groundwork and the authoring surface** (tickets 9, 19,
-32, 33, 36, 38, 57): the suite registry, zstd with its caps, the YAML schema with
-strict key rejection, the declaration keys and `platform` overlay, the entitlement
-record format, and inspector regression tests. What remains, in order:
+**0.7.0 landed the rest of phase 2's constructions and the authoring front end**
+(tickets 13–15, 17, 35): key envelopes (spec §21), derived flags (§22), bundle
+signing (§20.3), cross-library vectors, and `ctf pack`/`keygen`/`sign`. What
+remains, in order:
 
-1. **The rest of phase 2.** Tickets 10–12 landed in 0.6.0 (spec §20). What remains:
-   key envelopes (14), signing bundles (13), flag derivation (15), encrypted
-   sections end to end (16), and cross-library primitive vectors (17). Each plugs
-   into an existing trait and needs no byte-layout change.
-2. **`ctf pack`** (ticket 35). The authoring schema, the manifest declaration keys,
-   and `ctf validate` now exist, so `pack` is the wiring: YAML → manifest +
-   sections, resolving output names to `name_id`s and external entries to records.
-3. **The entitlement chain implementation** (ticket 39). The record format is
+1. **Encrypted sections end to end** (ticket 16). The AEAD-STREAM construction
+   (spec §20.2) and the envelopes (spec §21) both exist; the writer still emits
+   `enc = 0` only. Wiring `enc = 1` into `write_bundle` — compress, then encrypt,
+   then wrap the content key in envelopes — is the integration.
+2. **The entitlement chain implementation** (ticket 39). The record format is
    specified (spec §18) and the signature primitive now exists (spec §20.3), so E9
    is implementable.
+3. **The generator host** (phase 3): Wasmtime, the determinism config, and the WIT
+   interface, which is what `ctf run` and `ctf init` need.
 
 ## Gotchas that will bite you
 

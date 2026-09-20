@@ -145,9 +145,9 @@ R1 is mandated, so this lands before generators.
       post-quantum half from RustCrypto `ml-kem`; the combiner binds both secrets and
       the full transcript, and the salt binds `version_major` only.
 - [x] Hybrid signature: Ed25519 + ML-DSA-65, **both** must verify
-      — **verification landed in 0.6.0** (ticket 10, spec §20.3); production is
-      ticket 13. `Authentication` is a token constructible only by a successful
-      two-component check. Suite 3's SLH-DSA role stays `NotImplemented`.
+      — **verification landed in 0.6.0** (ticket 10, spec §20.3); **production and
+      the signing command landed in 0.7.0** (ticket 13, `bundle::sign_bundle`).
+      Suite 3's SLH-DSA role stays `NotImplemented`.
 - [x] AEAD-STREAM chunked encryption (`aead::stream`), `final_flag` on last chunk
       — **landed in 0.6.0** (ticket 12, spec §20.2), implemented directly on the
       per-chunk AEAD rather than via the `aead::stream` crate, because the design's
@@ -155,10 +155,21 @@ R1 is mandated, so this lands before generators.
       `u32_le(ct_len) ‖ ct`, which is what makes the `comp = 1` + `enc = 1`
       composition representable: one zstd frame per chunk, its compressed length in
       the prefix. The writer's integration is ticket 16.
-- [ ] Key envelopes: `storage`, `seal`, `stage:N` recipients
-- [ ] Flag derivation from `event_secret`; `event_secret` never touches a bundle
+- [x] Key envelopes: `storage`, `seal`, `stage:N` recipients
+      — **landed in 0.7.0** (ticket 14, spec §21). A KEM-DEM envelope: the hybrid
+      KEM derives a per-envelope key, which seals the section's 32-byte
+      `content_key` under the suite's AEAD. The recipient context is bound into the
+      KEM transcript, the AAD, and an explicit unwrap check.
+- [x] Flag derivation from `event_secret`; `event_secret` never touches a bundle
+      — **landed in 0.7.0** (ticket 15, spec §22). `seed`, `flag`, and `stage_key`
+      are domain-separated and length-prefix safe; a test asserts no bundle byte
+      contains the flag or the secret.
 - [ ] `ctf keys` / `ctf seal` / `ctf unseal`
-- [ ] Test vectors for every primitive, checked against a second library
+- [x] Test vectors for every primitive, checked against a second library
+      — **landed in 0.7.0** (ticket 17). `spec/vectors/generate.py` derives them
+      from a pure-Python BLAKE3, Python HKDF/AEAD/Ed25519, and OpenSSL 3.6 for
+      ML-KEM-768 and ML-DSA-65; `tests/vectors.rs` checks each and fails on a
+      one-bit corruption.
 
 **Done when** a sealed bundle cannot be opened without the seal key, and the
 offline test suite proves it rather than asserting it.
@@ -184,11 +195,12 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
       detection (spec §7.3) — a misspelled optional key is otherwise carried and
       ignored, which is exactly the "silently publish a hidden challenge" incident
       design §10 names. — **schema landed in 0.5.0** (ticket 32, `authoring`
-      module + spec §7.8); the `ctf pack` wiring is ticket 35. The five declaration
-      keys are carried and round-tripped (ticket 33, spec §7.6), and the
-      `platform` overlay is specified (ticket 57, spec §7.7). — **`ctf validate`
-      landed in 0.6.0** (ticket 34): schema and policy checks with the offending key
-      named and a non-zero exit on any finding; `ctf pack` itself is still ticket 35.
+      module + spec §7.8); the five declaration keys are carried and round-tripped
+      (ticket 33, spec §7.6), and the `platform` overlay is specified (ticket 57,
+      spec §7.7). **`ctf validate` landed in 0.6.0** (ticket 34): schema and policy
+      checks with the offending key named and a non-zero exit on any finding.
+      **`ctf pack` landed in 0.7.0** (ticket 35): YAML → an unsigned bundle with the
+      manifest and a synthesized name table, refusing an invalid document.
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
 aarch64, and a deliberately nondeterministic generator is rejected at ingest.

@@ -180,7 +180,10 @@ pub struct ValidationIssue {
 }
 
 impl ValidationIssue {
-    fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Build an issue for `key`. `pub(crate)` so the packer can report a
+    /// synthesized name that violates the manifest's shape rules under the
+    /// authoring key it came from (spec §7.8).
+    pub(crate) fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             message: message.into(),

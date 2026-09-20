@@ -10,9 +10,11 @@ use crate::{
     SectionRecord,
     chunk::{self, ChunkIndex, VerifiedChunkIndex},
     compress,
+    crypto::sign,
     footer::{Footer, MIN_FOOTER_LEN, ROOT_LEN, Signing, commitment_root},
     manifest::Manifest,
     section::{parse_table, validate_layout},
+    suite::{HybridPublicKey, HybridSigningKey},
 };
 
 use std::borrow::Cow;
@@ -228,9 +230,19 @@ impl<'a> Bundle<'a> {
     /// Returns a [`VerifyReport`] rather than a count, because a count cannot
     /// distinguish "checked everything" from "checked what I could". See that
     /// type for why the difference is the whole point.
+    ///
+    /// **Chunk indices are not part of this pass.** C1–C7 are *on-use* rules
+    /// (spec §10): a reader evaluates them when it hands out or relies on an index,
+    /// which is [`Bundle::chunk_index`], not while parsing or hashing a file. The
+    /// report discloses the number of sections that carry one
+    /// ([`VerifyReport::chunk_indices`]) so a caller is not left assuming this pass
+    /// checked them.
     pub fn verify_inline_sections(&self) -> Result<VerifyReport> {
         let mut report = VerifyReport::default();
         for r in &self.sections {
+            if r.chunk_index_off != 0 {
+                report.chunk_indices += 1;
+            }
             if r.flags.contains(SectionFlags::EXTERNAL) {
                 report.external += 1;
                 continue;
@@ -313,6 +325,11 @@ pub struct VerifyReport {
     /// Sections whose bytes are in this file and which this build cannot check.
     /// Non-zero means the file was **not** fully verified.
     pub unverifiable: usize,
+    /// Sections carrying a chunk index. C1–C7 are **on-use** rules (spec §9.3,
+    /// §10): this pass does not evaluate them — [`Bundle::chunk_index`] does, when
+    /// a caller asks for the index. Non-zero here is therefore not a failure, only
+    /// a disclosure that index integrity was outside this report.
+    pub chunk_indices: usize,
 }
 
 fn slice<'a>(file: &'a [u8], start: u64, end: u64, what: &'static str) -> Result<&'a [u8]> {
@@ -365,6 +382,15 @@ pub struct SectionSpec<'a> {
     /// must never use it (R20); the writer's parse-back catches that.
     pub comp: Compression,
     pub payload: Payload<'a>,
+    /// A precomputed chunk index, as raw `count × 32` chaining-value bytes
+    /// (`spec/SPEC.md` §9.1). Only meaningful for an `EXTERNAL` section, whose
+    /// payload the writer never sees and therefore cannot index itself; the index
+    /// is what lets a mirror transfer be verified per chunk (§9.4). The writer
+    /// parses it, checks it reduces to `root`, and emits it.
+    ///
+    /// `None` for an inline section (the writer indexes the payload itself) and for
+    /// an external section with no index.
+    pub chunk_index: Option<&'a [u8]>,
 }
 
 impl<'a> SectionSpec<'a> {
@@ -377,6 +403,7 @@ impl<'a> SectionSpec<'a> {
             chunk_size: 0,
             comp: Compression::None,
             payload: Payload::Inline(bytes),
+            chunk_index: None,
         }
     }
 
@@ -389,6 +416,16 @@ impl<'a> SectionSpec<'a> {
     /// Compress this section's inline payload with zstd.
     pub fn compressed(mut self) -> Self {
         self.comp = Compression::Zstd;
+        self
+    }
+
+    /// Attach a precomputed chunk index to an `EXTERNAL` section.
+    ///
+    /// The bytes are the raw entry array of `spec/SPEC.md` §9.1. The writer parses
+    /// them and requires that they reduce to the section's `root`, so a caller
+    /// cannot emit an index the reader would reject at use.
+    pub fn with_chunk_index(mut self, index: &'a [u8]) -> Self {
+        self.chunk_index = Some(index);
         self
     }
 }
@@ -406,7 +443,9 @@ impl<'a> SectionSpec<'a> {
 ///
 /// **The output is unsigned.** Both signature slots are empty, so
 /// [`Bundle::signing`] reports [`Signing::Unsigned`] and nothing may treat the
-/// result as authentic. Signing is phase 2.
+/// result as authentic. An unsigned bundle is a valid intermediate state; sign it
+/// with [`sign_bundle`] or produce a signed file directly with
+/// [`write_signed_bundle`].
 pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u8>> {
     if sections.len() > crate::MAX_SECTIONS as usize {
         return Err(Error::TooManySections {
@@ -421,8 +460,32 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
     let mut indices: Vec<(usize, ChunkIndex)> = Vec::new();
 
     for s in sections {
+        // A precomputed index belongs to an EXTERNAL section: an inline section's
+        // payload is right here and the writer indexes it itself.
+        if s.chunk_index.is_some() && matches!(s.payload, Payload::Inline(_)) {
+            return Err(Error::Inconsistent {
+                what: "a precomputed chunk index was supplied for an inline section",
+            });
+        }
+
+        // The chunk index, when there is one, is built or adopted here and written
+        // in pass 2. It is also where `root` comes from: the merge of the entries
+        // *is* `BLAKE3(plaintext)` (spec §9.2), so hashing the plaintext again
+        // would be the same work done twice (ticket 85).
+        let mut index: Option<ChunkIndex> = None;
         let (offset, len_stored, len_plain, root) = match s.payload {
-            Payload::External { len_plain, root } => (0, 0, len_plain, root),
+            Payload::External { len_plain, root } => {
+                if let Some(bytes) = s.chunk_index {
+                    let count = chunk::chunk_count(len_plain, s.chunk_size)?;
+                    let parsed = ChunkIndex::parse(bytes, count)?;
+                    // Refuse to emit an index a reader would reject at use: the
+                    // writer's own parse-back does not apply C4 (the C rules are
+                    // on-use, spec §10), so the check belongs here.
+                    parsed.clone().verify_root(&root, s.chunk_size)?;
+                    index = Some(parsed);
+                }
+                (0, 0, len_plain, root)
+            }
             Payload::Inline(bytes) => {
                 // Compress before placing: `len_plain` stays the pre-compression
                 // length and `root` commits to the plaintext (spec §5.4), so
@@ -434,19 +497,24 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
                 pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
                 let offset = u64::from(HEADER_LEN) + body.len() as u64;
                 body.extend_from_slice(&stored);
-                (
-                    offset,
-                    stored.len() as u64,
-                    bytes.len() as u64,
-                    *blake3::hash(bytes).as_bytes(),
-                )
+                let len_plain = bytes.len() as u64;
+                let (root, built) = if s.chunk_size != 0
+                    && chunk::chunk_count(len_plain, s.chunk_size)? >= 2
+                {
+                    let idx = ChunkIndex::build(bytes, s.chunk_size)?;
+                    let root = chunk::root_from_cvs(idx.entries()).ok_or(Error::Inconsistent {
+                        what: "a chunked section's index did not reduce to a root",
+                    })?;
+                    (root, Some(idx))
+                } else {
+                    (*blake3::hash(bytes).as_bytes(), None)
+                };
+                index = built;
+                (offset, stored.len() as u64, len_plain, root)
             }
         };
-        if s.chunk_size != 0
-            && chunk::chunk_count(len_plain, s.chunk_size)? >= 2
-            && let Payload::Inline(bytes) = s.payload
-        {
-            indices.push((records.len(), ChunkIndex::build(bytes, s.chunk_size)?));
+        if let Some(idx) = index {
+            indices.push((records.len(), idx));
         }
         records.push(SectionRecord {
             kind: s.kind,
@@ -513,6 +581,103 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
 
     Bundle::parse(&file)?;
     Ok(file)
+}
+
+/// Sign an unsigned bundle in place: produce both hybrid signatures over the §8.4
+/// transcript and append them to the footer.
+///
+/// The result changes no byte outside the footer. The header, the section table, and
+/// every payload are copied verbatim, so the commitment root — which covers the
+/// header and table — is unchanged. The footer necessarily grows: its two length
+/// fields locate the signature slots, and `total_len` grows with them. All three are
+/// inside the transcript (spec §8.4), which is why signing is a two-pass operation:
+/// the lengths must be fixed before the bytes they describe can be signed.
+///
+/// `public_key` is taken so the output can be verified before it is returned. A
+/// writer that can emit a file a verifier rejects is the same bug generator
+/// [`write_bundle`] refuses to be, and a mismatched keypair is the one way signing
+/// itself can go wrong.
+///
+/// An already-signed bundle is rejected rather than re-signed: re-signing would have
+/// to strip the old signatures first, and a caller who wants that is really asking
+/// for a rewrite, which spec §4.4 governs.
+pub fn sign_bundle(
+    file: &[u8],
+    signing_key: &HybridSigningKey,
+    public_key: &HybridPublicKey,
+) -> Result<Vec<u8>> {
+    let bundle = Bundle::parse(file)?;
+    if bundle.signing() != Signing::Unsigned {
+        return Err(Error::Inconsistent {
+            what: "bundle already carries signatures",
+        });
+    }
+
+    let suite = crate::suite::suite(bundle.header.suite_id)?;
+    let role = suite.signature()?;
+    let cls = u32::try_from(role.classical_signature_len()).map_err(|_| Error::LengthOverflow {
+        at: "signature length",
+    })?;
+    let pq = u32::try_from(role.pq_signature_len()).map_err(|_| Error::LengthOverflow {
+        at: "signature length",
+    })?;
+
+    let footer_off = bundle.header.footer_off;
+    let total_len = footer_off
+        .checked_add(MIN_FOOTER_LEN)
+        .and_then(|n| n.checked_add(u64::from(cls)))
+        .and_then(|n| n.checked_add(u64::from(pq)))
+        .ok_or(Error::LengthOverflow {
+            at: "signed file length",
+        })?;
+
+    let signature = sign::sign_footer(
+        bundle.header.suite_id,
+        &bundle.footer.root,
+        total_len,
+        cls,
+        pq,
+        signing_key,
+    )?;
+    let footer = Footer {
+        root: bundle.footer.root,
+        sig_classical: signature.classical,
+        sig_pq: signature.pq,
+        total_len,
+    };
+
+    let split = usize::try_from(footer_off).map_err(|_| Error::LengthOverflow {
+        at: "signed file length",
+    })?;
+    let mut out = Vec::with_capacity(total_len as usize);
+    out.extend_from_slice(file.get(..split).ok_or(Error::ExceedsFile {
+        at: "footer",
+        end: footer_off,
+        file_len: file.len() as u64,
+    })?);
+    out.extend_from_slice(&footer.to_bytes()?);
+
+    // Parse-back and verify, exactly as `write_bundle` parses its own output: a
+    // signer that can emit a file a verifier rejects is worse than no signer.
+    let signed = Bundle::parse(&out)?;
+    signed.verify_signatures(public_key)?;
+    Ok(out)
+}
+
+/// Write a complete, signed `.ctf` file: [`write_bundle`] followed by
+/// [`sign_bundle`].
+///
+/// The unsigned form remains a valid intermediate state and is what
+/// [`write_bundle`] emits; this is the convenience for a caller that already holds
+/// the signing key.
+pub fn write_signed_bundle(
+    suite_id: u16,
+    sections: &[SectionSpec<'_>],
+    signing_key: &HybridSigningKey,
+    public_key: &HybridPublicKey,
+) -> Result<Vec<u8>> {
+    let unsigned = write_bundle(suite_id, sections)?;
+    sign_bundle(&unsigned, signing_key, public_key)
 }
 
 /// Zero-pad `body` so the next byte written lands on `align`, counting from the

@@ -31,7 +31,7 @@
 //!
 //! The footer's fields are *not* naturally aligned in the file, because 0.2 froze
 //! `footer_off` with no alignment requirement and narrowing that now would need a
-//! `feat_incompat` bit (spec §11) to reject files that are legal today. Nothing is
+//! `feat_incompat` bit (spec §15) to reject files that are legal today. Nothing is
 //! lost: every field here is decoded through the little-endian helpers, which are
 //! alignment-independent. A writer SHOULD still align `footer_off` to 8.
 //!
@@ -99,7 +99,7 @@ pub struct Footer {
     /// Classical signature over [`sig_input`]. Empty in an unsigned bundle.
     pub sig_classical: Vec<u8>,
     /// Post-quantum signature over the *identical* transcript. Both must verify
-    /// (R1); carrying one without the other is rejected as a downgrade.
+    /// (F4); carrying one without the other is rejected as a downgrade.
     pub sig_pq: Vec<u8>,
     /// The total length of the file, which must equal its real length.
     pub total_len: u64,
@@ -159,7 +159,7 @@ impl Footer {
                 max: MAX_SIG_LEN,
             });
         }
-        // Hybrid means both or neither (R1). One signature alone is a downgrade
+        // Hybrid means both or neither (F4). One signature alone is a downgrade
         // dressed as a partial file, so it is rejected rather than read as
         // "classically signed".
         if (sig_classical_len == 0) != (sig_pq_len == 0) {

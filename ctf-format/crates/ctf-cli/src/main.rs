@@ -1,8 +1,9 @@
 //! `ctf` — the command-line tool for `.ctf` bundles.
 //!
-//! One subcommand so far: `inspect`. The rest of design §10's table arrives with
-//! the phases that give it something to do — `pack` needs the authoring surface,
-//! `seal` needs phase 2's crypto, `run` needs phase 4's gate.
+//! Subcommands: `inspect`, `validate`, `pack`, `keygen`, `sign`. The rest of
+//! design §10's table arrives with the phases that give it something to do —
+//! `run` needs phase 4's gate, `seal`/`unseal`/`transfer` need the entitlement
+//! chain and seal-release management.
 //!
 //! # What `inspect` will not print
 //!
@@ -14,11 +15,18 @@
 use std::process::ExitCode;
 
 use ctf_format::authoring::ChallengeDoc;
-use ctf_format::{Bundle, HEADER_LEN, SECTION_RECORD_LEN, SectionFlags, SectionKind, Signing};
+use ctf_format::pack::{self, PackError};
+use ctf_format::{
+    Bundle, HEADER_LEN, HybridPublicKey, HybridSigningKey, SECTION_RECORD_LEN, SectionFlags,
+    SectionKind, Signing,
+};
 
 const USAGE: &str = "\
-usage: ctf inspect [--hex] [--verify] <file.ctf>
+usage: ctf inspect [--hex] [--verify] [--allow-unsigned] <file.ctf>
        ctf validate <challenge.yaml>
+       ctf pack <challenge.yaml> --out <file.ctf> [--suite <id>]
+       ctf keygen --out-key <signing.key> --out-pub <public.key> [--suite <id>]
+       ctf sign <bundle.ctf> --key <signing.key> --pub <public.key> --out <signed.ctf>
 
   inspect  parse a bundle and print its structures
     --hex     annotated hexdump of the header, section table, and footer
@@ -26,8 +34,31 @@ usage: ctf inspect [--hex] [--verify] <file.ctf>
               Exits non-zero if any section's bytes are present but unreadable by
               this build. External payloads are reported, not counted as failures:
               their bytes are elsewhere by design.
+    --allow-unsigned  accept a bundle that carries no signatures. Without it, a
+              `--verify` run on an unsigned bundle reports it intact but not
+              authentic and exits 2.
   validate  schema- and policy-check an authoring file, naming every offending key.
               Exits non-zero if the document is invalid.
+  pack      compile a validated authoring file into an unsigned .ctf bundle.
+    --out <file.ctf>  where to write the bundle (required)
+    --suite <id>      crypto suite id (default 1)
+  keygen    generate a hybrid signing keypair.
+    --out-key <file>  where to write the signing key (required)
+    --out-pub <file>  where to write the public key (required)
+    --suite <id>      crypto suite id (default 1)
+  sign      sign an unsigned .ctf bundle.
+    --key <file>      signing key file (required)
+    --pub <file>      public key file (required)
+    --out <file.ctf>  where to write the signed bundle (required)
+
+Key files are a local convenience, not a container format: two lines of lowercase
+hex, the classical component first and the post-quantum component second.
+Whitespace and blank lines are ignored.
+
+exit codes:
+  0  success
+  1  usage, parse, or validation failure
+  2  inspect --verify found an intact but unauthentic (unsigned) bundle
 ";
 
 fn main() -> ExitCode {
@@ -39,6 +70,9 @@ fn main() -> ExitCode {
     match cmd.as_str() {
         "inspect" => run_inspect(rest),
         "validate" => run_validate(rest),
+        "pack" => run_pack(rest),
+        "keygen" => run_keygen(rest),
+        "sign" => run_sign(rest),
         other => {
             eprintln!("ctf: unknown command `{other}`");
             eprint!("{USAGE}");
@@ -50,11 +84,13 @@ fn main() -> ExitCode {
 fn run_inspect(args: &[String]) -> ExitCode {
     let mut hex = false;
     let mut verify = false;
+    let mut allow_unsigned = false;
     let mut path: Option<String> = None;
     for a in args {
         match a.as_str() {
             "--hex" => hex = true,
             "--verify" => verify = true,
+            "--allow-unsigned" => allow_unsigned = true,
             other if other.starts_with('-') => {
                 eprintln!("ctf: unknown option `{other}`");
                 return ExitCode::FAILURE;
@@ -74,8 +110,8 @@ fn run_inspect(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    match inspect(&path, hex, verify) {
-        Ok(()) => ExitCode::SUCCESS,
+    match inspect(&path, hex, verify, allow_unsigned) {
+        Ok(code) => code,
         Err(e) => {
             eprintln!("ctf: {path}: {e}");
             ExitCode::FAILURE
@@ -133,7 +169,338 @@ fn run_validate(args: &[String]) -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error::Error>> {
+/// `ctf pack`: compile an authoring file into an unsigned bundle.
+///
+/// Validation happens inside [`pack_with_suite`] — the same schema and policy
+/// checks `ctf validate` runs — so an invalid document is refused here with the key
+/// named, before a byte is written.
+fn run_pack(args: &[String]) -> ExitCode {
+    let mut path: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut suite = pack::DEFAULT_SUITE_ID;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--out" => match it.next() {
+                Some(v) => out = Some(v.clone()),
+                None => {
+                    eprintln!("ctf: --out needs a file");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--suite" => {
+                let Some(v) = it.next() else {
+                    eprintln!("ctf: --suite needs an id");
+                    return ExitCode::FAILURE;
+                };
+                match v.parse::<u16>() {
+                    Ok(n) => suite = n,
+                    Err(_) => {
+                        eprintln!("ctf: --suite must be a number; got `{v}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if other.starts_with('-') => {
+                eprintln!("ctf: unknown option `{other}`");
+                return ExitCode::FAILURE;
+            }
+            other if path.is_some() => {
+                eprintln!("ctf: pack takes one file; got `{other}` as well");
+                return ExitCode::FAILURE;
+            }
+            other => path = Some(other.to_owned()),
+        }
+    }
+    let (Some(path), Some(out)) = (path, out) else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let doc = match ChallengeDoc::from_yaml(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let file = match pack::pack_with_suite(&doc, suite) {
+        Ok(f) => f,
+        Err(PackError::Invalid(issues)) => {
+            for issue in &issues {
+                eprintln!("ctf: {path}: {issue}");
+            }
+            return ExitCode::FAILURE;
+        }
+        Err(PackError::Format(e)) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&out, &file) {
+        eprintln!("ctf: {out}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{out}: {} bytes, manifest {}, suite {suite} (unsigned)",
+        file.len(),
+        doc.id
+    );
+    ExitCode::SUCCESS
+}
+
+/// `ctf keygen`: write a fresh hybrid keypair as two hex key files.
+fn run_keygen(args: &[String]) -> ExitCode {
+    let mut key_path: Option<String> = None;
+    let mut pub_path: Option<String> = None;
+    let mut suite = pack::DEFAULT_SUITE_ID;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--out-key" => match it.next() {
+                Some(v) => key_path = Some(v.clone()),
+                None => {
+                    eprintln!("ctf: --out-key needs a file");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--out-pub" => match it.next() {
+                Some(v) => pub_path = Some(v.clone()),
+                None => {
+                    eprintln!("ctf: --out-pub needs a file");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--suite" => {
+                let Some(v) = it.next() else {
+                    eprintln!("ctf: --suite needs an id");
+                    return ExitCode::FAILURE;
+                };
+                match v.parse::<u16>() {
+                    Ok(n) => suite = n,
+                    Err(_) => {
+                        eprintln!("ctf: --suite must be a number; got `{v}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if other.starts_with('-') => {
+                eprintln!("ctf: unknown option `{other}`");
+                return ExitCode::FAILURE;
+            }
+            other => {
+                eprintln!("ctf: keygen takes no positional arguments; got `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let (Some(key_path), Some(pub_path)) = (key_path, pub_path) else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let (signing_key, public_key) = match keypair(suite) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("ctf: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = write_key_file(
+        &key_path,
+        &hex_encode(&signing_key.classical),
+        &hex_encode(&signing_key.pq),
+    ) {
+        eprintln!("ctf: {key_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = write_key_file(
+        &pub_path,
+        &hex_encode(&public_key.classical),
+        &hex_encode(&public_key.pq),
+    ) {
+        eprintln!("ctf: {pub_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("signing key   {key_path}");
+    println!("public key    {pub_path}");
+    ExitCode::SUCCESS
+}
+
+/// `ctf sign`: append both hybrid signatures to an unsigned bundle.
+fn run_sign(args: &[String]) -> ExitCode {
+    let mut bundle: Option<String> = None;
+    let mut key_path: Option<String> = None;
+    let mut pub_path: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--key" => match it.next() {
+                Some(v) => key_path = Some(v.clone()),
+                None => {
+                    eprintln!("ctf: --key needs a file");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--pub" => match it.next() {
+                Some(v) => pub_path = Some(v.clone()),
+                None => {
+                    eprintln!("ctf: --pub needs a file");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--out" => match it.next() {
+                Some(v) => out = Some(v.clone()),
+                None => {
+                    eprintln!("ctf: --out needs a file");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other if other.starts_with('-') => {
+                eprintln!("ctf: unknown option `{other}`");
+                return ExitCode::FAILURE;
+            }
+            other if bundle.is_some() => {
+                eprintln!("ctf: sign takes one file; got `{other}` as well");
+                return ExitCode::FAILURE;
+            }
+            other => bundle = Some(other.to_owned()),
+        }
+    }
+    let (Some(bundle), Some(key_path), Some(pub_path), Some(out)) =
+        (bundle, key_path, pub_path, out)
+    else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let file = match std::fs::read(&bundle) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ctf: {bundle}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let signing_key = match read_key_file(&key_path) {
+        Ok((classical, pq)) => HybridSigningKey { classical, pq },
+        Err(e) => {
+            eprintln!("ctf: {key_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let public_key = match read_key_file(&pub_path) {
+        Ok((classical, pq)) => HybridPublicKey { classical, pq },
+        Err(e) => {
+            eprintln!("ctf: {pub_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let signed = match ctf_format::sign_bundle(&file, &signing_key, &public_key) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ctf: {bundle}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&out, &signed) {
+        eprintln!("ctf: {out}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("{out}: {} bytes, signed", signed.len());
+    ExitCode::SUCCESS
+}
+
+/// Generate a keypair for `suite_id`, resolving the signature role where the
+/// diagnostic names the missing role if this build cannot provide one.
+fn keypair(
+    suite_id: u16,
+) -> Result<(HybridSigningKey, HybridPublicKey), Box<dyn std::error::Error>> {
+    let suite = ctf_format::suite(suite_id)?;
+    let role = suite.signature()?;
+    Ok(role.keypair()?)
+}
+
+/// Write one key file: classical component, then post-quantum, each on its own line.
+fn write_key_file(path: &str, classical: &str, pq: &str) -> std::io::Result<()> {
+    std::fs::write(path, format!("{classical}\n{pq}\n"))
+}
+
+/// Read a key file into its two hex components: classical first, post-quantum
+/// second. Blank lines and surrounding whitespace are ignored.
+fn read_key_file(path: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let [classical, pq] = lines.as_slice() else {
+        return Err(format!(
+            "a key file has exactly two non-empty lines (classical then post-quantum); \
+             found {}",
+            lines.len()
+        ));
+    };
+    let classical = hex_decode(classical)?;
+    let pq = hex_decode(pq)?;
+    Ok((classical, pq))
+}
+
+/// Lowercase hex. The encoding side of [`hex_decode`].
+fn hex_encode(bytes: &[u8]) -> String {
+    use core::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        // Writing to a `String` cannot fail; the `Result` is discarded deliberately.
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Decode lowercase or uppercase hex, rejecting an odd length or a non-hex byte
+/// with a message that names the offending character.
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err(format!(
+            "hex string has an odd number of digits ({})",
+            s.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = hex_nibble(bytes.get(i).copied().unwrap_or_default())?;
+        let lo = hex_nibble(bytes.get(i + 1).copied().unwrap_or_default())?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> Result<u8, String> {
+    match c {
+        b'0'..=b'9' => Ok(c - b'0'),
+        b'a'..=b'f' => Ok(c - b'a' + 10),
+        b'A'..=b'F' => Ok(c - b'A' + 10),
+        _ => Err(format!("invalid hex digit `{}`", char::from(c))),
+    }
+}
+
+fn inspect(
+    path: &str,
+    hex: bool,
+    verify: bool,
+    allow_unsigned: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let file = std::fs::read(path)?;
     let b = Bundle::parse(&file)?;
 
@@ -162,7 +529,7 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
         match b.signing() {
             Signing::Unsigned => "none — this bundle authenticates nothing".to_owned(),
             Signing::Present => format!(
-                "{} + {} bytes, NOT VERIFIED (phase 2)",
+                "{} + {} bytes, NOT VERIFIED (no trusted key supplied)",
                 b.footer.sig_classical.len(),
                 b.footer.sig_pq.len()
             ),
@@ -274,6 +641,40 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
             )
             .into());
         }
+
+        // Integrity is not authenticity. `Bundle::parse` and the pass above proved
+        // the file is internally consistent; they said nothing about *who* made it.
+        // A bundle with no signatures has no author to vouch for, so `--verify`
+        // alone must not read as "safe" — hence a distinct exit code the caller can
+        // branch on, and an explicit opt-in to accept it anyway.
+        match b.signing() {
+            Signing::Unsigned if allow_unsigned => {
+                println!();
+                println!(
+                    "authenticity  accepted (--allow-unsigned): this bundle is intact but carries \
+                     no signatures; the caller vouches for its provenance"
+                );
+            }
+            Signing::Unsigned => {
+                println!();
+                println!(
+                    "authenticity  INTACT BUT NOT AUTHENTIC — this bundle carries no signatures, \
+                     so nothing vouches for its author"
+                );
+                println!(
+                    "              pass --allow-unsigned to accept an unsigned bundle, or verify \
+                     it against a signature you already trust"
+                );
+                return Ok(ExitCode::from(2));
+            }
+            Signing::Present => {
+                println!();
+                println!(
+                    "authenticity  signatures present but NOT verified — no trusted key was \
+                     supplied, so this run established integrity only"
+                );
+            }
+        }
     }
 
     if hex {
@@ -297,7 +698,7 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
             );
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn kind_name(k: SectionKind) -> String {

@@ -147,6 +147,10 @@ pub enum Error {
     /// declares. The plaintext length is committed (the root is over the plaintext),
     /// so a mismatch means the stored bytes do not decode to what was signed.
     DecompressedLength { got: u64, want: u64 },
+    /// A crypto primitive failed while performing a whole-file operation. Wraps
+    /// [`crate::SuiteError`] so signing can report a suite failure without a second
+    /// error type at the boundary. The reason never carries input bytes.
+    Suite(crate::SuiteError),
 }
 
 impl fmt::Display for Error {
@@ -263,7 +267,14 @@ impl fmt::Display for Error {
                 f,
                 "compressed section decompressed to {got} bytes, record declares {want}"
             ),
+            Self::Suite(e) => write!(f, "{e}"),
         }
+    }
+}
+
+impl From<crate::SuiteError> for Error {
+    fn from(e: crate::SuiteError) -> Self {
+        Self::Suite(e)
     }
 }
 
