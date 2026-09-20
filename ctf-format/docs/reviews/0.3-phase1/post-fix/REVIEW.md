@@ -90,6 +90,15 @@ Recorded as tickets (70+), **not** fixed inline, per the seventh-lane contract.
 | 96 | LOW | a pre-0.3 file is reported as a feature-bits problem rather than a version one |
 | 97 | NIT | long names truncate to indistinguishable 20-char labels in `inspect` |
 
+**GitHub issue numbering is offset for tickets 72–97.** GitHub shares its number
+space between issues and pull requests, and **PR #72** consumed the number 72. Tickets
+70 and 71 are issues
+[#70](https://github.com/EinsBackstein/sidequests/issues/70) and
+[#71](https://github.com/EinsBackstein/sidequests/issues/71); local ticket *N* for *N*
+in 72–97 is issue *N*+1 — [#73](https://github.com/EinsBackstein/sidequests/issues/73)
+through [#98](https://github.com/EinsBackstein/sidequests/issues/98). Each synced issue
+title carries the local number in brackets, e.g. `[72] Gate R20 on CONTAINER_V1`.
+
 None is ship-blocking for phase 1. The two that phase 2 would have had to settle
 before building on them — **70** and **71** — were fixed in **0.4.0**: C8 withholds
 a sealed or unimplemented-kind section's chunk index, and the signature transcript
