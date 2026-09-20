@@ -38,14 +38,17 @@
 //! Little-endian throughout, normatively. Every integer field is read and written
 //! explicitly, so a big-endian host produces identical bytes.
 
+pub mod authoring;
 pub mod bundle;
 pub mod cbor;
 pub mod chunk;
+pub mod compress;
 pub mod error;
 pub mod footer;
 pub mod header;
 pub mod manifest;
 pub mod section;
+pub mod suite;
 
 pub use bundle::{Bundle, Payload, SectionSpec, VerifyReport, write_bundle};
 pub use error::{Error, Result};
@@ -55,6 +58,7 @@ pub use manifest::Manifest;
 pub use section::{
     Compression, Encryption, FutureKind, RuleSet, SectionFlags, SectionKind, SectionRecord,
 };
+pub use suite::{AeadId, HashId, KdfId, KemId, Role, SignatureId, Suite, SuiteError, suite};
 
 /// File signature: PNG's construction with `CTF` as the tag. Every byte earns its
 /// place — see design §6 for the per-byte rationale.

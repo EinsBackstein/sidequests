@@ -5,7 +5,8 @@
 #![allow(clippy::unwrap_used)]
 
 use ctf_format::{
-    Manifest, Payload, SectionFlags, SectionKind, SectionSpec, cbor::Value, write_bundle,
+    Compression, Manifest, Payload, SectionFlags, SectionKind, SectionSpec, cbor::Value,
+    write_bundle,
 };
 
 fn main() {
@@ -80,6 +81,7 @@ fn main() {
                 name_id: 2,
                 flags: SectionFlags(SectionFlags::EXTERNAL | SectionFlags::PLAYER_VISIBLE),
                 chunk_size: 0,
+                comp: Compression::None,
                 payload: Payload::External {
                     len_plain: 41_231_986_688,
                     root: [0x33; 32],

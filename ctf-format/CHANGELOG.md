@@ -7,6 +7,75 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.5.0] — 2026-09-20
+
+Phase 2 groundwork and the authoring surface: tickets 9, 19, 32, 33, 36, 38, and
+57. **No byte-layout change.** `version_minor` stays `3` and every existing `.ctf`
+file is byte-identical; nothing here narrows what is legal, so no feature bit is
+spent. Every change either defines a structure a previous version left unspecified
+or widens what a reader accepts.
+
+### Added — zstd compression, with caps checked before decompression (ticket 19)
+
+`comp = 1` sections are now read and written. A chunked section is stored as one
+zstd frame per chunk, so a single chunk decodes without its predecessors; a
+single-chunk section is one frame. Two caps are checked **before the decoder runs**:
+an absolute output cap (`MAX_DECOMPRESSED_SECTION`, 64 GiB) and an expansion-ratio
+cap (`MAX_DECOMPRESSION_RATIO`, 65536:1). Because `len_plain` is committed — it is
+in the section table the commitment root covers, and `root` is `BLAKE3` of exactly
+that many plaintext bytes — a bomb is refused without expanding a byte. New rules
+D1 and D2. `Bundle::section_bytes` now returns a `Cow`, borrowing for an
+uncompressed section and owning the decoded plaintext for a compressed one; the
+root is verified over the plaintext either way. `verify_inline_sections` verifies
+compressed sections too; only encrypted ones remain unverifiable.
+
+### Added — crypto suite registry and dispatch (ticket 9)
+
+`suite.rs` defines one trait per primitive role (`hash`, `kdf`, `kem`, `aead`,
+`signature`) and a registry mapping `suite_id` to a suite. Only the BLAKE3 `hash`
+role is implemented; resolving another role reports `NotImplemented` at the point
+of use rather than panicking. Header parsing never consults the registry, so an
+unrecognized `suite_id` still parses and fails where a primitive is first needed —
+spec §19 (rules S1–S5) fixes the registry and that timing normatively.
+
+### Added — authoring schema with strict key rejection (ticket 32)
+
+New `authoring` module: the design §10 YAML schema as typed structures, every one
+rejecting unknown keys, with a diagnostic that names the offending key. This is the
+typo guard the manifest's `crit` deliberately does not provide (§7.3): a misspelled
+optional key (`visibilty`) is caught before packing instead of being carried and
+ignored. The error echoes the key on purpose — authoring input is the author's own
+file, not a hostile byte stream.
+
+### Added — declaration keys and the platform overlay (tickets 33, 57)
+
+The manifest now understands `flag`, `generate`, `runtime`, `sealed`, and `verify`
+(§7.6) as carried declarations: it preserves them byte-for-byte, never acts on
+them, and accepts them in `crit` so a reader that predates them refuses cleanly.
+`Manifest::build` constructs a manifest with these entries, and
+`Manifest::declaration` reads one back. The `platform` key (§7.7) is a namespaced
+overlay for platform concepts such as track level and scoring weights; it is
+carried unchanged and needs no feature bit to extend.
+
+### Added — entitlement record format specified (ticket 38)
+
+Spec §18 specifies the entitlement section's plaintext (a canonical CBOR array of
+records), every field, the hash chain (`seq` ordering, `prev`, record id), the
+genesis binding to the bundle commitment root, and the hybrid signature transcript
+(`ctf/entitlement-sig/v1`). Rules E1–E8 are checkable offline; E9 (signature
+verification) awaits the suite registry's signature role.
+
+### Changed — inspector regression tests (ticket 36)
+
+`ctf inspect` already printed every section root, external size/mirrors/root, and
+the tri-state verification counts, and escaped attacker-controlled text. New
+integration tests pin all four so they cannot regress, including that an embedded
+ESC in a manifest `category` cannot reach the terminal.
+
+163 → 191 tests, zero clippy warnings, `unsafe_code = forbid`. Dependencies now
+include `serde`/`serde_yaml_ng` (authoring) and `zstd`; the container itself remains
+`std` + `blake3` + `zstd`.
+
 ## [0.4.0] — 2026-09-20
 
 Closes the two post-fix issues that phase 2 must settle before building on the

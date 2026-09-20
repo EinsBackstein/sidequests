@@ -1,14 +1,22 @@
 [package]
 name = "ctf-format"
-version = "0.4.0"
+version = "0.5.0"
 description = "Reader and writer for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
 
-# No dependencies yet, deliberately. Header and section table are pure std;
-# BLAKE3 arrives with phase 1's hashing work. See docs/ROADMAP.md.
 [dependencies]
 blake3 = "1.8"
+# The authoring surface (phase 3, design §10). Authors write YAML and the schema
+# rejects unknown keys at authoring time, which is the typo guard the manifest's
+# `crit` mechanism deliberately does not provide (spec §7.3). These are the only
+# dependencies outside the container itself; the container stays pure `std` +
+# `blake3`.
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+# zstd for `comp = 1` sections (spec §5.4). The reader enforces the output and
+# ratio caps in `src/compress.rs` before it runs the decoder.
+zstd = "0.14"
 
 [lints]
 workspace = true

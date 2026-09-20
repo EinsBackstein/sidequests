@@ -126,7 +126,7 @@ fn oracle(file: &[u8]) {
     let bytes = b.section_bytes(record).unwrap();
     assert_eq!(
         b.manifest.encode().unwrap(),
-        bytes,
+        bytes.as_ref(),
         "manifest did not re-encode to its own bytes"
     );
     assert_eq!(

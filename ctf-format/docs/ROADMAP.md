@@ -131,7 +131,15 @@ across 48 input shapes, not argued from the tree structure.
 
 R1 is mandated, so this lands before generators.
 
-- [ ] Suite registry + `suite_id` dispatch behind one trait per primitive role
+- [x] Suite registry + `suite_id` dispatch behind one trait per primitive role
+      — **landed in 0.5.0** (ticket 9, spec §19). One trait per role; the registry
+      maps `suite_id` to a suite; header parsing never consults it, so an unknown
+      suite fails where a primitive is first needed. Only the BLAKE3 `hash` role is
+      implemented; the other roles report `NotImplemented` until their tickets land.
+- [x] zstd compression with an absolute output cap and an expansion-ratio cap
+      — **landed in 0.5.0** (ticket 19, spec §5.4, D1–D2). Both caps are checked
+      before the decoder runs, and chunk-aligned frames keep a section seekable. It
+      is ahead of the rest of phase 2 because it blocked nothing.
 - [ ] Hybrid KEM: X25519 + ML-KEM-768, transcript-binding HKDF combiner
 - [ ] Hybrid signature: Ed25519 + ML-DSA-65, **both** must verify
 - [ ] AEAD-STREAM chunked encryption (`aead::stream`), `final_flag` on last chunk
@@ -158,12 +166,15 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
 - [ ] `determinism: flag_only` path requiring no generator at all — this is the
       default and it carries most challenges
 - [ ] `ctf init <archetype>` scaffolds a working generator per archetype
-- [ ] **Authoring-time schema validation**: `ctf pack` rejects unknown YAML keys, so
+- [x] **Authoring-time schema validation**: `ctf pack` rejects unknown YAML keys, so
       a typo'd optional key (`visibilty`) is caught at the authoring surface. The
       manifest's `crit` mechanism provides *reader forward compatibility*, not typo
       detection (spec §7.3) — a misspelled optional key is otherwise carried and
       ignored, which is exactly the "silently publish a hidden challenge" incident
-      design §10 names
+      design §10 names. — **schema landed in 0.5.0** (ticket 32, `authoring`
+      module + spec §7.8); the `ctf pack` wiring is ticket 35. The five declaration
+      keys are carried and round-tripped (ticket 33, spec §7.6), and the
+      `platform` overlay is specified (ticket 57, spec §7.7).
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
 aarch64, and a deliberately nondeterministic generator is rejected at ingest.
@@ -208,7 +219,10 @@ touching the CLI.
 
 ## Phase 6 — Subjects, holders, handoff (design §9)
 
-- [ ] Entitlement chain: append-only, hash-chained, hybrid-signed
+- [x] Entitlement chain: append-only, hash-chained, hybrid-signed
+      — **record format specified in 0.5.0** (ticket 38, spec §18): the CBOR array
+      of records, `seq` ordering, `prev` hash chain, genesis binding to the bundle
+      commitment root, and the hybrid transcript. Implementation is ticket 39.
 - [ ] `grant` / `transfer` / `revoke` / `progress` records
 - [ ] `transfer` requires the current holder's signature — non-repudiable handoff
 - [ ] `progress` carries earned stage flags sealed to the new holder's key
@@ -276,17 +290,22 @@ a `ponytail:` comment at its site in the code.
   on decode. A library that encodes canonically but decodes permissively would
   leave the commitment's injectivity unenforced, which is the property the whole
   of pillar 3 rests on. Revisit if a strict-decoding crate appears.
-- **No compression or encryption in the writer.** `write_bundle` emits `enc = 0`,
-  `comp = 0` only. zstd needs the output and ratio caps that are still unspecified,
-  and AEAD is phase 2. The reader parses both fields and refuses to act on them,
-  which is the honest state rather than a silent gap.
+- **Encryption in the writer.** `write_bundle` emits `enc = 0` only; AEAD is the
+  rest of phase 2. zstd (`comp = 1`) landed in 0.5.0 with the output and ratio caps
+  spec §5.4 now fixes (D1–D2), and the reader decompresses a `comp = 1` section
+  only after both caps pass. An encrypted section is still parsed and refused, which
+  is the honest state rather than a silent gap.
 - **`ctf` has no argument-parsing dependency.** `clap` is right at the roadmap's
   eight subcommands with flags and completions; it is not right at one subcommand
   and two flags. Add it when the second subcommand lands.
 - **The chunk index has no interior tree nodes**, so single-chunk random access
   costs a full index read. See the `bao` note above.
-- **External dependencies: `blake3` only.** Header, section table, CBOR, manifest,
-  footer, and chunk index are otherwise pure `std`.
+- **External dependencies are few and deliberate.** `blake3` for the container,
+  `zstd` for `comp = 1`, and `serde`/`serde_yaml_ng` for the authoring surface
+  (0.5.0). Header, section table, CBOR, manifest, footer, and chunk index are still
+  pure `std`. A YAML parser is not hand-written the way CBOR is: the reason for
+  hand-writing CBOR was that no crate enforces canonical decoding, and no
+  equivalent property is at stake for authoring input.
 
 ## Out of scope (see design §2)
 

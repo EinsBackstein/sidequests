@@ -69,17 +69,33 @@ pub const MAX_NAMES: usize = u16::MAX as usize + 1;
 
 /// Keys this build understands. A `crit` entry outside this list is a hard reject;
 /// an unknown key outside it is carried untouched.
+///
+/// The five declaration keys of `spec` 2 — `flag`, `generate`, `runtime`, `sealed`,
+/// `verify` — are listed here (spec §7.6), so an author may mark one in `crit` and
+/// have a reader that predates it reject the file cleanly. This build understands
+/// them as *carried declarations*: it preserves their bytes and never acts on them,
+/// because consuming them is the platform's job. Understanding a key well enough to
+/// carry it safely is exactly what `crit` asks about.
 const KNOWN_KEYS: &[&str] = &[
     "category",
     "crit",
     "description",
     "external",
+    "flag",
+    "generate",
     "id",
     "name",
     "names",
+    "platform",
+    "runtime",
+    "sealed",
     "spec",
+    "verify",
     "version",
 ];
+
+/// The declaration keys of spec §7.6, in the order the schema lists them.
+const DECLARATION_KEYS: &[&str] = &["flag", "generate", "runtime", "sealed", "verify"];
 
 /// Mirror metadata for an `EXTERNAL` section.
 ///
@@ -278,6 +294,18 @@ impl Manifest {
         self.value.get("spec").and_then(Value::as_uint).unwrap_or(0)
     }
 
+    /// A declaration key this build carries but does not consume (spec §7.6).
+    ///
+    /// `None` when the author gave no such key. The value is exactly what the
+    /// manifest holds, and [`Manifest::encode`] re-emits it byte-for-byte.
+    pub fn declaration(&self, key: &str) -> Option<&Value> {
+        if DECLARATION_KEYS.contains(&key) {
+            self.value.get(key)
+        } else {
+            None
+        }
+    }
+
     /// The challenge identifier.
     pub fn id(&self) -> &str {
         self.value.get("id").and_then(Value::as_text).unwrap_or("")
@@ -434,7 +462,19 @@ impl Manifest {
     /// This is what an OSINT challenge with no artifacts actually needs, which is
     /// the shape R6 is measured against.
     pub fn minimal(id: &str, name: &str, names: &[&str]) -> Result<Self> {
-        let value = Value::Map(vec![
+        Self::build(id, name, names, Vec::new())
+    }
+
+    /// Build a manifest with the required keys plus caller-supplied entries.
+    ///
+    /// The declaration keys of spec §7.6 — `flag`, `generate`, `runtime`, `sealed`,
+    /// `verify` — arrive this way from the authoring surface
+    /// ([`crate::authoring::ChallengeDoc::manifest_entries`]), as do `version`,
+    /// `category`, and `description`. Entries are encoded canonically, so a caller
+    /// that supplies a key the required four already carry (`id`, say) gets
+    /// [`Error::CborDuplicateKey`] rather than a silently-lost value.
+    pub fn build(id: &str, name: &str, names: &[&str], extra: Vec<(Value, Value)>) -> Result<Self> {
+        let mut entries = vec![
             (Value::Text("spec".into()), Value::Uint(MANIFEST_SPEC)),
             (Value::Text("id".into()), Value::Text(id.into())),
             (Value::Text("name".into()), Value::Text(name.into())),
@@ -442,11 +482,12 @@ impl Manifest {
                 Value::Text("names".into()),
                 Value::Array(names.iter().map(|n| Value::Text((*n).into())).collect()),
             ),
-        ]);
+        ];
+        entries.extend(extra);
         // Round-trip through the canonical encoder so the stored value is in
         // canonical key order and has passed every schema check, exactly as if it
         // had been read from a file.
-        Self::decode(&value.encode()?)
+        Self::decode(&Value::Map(entries).encode()?)
     }
 }
 

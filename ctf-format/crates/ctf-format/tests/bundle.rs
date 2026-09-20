@@ -1196,6 +1196,7 @@ fn external_bundle(size: u64, root: [u8; 32]) -> ctf_format::Result<Vec<u8>> {
                 name_id: 1,
                 flags: SectionFlags(SectionFlags::EXTERNAL | SectionFlags::PLAYER_VISIBLE),
                 chunk_size: 0,
+                comp: ctf_format::Compression::None,
                 payload: Payload::External {
                     len_plain: 41_231_986_688,
                     root: [0x33; 32],
@@ -1440,7 +1441,7 @@ fn chunk_index_matches_a_freshly_built_one() {
     let bytes = b.section_bytes(&record).unwrap();
     assert_eq!(
         b.chunk_index(&record).unwrap().unwrap().entries(),
-        ChunkIndex::build(bytes, record.chunk_size)
+        ChunkIndex::build(&bytes, record.chunk_size)
             .unwrap()
             .entries()
     );
