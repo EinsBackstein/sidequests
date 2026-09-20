@@ -155,6 +155,7 @@ fn external_sections_show_size_mirrors_and_root() {
                     root,
                 },
                 chunk_index: None,
+                encryption: None,
             },
         ],
     )
@@ -270,4 +271,71 @@ fn unsigned_bundle_without_verify_still_succeeds() {
 
     let (ok, _out) = inspect(t.path(), &[]);
     assert!(ok);
+}
+
+/// Drive the binary with arbitrary arguments and surface the exact exit code plus
+/// both streams, for the parser-level assertions below.
+fn run_raw(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(BIN).args(args).output().expect("run ctf");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The L8 regression: `ctf inspect a.ctf b.ctf` must reject the second positional
+/// instead of silently inspecting the last one. The report must not be printed.
+#[test]
+fn inspect_rejects_a_second_positional() {
+    let (code, out, err) = run_raw(&["inspect", "a.ctf", "b.ctf"]);
+    assert_ne!(code, 0, "a second positional must fail");
+    assert!(!err.is_empty(), "a usage error must explain itself");
+    assert!(
+        !out.contains("file          "),
+        "no report should be printed for a rejected invocation:\n{out}"
+    );
+}
+
+/// clap exits 2 on usage errors by default, which would collide with the exit 2
+/// that `inspect --verify` reserves for an intact-but-unauthentic bundle. A usage
+/// error must therefore exit 1.
+#[test]
+fn a_usage_error_exits_one_not_two() {
+    let (code, _out, err) = run_raw(&["inspect", "--definitely-not-a-flag", "a.ctf"]);
+    assert_eq!(code, 1, "usage errors must exit 1, not clap's default 2");
+    assert!(!err.is_empty(), "a usage error must explain itself");
+}
+
+/// Ticket 37: every subcommand is discoverable through `--help`.
+#[test]
+fn help_lists_every_subcommand() {
+    let (code, out, err) = run_raw(&["--help"]);
+    assert_eq!(code, 0, "--help must succeed:\n{err}");
+    for cmd in [
+        "inspect",
+        "validate",
+        "pack",
+        "keygen",
+        "sign",
+        "completions",
+    ] {
+        assert!(out.contains(cmd), "`{cmd}` missing from --help:\n{out}");
+    }
+}
+
+/// Ticket 37: `completions <shell>` emits a non-empty script generated from the
+/// real clap `Command`.
+#[test]
+fn completions_bash_emits_a_script() {
+    let (code, out, err) = run_raw(&["completions", "bash"]);
+    assert_eq!(code, 0, "completions must succeed:\n{err}");
+    assert!(
+        !out.trim().is_empty(),
+        "completion script must not be empty"
+    );
+    assert!(
+        out.contains("ctf"),
+        "script should mention the binary:\n{out}"
+    );
 }

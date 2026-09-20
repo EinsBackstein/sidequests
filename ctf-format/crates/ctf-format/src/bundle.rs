@@ -8,9 +8,11 @@
 use crate::{
     Compression, Error, HEADER_LEN, Header, Result, SECTION_RECORD_LEN, SectionFlags, SectionKind,
     SectionRecord,
+    cbor::Value,
     chunk::{self, ChunkIndex, VerifiedChunkIndex},
     compress,
-    crypto::sign,
+    crypto::{sign, stream},
+    envelope::Envelope,
     footer::{Footer, MIN_FOOTER_LEN, ROOT_LEN, Signing, commitment_root},
     manifest::Manifest,
     section::{parse_table, validate_layout},
@@ -217,6 +219,129 @@ impl<'a> Bundle<'a> {
         Ok(Some(index.verify_root(&record.root, record.chunk_size)?))
     }
 
+    /// Recover a section's `content_key` from the bundle's `keys` section, using a
+    /// recipient's hybrid KEM secret key.
+    ///
+    /// The envelope naming the section (`name_id`) and the requested context is the
+    /// one tried; `expected_context` is `storage`, `seal`, `stage:<n>`, or `holder`
+    /// (spec §21). The `keys` section's own plaintext is verified against its root
+    /// before it is decoded — nothing acts on unauthenticated content (§10) — and a
+    /// wrong secret key or a wrong context fails without distinguishing which.
+    pub fn section_content_key(
+        &self,
+        record: &SectionRecord,
+        recipient_secret_key: &[u8],
+        expected_context: &str,
+    ) -> Result<[u8; 32]> {
+        for keys in self.sections.iter().filter(|r| r.kind == SectionKind::Keys) {
+            let bytes = self.section_bytes(keys)?;
+            let value = Value::decode(&bytes)?;
+            let entries = value.as_array().ok_or(Error::Inconsistent {
+                what: "a keys section's plaintext is not a CBOR array",
+            })?;
+            for entry in entries {
+                let envelope = Envelope::from_cbor(entry)?;
+                if envelope.name_id == record.name_id && envelope.context == expected_context {
+                    return envelope
+                        .open(
+                            recipient_secret_key,
+                            self.header.suite_id,
+                            self.header.version_major,
+                            expected_context,
+                        )
+                        .map_err(Error::Suite);
+                }
+            }
+        }
+        Err(Error::Inconsistent {
+            what: "no key envelope for this section and context",
+        })
+    }
+
+    /// A section's plaintext, decrypted with `content_key` and verified against its
+    /// `root` before it is returned.
+    ///
+    /// This is the read half of encrypted sections. It is deliberately separate from
+    /// [`Bundle::section_bytes`] because it takes a key and because it **must** be
+    /// allowed to read a `SEALED` section — that is exactly what a seal key is for,
+    /// whereas [`Bundle::section_bytes`] refuses sealed plaintext unconditionally.
+    /// An unknown kind is still refused: a key does not make a section
+    /// interpretable, only readable.
+    ///
+    /// The STREAM framing of spec §20.2 is checked per chunk (every chunk
+    /// authenticates, the last carries the final flag), `comp = 1` frames are
+    /// decompressed to their declared chunk lengths, and the result is hashed against
+    /// `root` before it is returned.
+    pub fn decrypt_section_bytes(
+        &self,
+        record: &SectionRecord,
+        content_key: &[u8],
+    ) -> Result<Vec<u8>> {
+        if !record.kind.is_known() {
+            return Err(Error::Inconsistent {
+                what: "a section of a kind this build does not implement is not decodable",
+            });
+        }
+        if record.flags.contains(SectionFlags::EXTERNAL) {
+            return Err(Error::Inconsistent {
+                what: "an EXTERNAL section's bytes are not in the file",
+            });
+        }
+        if record.enc != crate::Encryption::AeadStream {
+            return Err(Error::Inconsistent {
+                what: "section is not encrypted",
+            });
+        }
+        let suite = crate::suite::suite(self.header.suite_id)?;
+        let aead = suite.aead()?;
+        let end = record
+            .offset
+            .checked_add(record.len_stored)
+            .ok_or(Error::LengthOverflow {
+                at: "section range",
+            })?;
+        let stored = slice(self.file, record.offset, end, "section payload")?;
+        let frames = stream::open_chunked_frames(
+            aead,
+            content_key,
+            record.name_id,
+            self.header.suite_id,
+            record.len_plain,
+            stored,
+        )?;
+        if frames.len() as u64 != chunk::chunk_count(record.len_plain, record.chunk_size)? {
+            return Err(Error::Inconsistent {
+                what: "encrypted body has the wrong number of chunks",
+            });
+        }
+
+        let mut plain = Vec::new();
+        for (i, frame) in frames.iter().enumerate() {
+            let chunk_start = i as u64 * u64::from(record.chunk_size);
+            let want = (record.len_plain - chunk_start).min(u64::from(record.chunk_size));
+            match record.comp {
+                Compression::None => {
+                    if frame.len() as u64 != want {
+                        return Err(Error::Inconsistent {
+                            what: "encrypted chunk decrypted to the wrong length",
+                        });
+                    }
+                    plain.extend_from_slice(frame);
+                }
+                Compression::Zstd => {
+                    // One zstd frame per chunk (spec §5.4, §20.2): frame *i* MUST
+                    // decompress to exactly `min(chunk_size, len_plain − i·chunk_size)`.
+                    plain.extend_from_slice(&compress::decompress(frame, want)?);
+                }
+            }
+        }
+
+        if blake3::hash(&plain).as_bytes() != &record.root {
+            return Err(Error::RootMismatch { at: "section" });
+        }
+        Ok(plain)
+    }
+
     /// Verify every inline, unencrypted section against its root.
     ///
     /// Not part of [`Bundle::parse`]: a bundle referencing gigabytes of inline
@@ -357,6 +482,12 @@ fn slice<'a>(file: &'a [u8], start: u64, end: u64, what: &'static str) -> Result
 pub enum Payload<'a> {
     /// Stored in the file.
     Inline(&'a [u8]),
+    /// The plaintext of a `keys` section (kind 7): the writer fills it from the key
+    /// envelopes it produced for every encrypted section in this bundle
+    /// (`spec/SPEC.md` §21.3). A `keys` section carries no data of its own — it is
+    /// the delivery mechanism for the content keys of the sections around it — so
+    /// the caller reserves its `name_id` and the writer supplies the bytes.
+    Envelopes,
     /// Stored elsewhere. The writer never sees the bytes, only what commits to
     /// them — which is the whole point: a `.ctf` describing a 40 GB image stays
     /// small enough to mail.
@@ -364,6 +495,45 @@ pub enum Payload<'a> {
         len_plain: u64,
         root: [u8; ROOT_LEN],
     },
+}
+
+/// One recipient a section's `content_key` is wrapped to.
+///
+/// `context` is one of `storage`, `seal`, `stage:<n>`, or `holder` (design §7,
+/// spec §21). `public_key` is the recipient's hybrid KEM public key
+/// (`X25519 ‖ ML-KEM-768`), the same bytes [`crate::suite::Kem::generate`] hands
+/// back and [`crate::envelope::Envelope::open`] unwraps with the matching secret key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recipient<'a> {
+    /// The recipient context, bound into the envelope and its KEM transcript.
+    pub context: &'a str,
+    /// The recipient's hybrid KEM public key.
+    pub public_key: &'a [u8],
+}
+
+/// Encryption for one section (`spec/SPEC.md` §20.2, §21).
+///
+/// When a [`SectionSpec`] carries one of these, the writer compresses and then
+/// seals the payload, and wraps that content key to every recipient here as a key
+/// envelope. The envelopes are collected into the bundle's `keys` section.
+///
+/// The content key is fresh random by default (spec §20.2), which is what makes
+/// re-encrypting under an unchanged `name_id` safe. [`EncryptionSpec::content_key`]
+/// overrides that for the one case the spec derives a key instead of drawing one: a
+/// **stage-gated** section is encrypted under `stage_key(flag(N−1), N)` (spec
+/// §22.4), because that derivation *is* the gate. Such a section needs no envelope —
+/// the key is recomputed from the flag the player submits, not delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncryptionSpec<'a> {
+    /// The recipients the content key is wrapped to. Empty is legal — a stage-gated
+    /// section has none, and a caller may hold the content key itself — but then
+    /// nothing in the bundle can recover it, so the section is unreadable by anyone
+    /// but that caller.
+    pub recipients: &'a [Recipient<'a>],
+    /// A caller-supplied content key, or `None` to draw a fresh random one. Supplied
+    /// only for a derived stage key (spec §22.4); a fresh key is the default and the
+    /// rule everywhere else.
+    pub content_key: Option<[u8; 32]>,
 }
 
 /// One section to write.
@@ -391,6 +561,9 @@ pub struct SectionSpec<'a> {
     /// `None` for an inline section (the writer indexes the payload itself) and for
     /// an external section with no index.
     pub chunk_index: Option<&'a [u8]>,
+    /// Encrypt this section's inline payload (`enc = 1`, spec §20.2). `None` emits a
+    /// plaintext section, exactly as before encryption existed.
+    pub encryption: Option<EncryptionSpec<'a>>,
 }
 
 impl<'a> SectionSpec<'a> {
@@ -404,6 +577,23 @@ impl<'a> SectionSpec<'a> {
             comp: Compression::None,
             payload: Payload::Inline(bytes),
             chunk_index: None,
+            encryption: None,
+        }
+    }
+
+    /// The `keys` section the writer fills with the envelopes it produced for the
+    /// bundle's encrypted sections. `name_id` must index a `names` entry in the
+    /// manifest the caller supplies, exactly like any other section.
+    pub fn envelopes(kind: SectionKind, name_id: u16) -> Self {
+        Self {
+            kind,
+            name_id,
+            flags: SectionFlags::empty(),
+            chunk_size: 0,
+            comp: Compression::None,
+            payload: Payload::Envelopes,
+            chunk_index: None,
+            encryption: None,
         }
     }
 
@@ -416,6 +606,32 @@ impl<'a> SectionSpec<'a> {
     /// Compress this section's inline payload with zstd.
     pub fn compressed(mut self) -> Self {
         self.comp = Compression::Zstd;
+        self
+    }
+
+    /// Encrypt this section's inline payload with a fresh content key, wrapping it
+    /// to `recipients` (spec §20.2, §21). Requires a non-zero `chunk_size` (R15), so
+    /// combine it with [`SectionSpec::chunked`].
+    pub fn encrypted(mut self, recipients: &'a [Recipient<'a>]) -> Self {
+        self.encryption = Some(EncryptionSpec {
+            recipients,
+            content_key: None,
+        });
+        self
+    }
+
+    /// Encrypt this section with an explicit content key, for the stage-gating case
+    /// where the key is derived rather than drawn (spec §22.4). Requires a non-zero
+    /// `chunk_size` (R15).
+    pub fn encrypted_with_key(
+        mut self,
+        content_key: [u8; 32],
+        recipients: &'a [Recipient<'a>],
+    ) -> Self {
+        self.encryption = Some(EncryptionSpec {
+            recipients,
+            content_key: Some(content_key),
+        });
         self
     }
 
@@ -454,17 +670,79 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
         });
     }
 
+    // Pre-pass: seal every encrypted section and collect the envelopes that
+    // deliver its fresh content key. This runs before the layout pass because the
+    // `keys` section carries the envelopes of every encrypted section, wherever
+    // those sections sit in the file (spec §21.3).
+    let any_encryption = sections.iter().any(|s| s.encryption.is_some());
+    let aead: Option<&'static dyn crate::suite::Aead> = if any_encryption {
+        Some(crate::suite::suite(suite_id)?.aead()?)
+    } else {
+        None
+    };
+    let mut envelopes: Vec<Envelope> = Vec::new();
+    let mut sealed_bodies: Vec<Option<Vec<u8>>> = Vec::with_capacity(sections.len());
+    for s in sections {
+        match (&s.payload, &s.encryption) {
+            (Payload::Inline(bytes), Some(spec)) => {
+                let aead = aead.ok_or(Error::Inconsistent {
+                    what: "encryption requested without a resolved AEAD",
+                })?;
+                sealed_bodies.push(Some(encrypt_section(
+                    aead,
+                    suite_id,
+                    s.name_id,
+                    s.chunk_size,
+                    s.comp,
+                    bytes,
+                    spec,
+                    &mut envelopes,
+                )?));
+            }
+            (_, Some(_)) => {
+                return Err(Error::Inconsistent {
+                    what: "only an inline section can be encrypted",
+                });
+            }
+            _ => sealed_bodies.push(None),
+        }
+    }
+
+    // The `keys` section's plaintext, rendered once from the collected envelopes
+    // (spec §21.3). A bundle with envelopes but no `keys` section could never be
+    // opened, so that combination is refused rather than emitted.
+    let envelope_payload = if sections
+        .iter()
+        .any(|s| matches!(s.payload, Payload::Envelopes))
+    {
+        Some(
+            Value::Array(envelopes.iter().map(Envelope::to_cbor).collect())
+                .encode()
+                .map_err(|_| Error::Inconsistent {
+                    what: "envelope CBOR encoding failed",
+                })?,
+        )
+    } else {
+        if !envelopes.is_empty() {
+            return Err(Error::Inconsistent {
+                what: "an encrypted section's key envelope needs a keys section to carry it",
+            });
+        }
+        None
+    };
+
     // Pass 1: place payloads and build the records.
     let mut body: Vec<u8> = Vec::new();
     let mut records: Vec<SectionRecord> = Vec::with_capacity(sections.len());
     let mut indices: Vec<(usize, ChunkIndex)> = Vec::new();
 
-    for s in sections {
+    for (i, s) in sections.iter().enumerate() {
         // A precomputed index belongs to an EXTERNAL section: an inline section's
-        // payload is right here and the writer indexes it itself.
-        if s.chunk_index.is_some() && matches!(s.payload, Payload::Inline(_)) {
+        // payload is right here and the writer indexes it itself, and an encrypted
+        // section has no plaintext-verifiable index to carry.
+        if s.chunk_index.is_some() && !matches!(s.payload, Payload::External { .. }) {
             return Err(Error::Inconsistent {
-                what: "a precomputed chunk index was supplied for an inline section",
+                what: "a precomputed chunk index was supplied for a non-external section",
             });
         }
 
@@ -473,7 +751,7 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
         // *is* `BLAKE3(plaintext)` (spec §9.2), so hashing the plaintext again
         // would be the same work done twice (ticket 85).
         let mut index: Option<ChunkIndex> = None;
-        let (offset, len_stored, len_plain, root) = match s.payload {
+        let (offset, len_stored, len_plain, root, enc) = match s.payload {
             Payload::External { len_plain, root } => {
                 if let Some(bytes) = s.chunk_index {
                     let count = chunk::chunk_count(len_plain, s.chunk_size)?;
@@ -484,33 +762,70 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
                     parsed.clone().verify_root(&root, s.chunk_size)?;
                     index = Some(parsed);
                 }
-                (0, 0, len_plain, root)
+                (0, 0, len_plain, root, crate::Encryption::None)
             }
-            Payload::Inline(bytes) => {
-                // Compress before placing: `len_plain` stays the pre-compression
-                // length and `root` commits to the plaintext (spec §5.4), so
-                // compression is invisible to the commitment.
-                let stored: Cow<'_, [u8]> = match s.comp {
-                    Compression::None => Cow::Borrowed(bytes),
-                    Compression::Zstd => Cow::Owned(compress::compress(bytes, s.chunk_size)?),
-                };
+            Payload::Envelopes => {
+                let bytes = envelope_payload.as_deref().unwrap_or(&[]);
                 pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
                 let offset = u64::from(HEADER_LEN) + body.len() as u64;
-                body.extend_from_slice(&stored);
-                let len_plain = bytes.len() as u64;
-                let (root, built) = if s.chunk_size != 0
-                    && chunk::chunk_count(len_plain, s.chunk_size)? >= 2
-                {
-                    let idx = ChunkIndex::build(bytes, s.chunk_size)?;
-                    let root = chunk::root_from_cvs(idx.entries()).ok_or(Error::Inconsistent {
-                        what: "a chunked section's index did not reduce to a root",
-                    })?;
-                    (root, Some(idx))
+                body.extend_from_slice(bytes);
+                let len = bytes.len() as u64;
+                (
+                    offset,
+                    len,
+                    len,
+                    *blake3::hash(bytes).as_bytes(),
+                    crate::Encryption::None,
+                )
+            }
+            Payload::Inline(bytes) => {
+                if let Some(sealed) = sealed_bodies.get(i).and_then(Option::as_ref) {
+                    // The body is already compressed (if `comp = 1`) and then
+                    // encrypted (spec §5.4: compress, then encrypt). `len_plain`
+                    // and `root` still describe the plaintext, so the commitment is
+                    // independent of the transform.
+                    pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
+                    let offset = u64::from(HEADER_LEN) + body.len() as u64;
+                    body.extend_from_slice(sealed);
+                    (
+                        offset,
+                        sealed.len() as u64,
+                        bytes.len() as u64,
+                        *blake3::hash(bytes).as_bytes(),
+                        crate::Encryption::AeadStream,
+                    )
                 } else {
-                    (*blake3::hash(bytes).as_bytes(), None)
-                };
-                index = built;
-                (offset, stored.len() as u64, len_plain, root)
+                    // Compress before placing: `len_plain` stays the pre-compression
+                    // length and `root` commits to the plaintext (spec §5.4), so
+                    // compression is invisible to the commitment.
+                    let stored: Cow<'_, [u8]> = match s.comp {
+                        Compression::None => Cow::Borrowed(bytes),
+                        Compression::Zstd => Cow::Owned(compress::compress(bytes, s.chunk_size)?),
+                    };
+                    pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
+                    let offset = u64::from(HEADER_LEN) + body.len() as u64;
+                    body.extend_from_slice(&stored);
+                    let len_plain = bytes.len() as u64;
+                    let (root, built) =
+                        if s.chunk_size != 0 && chunk::chunk_count(len_plain, s.chunk_size)? >= 2 {
+                            let idx = ChunkIndex::build(bytes, s.chunk_size)?;
+                            let root =
+                                chunk::root_from_cvs(idx.entries()).ok_or(Error::Inconsistent {
+                                    what: "a chunked section's index did not reduce to a root",
+                                })?;
+                            (root, Some(idx))
+                        } else {
+                            (*blake3::hash(bytes).as_bytes(), None)
+                        };
+                    index = built;
+                    (
+                        offset,
+                        stored.len() as u64,
+                        len_plain,
+                        root,
+                        crate::Encryption::None,
+                    )
+                }
             }
         };
         if let Some(idx) = index {
@@ -520,7 +835,7 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
             kind: s.kind,
             name_id: s.name_id,
             flags: s.flags,
-            enc: crate::Encryption::None,
+            enc,
             comp: s.comp,
             offset,
             len_stored,
@@ -581,6 +896,74 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
 
     Bundle::parse(&file)?;
     Ok(file)
+}
+
+/// Seal one inline section's plaintext and wrap its fresh content key to every
+/// recipient, appending the resulting envelopes to `envelopes`.
+///
+/// The order is **compress, then encrypt** (spec §5.4). With `comp = 1` each chunk
+/// is one zstd frame and is sealed as its own STREAM chunk, which is the
+/// `comp = 1` + `enc = 1` composition of spec §20.2: `len_plain` in the AAD stays
+/// the total decompressed length, and each frame's compressed length is carried in
+/// the `u32_le(ct_len)` prefix rather than stored.
+///
+/// A fresh `content_key` is drawn per call and never reused (spec §20.2); it is what
+/// makes re-encrypting under an unchanged `name_id` safe. The key travels only
+/// inside the envelopes, so it never appears in the file.
+#[allow(clippy::too_many_arguments)]
+fn encrypt_section(
+    aead: &dyn crate::suite::Aead,
+    suite_id: u16,
+    name_id: u16,
+    chunk_size: u32,
+    comp: Compression,
+    plaintext: &[u8],
+    spec: &EncryptionSpec<'_>,
+    envelopes: &mut Vec<Envelope>,
+) -> Result<Vec<u8>> {
+    // R15: STREAM is defined over a chunk sequence, so an encrypted section must be
+    // chunked. A zero chunk size would leave the nonce counter undefined.
+    if chunk_size == 0 {
+        return Err(Error::Inconsistent {
+            what: "an encrypted section requires a non-zero chunk_size",
+        });
+    }
+    let content_key = match spec.content_key {
+        // A stage-gated section derives its content key from the previous stage's
+        // flag (spec §22.4); the derivation is the gate, so the key is not random.
+        Some(key) => key,
+        None => {
+            let fresh = stream::fresh_content_key(aead)?;
+            fresh
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Inconsistent {
+                    what: "content key is not the frozen 32-byte size",
+                })?
+        }
+    };
+    let len_plain = plaintext.len() as u64;
+    let body = match comp {
+        Compression::None => {
+            stream::seal_chunked(aead, &content_key, name_id, suite_id, chunk_size, plaintext)?
+        }
+        Compression::Zstd => {
+            let frames = compress::compress_frames(plaintext, chunk_size)?;
+            let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+            stream::seal_chunked_frames(aead, &content_key, name_id, suite_id, len_plain, &refs)?
+        }
+    };
+    for recipient in spec.recipients {
+        envelopes.push(crate::envelope::seal(
+            &content_key,
+            recipient.public_key,
+            suite_id,
+            crate::VERSION_MAJOR,
+            name_id,
+            recipient.context,
+        )?);
+    }
+    Ok(body)
 }
 
 /// Sign an unsigned bundle in place: produce both hybrid signatures over the §8.4

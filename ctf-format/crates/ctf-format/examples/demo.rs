@@ -87,6 +87,7 @@ fn main() {
                     root: [0x33; 32],
                 },
                 chunk_index: None,
+                encryption: None,
             },
         ],
     )

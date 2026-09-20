@@ -1202,6 +1202,7 @@ fn external_bundle(size: u64, root: [u8; 32]) -> ctf_format::Result<Vec<u8>> {
                     root: [0x33; 32],
                 },
                 chunk_index: None,
+                encryption: None,
             },
         ],
     )
@@ -2038,6 +2039,7 @@ fn external_bundle_with_index(
                     root,
                 },
                 chunk_index: index,
+                encryption: None,
             },
         ],
     )

@@ -1,4 +1,4 @@
-//! Derived flags and stage keys (design §7). Ticket 15.
+//! Derived flags and stage keys (design §7, spec §22). Ticket 15.
 //!
 //! A bundle stores the derivation *rule*, never a flag value: the seed is a
 //! function of `event_secret` (a 32-byte KMS/HSM value that never enters a
@@ -16,6 +16,9 @@
 //!     info = LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id) )
 //!
 //! flag(subject) = base32_lower( HMAC-SHA-256(key = seed, message = "ctf/flag/v1")[0..10] )
+//!
+//! flag_with_bytes(seed, n) = base32_lower(
+//!     HMAC-SHA-256(key = seed, message = "ctf/flag/v1")[0..clamp(n, 1, 32)] )
 //!
 //! stage_key(prev_flag, N) = HKDF-SHA-256(
 //!     ikm  = prev_flag.as_bytes(),
@@ -41,12 +44,18 @@
 //!
 //! # Flag size
 //!
-//! `flag` is exactly 16 characters: 10 bytes is 80 bits, and RFC 4648 base32
-//! encodes 10 bytes as exactly 16 symbols with no padding. Design §7 records the
-//! 80-bit ceiling inherent to deriving a stage key from what a player types; a
-//! challenge that needs a real 128-bit boundary would choose a longer flag, which
-//! is a per-challenge decision (`base32_lower` handles any byte length), not a
-//! format constant.
+//! The flag length is a **per-challenge choice, not a format constant** (spec
+//! §22.3): a challenge that needs a real 128-bit boundary uses a longer derived
+//! flag, while the default stays short enough to read aloud and type. [`flag`] is
+//! exactly 16 characters, the 10-byte / 80-bit default (spec §22.3 rule DF3);
+//! [`flag_with_bytes`] exposes the choice and renders `ceil(8n/5)` symbols for `n`
+//! tag bytes — 16 bytes is exactly the 26 base32 characters of that 128-bit
+//! boundary (spec §22.3, §22.5).
+//!
+//! The ceiling is the HMAC-SHA-256 tag itself: 32 bytes / 256 bits, rendered as 52
+//! symbols. Design §7 records the 80-bit ceiling inherent to deriving a stage key
+//! from what a player types; a longer flag raises that ceiling because the stage
+//! key inherits the flag's entropy, and [`base32_lower`] handles any byte length.
 //!
 //! # The one KDF, reused
 //!
@@ -79,8 +88,12 @@ const EVENT_SECRET_LEN: usize = 32;
 /// content keys, and the frozen content-key size is 32 bytes (spec §12).
 const KEY_LEN: usize = 32;
 
-/// The flag is 10 bytes of the HMAC tag, i.e. 80 bits, which base32 renders as
-/// exactly 16 symbols.
+/// The full HMAC-SHA-256 tag length in bytes. A derived flag can never carry more
+/// than the tag's own 256 bits, so [`flag_with_bytes`] clamps its request to this.
+const TAG_LEN: usize = 32;
+
+/// The default flag is 10 bytes of the HMAC tag, i.e. 80 bits, which base32
+/// renders as exactly 16 symbols (spec §22.3 rule DF3).
 const FLAG_BYTES: usize = 10;
 
 /// `seed(challenge, subject)` — the per-subject root of the flag derivation.
@@ -117,24 +130,50 @@ pub fn subject_seed(
 
 /// The per-subject flag: `base32_lower(HMAC-SHA-256(seed, "ctf/flag/v1")[0..10])`.
 ///
-/// Exactly 16 lowercase base32 characters. Infallible: the HMAC tag is 32 bytes,
-/// so truncating to [`FLAG_BYTES`] cannot fail.
+/// Exactly 16 lowercase base32 characters, the [`FLAG_BYTES`]-byte / 80-bit
+/// default of spec §22.3. This is [`flag_with_bytes`] at that length; it stays the
+/// stable entry point a caller reaches for when the challenge does not opt into a
+/// longer boundary.
 pub fn flag(seed: &[u8; 32]) -> String {
+    flag_with_bytes(seed, FLAG_BYTES)
+}
+
+/// A derived flag of a caller-chosen byte length, for a challenge that needs more
+/// than the 80-bit default.
+///
+/// Spec §22.3 makes the flag length a per-challenge choice: the default 10 bytes
+/// is 80 bits / 16 symbols, below the 128-bit floor the rest of the stack targets,
+/// and a challenge that needs that boundary asks for 16 bytes, which base32 renders
+/// as 26 symbols. `bytes` is the number of HMAC tag bytes to keep and the tag is
+/// [`TAG_LEN`] = 32 bytes, so the result is `ceil(8*bytes/5)` lowercase base32
+/// characters of the same `HMAC-SHA-256(seed, "ctf/flag/v1")` tag [`flag`] uses.
+///
+/// Infallible, like [`flag`]: `bytes` is **clamped** into `1..=TAG_LEN`. `0` reads
+/// as one byte (never an empty flag) and anything above [`TAG_LEN`] reads as the
+/// full tag, because asking for more bits than the tag carries is a length mistake
+/// the function cannot satisfy, not a security condition it can act on. The clamp is
+/// the documented behavior; a caller that wants an out-of-range length rejected
+/// checks it before calling. `flag_with_bytes(seed, FLAG_BYTES) == flag(seed)`.
+pub fn flag_with_bytes(seed: &[u8; 32], bytes: usize) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, seed);
     let tag = hmac::sign(&key, FLAG_LABEL);
-    // The digest is 32 bytes; the slice is always present. `unwrap_or` keeps the
-    // infallible signature without an `unwrap`/`expect` in library code.
-    let truncated = tag.as_ref().get(..FLAG_BYTES).unwrap_or(&[]);
+    // The digest is 32 bytes and `bytes` is clamped to 1..=32, so the slice is
+    // always present. `unwrap_or` keeps the infallible signature without an
+    // `unwrap`/`expect` in library code.
+    let truncated = tag.as_ref().get(..bytes.clamp(1, TAG_LEN)).unwrap_or(&[]);
     base32_lower(truncated)
 }
 
 /// A stage key derived from the previous stage's flag.
 ///
-/// Stage gating is "enforced by math, not by dashboard logic" (design §7): stage
-/// *N*'s section key is exactly this HKDF over what a player submitted for stage
-/// *N-1*, so opening stage *N* without solving *N-1* costs 2^80 against a held
-/// bundle. `N` enters as a fixed-width `u32_le`, so `stage:1` followed by
-/// `stage:11` cannot collide with `stage:11` followed by `stage:1`.
+/// Stage gating is "enforced by math, not by dashboard logic" (design §7, spec
+/// §22.4 rule DF4): stage *N*'s section key is exactly this HKDF over what a player
+/// submitted for stage *N-1*, so opening stage *N* without solving *N-1* costs 2^80
+/// against a held bundle (more if the challenge chose a longer flag, §22.3). There
+/// is no input here that is a function of `stage` alone — remove the previous flag
+/// and the key does not exist — so stage *N* is not derivable from its number. `N`
+/// enters as a fixed-width `u32_le`, so `stage:1` followed by `stage:11` cannot
+/// collide with `stage:11` followed by `stage:1`.
 pub fn stage_key(previous_flag: &str, stage: u32) -> Result<[u8; 32], SuiteError> {
     let info = stage.to_le_bytes();
     let mut key = [0u8; KEY_LEN];
