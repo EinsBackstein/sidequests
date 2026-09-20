@@ -96,7 +96,9 @@ fn name_sources(doc: &ChallengeDoc) -> Vec<NameSource> {
         }
     }
     if let Some(g) = &doc.generate {
-        push(&mut out, &g.wasm, "generate.wasm");
+        if let Some(wasm) = &g.wasm {
+            push(&mut out, wasm, "generate.wasm");
+        }
         for o in &g.outputs {
             // `validate` already checks output names; the key is repeated here so a
             // name shared with another key is still reported once.
@@ -135,6 +137,27 @@ pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackEr
         return Err(PackError::Invalid(issues));
     }
     let names: Vec<&str> = sources.iter().map(|s| s.name.as_str()).collect();
+
+    // The output-to-name-table mapping (spec §7.6, ticket 25). A generator output
+    // becomes a section, and a section's identity is its `name_id` into `names`, so
+    // an output with no name entry could never be addressed. `name_sources` already
+    // reserves every output name; this check makes the invariant explicit rather
+    // than incidental, so a future change to name assignment cannot silently drop
+    // one.
+    if let Some(g) = &doc.generate {
+        for (i, output) in g.outputs.iter().enumerate() {
+            if !names.contains(&output.name.as_str()) {
+                issues.push(ValidationIssue::new(
+                    format!("generate.outputs[{i}].name"),
+                    "has no entry in the manifest name table",
+                ));
+            }
+        }
+    }
+    if !issues.is_empty() {
+        return Err(PackError::Invalid(issues));
+    }
+
     Manifest::build(&doc.id, &doc.name, &names, doc.manifest_entries()).map_err(PackError::Format)
 }
 

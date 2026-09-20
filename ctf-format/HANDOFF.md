@@ -13,11 +13,11 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 / release 0.9.0 (phase 1
-complete; phase 2 complete except key distribution and the live gate; encrypted
-sections, the entitlement chain, stage gating, `ctf keys`/`seal`/`unseal`, and the
-`clap` CLI landed; the post-fix review tickets 81–97 closed; `cargo test` 339
-pass).
+**Last updated:** 2026-09-20, at format version 0.3 / release 0.10.0 (phase 1 and
+phase 2 complete except key distribution and the live gate; **phase 3's generator
+landed** — a Wasmtime host with a `wasmi` cross-check, the determinism gate, Rust
+and C guest SDKs, `ctf init` scaffolds, and the sealed-progress payload plus
+`ctf transfer`). `cargo test --workspace` green, 0 clippy warnings.
 
 ## Where this lives
 
@@ -45,13 +45,20 @@ ctf-format/
     src/envelope.rs     key envelopes              spec §21
     src/derive.rs       derived flags, stage keys  spec §22
     src/entitlement.rs  entitlement chain     spec §18
+    src/progress.rs     sealed progress payloads   spec §24
     src/pack.rs         YAML -> .ctf               design §10
+    src/scaffold.rs     ctf init archetypes        design §10
     examples/demo.rs    writes a demo .ctf to try the CLI against
     tests/              container, cbor, chunk, bundle, mutation, fuzzmirror
+  crates/ctf-generator/ the deterministic WASM host (spec §23): Wasmtime,
+                        wasmi cross-check, the determinism gate
   crates/ctf-cli/       the `ctf` binary — inspect, validate, pack, keygen, sign,
-                        keys, seal, unseal, completions (clap)
+                        keys, seal, unseal, init, transfer, completions (clap)
+  sdk/rust/             Rust guest SDK + sample generator (built to wasm)
+  sdk/c/                C guest SDK (header + example)
   fuzz/                 cargo-fuzz targets + committed seed corpus
   spec/SPEC.md          normative byte-level spec — wins over the design doc
+  spec/generator.wit    the generator interface's source of truth
   docs/FORMAT-DESIGN.md design rationale and threat model
   docs/ROADMAP.md       phased plan, checkboxes reflect reality
   CHANGELOG.md
@@ -176,7 +183,10 @@ recipient), **derived flags and stage keys** (`derive.rs`, spec §22 — a bundl
 carries the rule, never the flag), and **`ctf pack`** (`pack.rs`, ticket 35), with
 `ctf keygen`/`ctf sign` as CLI conveniences.
 
-Not implemented: key distribution and the live gate. No generator, no solver gate.
+Not implemented: key distribution and the live gate. The generator now **is**
+implemented (0.10.0): `ctf-generator` runs a capability-free module under profile 1
+and the determinism gate, with a `wasmi` cross-check. The solver gate (phase 4) is
+not: nothing yet runs `solver.wasm` against generated artifacts.
 The writer now emits `enc = 1` for an encrypted section — compress, then encrypt —
 as well as `comp = 1` zstd sections; the reader enforces an absolute output cap and
 an expansion-ratio cap before running the decoder (spec §5.4, D1–D2), and a
@@ -205,6 +215,17 @@ mismatch; `crit` errors carry an entry index; `ExceedsFile` reports the real fil
 length; a pre-0.3 file is diagnosed as an older format; errors no longer echo input
 bytes; and `ctf inspect` prints each section's full name. No byte-layout change and
 no feature bit.
+
+Implemented since 0.10.0: **the generator** (spec §23, `ctf-generator`) — a core
+WebAssembly module with no imports, run under a pinned profile (relaxed-SIMD
+lowered deterministically, NaN bits canonicalized, threads off, fuel not epochs),
+with a two-run gate and a `wasmi` cross-check; **Rust and C guest SDKs** and
+`spec/generator.wit`; **`ctf init`** scaffolds; the **sealed-progress payload**
+(spec §24, `progress.rs`) and **`ctf transfer`**, which embeds the updated chain
+back into a bundle. The authoring `generate` declaration gained the `flag_only`
+mode and `interface`/`profile`, and the output-to-`names` mapping is enforced by
+`ctf pack`. Regression tests were added for tickets 81 and 85, whose fixes were
+already shipped.
 
 ### What 0.3 changed, and why the bit is `ro_compat`
 
@@ -237,17 +258,19 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**0.7.0 landed the rest of phase 2's constructions and the authoring front end**
-(tickets 13–15, 17, 35): key envelopes (spec §21), derived flags (§22), bundle
-signing (§20.3), cross-library vectors, and `ctf pack`/`keygen`/`sign`. What
-remains, in order:
+**0.10.0 landed phase 3's generator** (tickets 20–27), the sealed-progress payload
+and `ctf transfer` (tickets 41, 43, 44), and regression tests for the already-fixed
+tickets 81 and 85. What remains, in order:
 
-1. **The generator host** (phase 3): Wasmtime, the determinism config, and the WIT
-   interface, which is what `ctf run` and `ctf init` need.
-2. **The offline solvability gate** (phase 4): run `solver.wasm` against generated
-   artifacts with no network, and assert its output equals the derived flag.
-3. **The platform ingest path** (phase 5): the Postgres schema, the ingest pipeline,
+1. **The offline solvability gate** (phase 4): run `solver.wasm` against generated
+   artifacts with no network, and assert its output equals the derived flag. The
+   generator host (`ctf-generator`) and the gate are the machinery; `ctf run` joins
+   them to a bundle. `runtime`-bearing bundles land on `unverified`, never `passed`.
+2. **The platform ingest path** (phase 5): the Postgres schema, the ingest pipeline,
    and the admin TUI — the first point the system is operable end to end.
+3. **`ctf pack` emits the optional `paths` tree** (ticket 88) and, with it, the
+   authoring surface for `external` payloads, which `forensics` scaffolding
+   currently has to describe in prose because `ChallengeDoc` has no `external` key.
 
 ## Gotchas that will bite you
 

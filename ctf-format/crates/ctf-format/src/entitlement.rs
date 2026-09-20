@@ -74,6 +74,25 @@ pub const RECORD_LABEL: &[u8] = b"ctf/entitlement/record/v1";
 /// signature being replayed against an entitlement record (design §9).
 pub const SIG_LABEL: &[u8] = b"ctf/entitlement-sig/v1";
 
+/// Domain label for the reference holder-hash convention.
+pub const HOLDER_HASH_LABEL: &[u8] = b"ctf/holder-hash/v1";
+
+/// The reference implementation's holder public-key hash.
+///
+/// Spec §18.1 fixes the *width* (32 bytes) and the role — a record names a holder
+/// by a hash of its public key — but not the function. Mapping a holder to a key
+/// is key distribution, which §14 leaves out of scope, so an interoperable
+/// deployment must agree on its own. This is a local convention the CLI uses so a
+/// key and the hash recorded for it agree, in the same spirit as the key-file
+/// format: a convenience, not a container format.
+pub fn holder_hash(public_key: &HybridPublicKey) -> [u8; ROOT_LEN] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(HOLDER_HASH_LABEL);
+    hasher.update(&public_key.classical);
+    hasher.update(&public_key.pq);
+    *hasher.finalize().as_bytes()
+}
+
 /// The four record types (§18.1). A `type` that is not one of these names is E4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordType {
@@ -585,6 +604,88 @@ impl EntitlementChain {
     /// Append a record. The caller is responsible for its `seq` and `prev`.
     pub fn push(&mut self, record: EntitlementRecord) {
         self.records.push(record);
+    }
+
+    /// Append the genesis `grant`, binding `subject` to `holder` for the bundle
+    /// whose commitment root is `commitment_root` (E5, §18.2).
+    ///
+    /// Builds `seq = 0` and the zero `prev` itself, so the genesis binding cannot
+    /// be constructed wrong. The chain MUST be empty: a second genesis is not a
+    /// grant, and a grant that is not at `seq = 0` is E5.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_grant(
+        &mut self,
+        challenge: &str,
+        subject: &str,
+        holder: [u8; ROOT_LEN],
+        commitment_root: [u8; ROOT_LEN],
+        suite_id: u16,
+        platform_key: &HybridSigningKey,
+        timestamp: Option<Timestamp>,
+    ) -> Result<()> {
+        if !self.records.is_empty() {
+            return Err(bad("a genesis grant must be the first record (E5)"));
+        }
+        let mut record = EntitlementRecord {
+            seq: 0,
+            record_type: RecordType::Grant,
+            challenge: challenge.to_owned(),
+            subject: subject.to_owned(),
+            holder,
+            prev: [0u8; ROOT_LEN],
+            root: Some(commitment_root),
+            timestamp,
+            payload: None,
+            sig_holder: None,
+            sig_platform: None,
+        };
+        record.sign(suite_id, platform_key, None)?;
+        self.records.push(record);
+        Ok(())
+    }
+
+    /// Append a signed `transfer` handing the subject to `new_holder` (E8, §18.3).
+    ///
+    /// Builds `seq` and `prev` from the chain, so the hash link cannot be wrong,
+    /// and signs with the platform key always and with `current_holder_key` — the
+    /// holder named by the previous record — for the holder signature that makes
+    /// the handoff non-repudiable. `payload` is where a sealed progress blob goes
+    /// ([`crate::seal_progress`]). The chain MUST already have a genesis: a transfer
+    /// cannot be first, because there is no current holder to sign it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_transfer(
+        &mut self,
+        challenge: &str,
+        subject: &str,
+        new_holder: [u8; ROOT_LEN],
+        suite_id: u16,
+        platform_key: &HybridSigningKey,
+        current_holder_key: &HybridSigningKey,
+        timestamp: Option<Timestamp>,
+        payload: Option<Vec<u8>>,
+    ) -> Result<()> {
+        let last = self.records.last().ok_or(bad(
+            "a transfer needs a genesis grant to name the current holder (E5)",
+        ))?;
+        let prev = last.record_id()?;
+        let seq = u32::try_from(self.records.len())
+            .map_err(|_| bad("entitlement chain is longer than the seq space (E3)"))?;
+        let mut record = EntitlementRecord {
+            seq,
+            record_type: RecordType::Transfer,
+            challenge: challenge.to_owned(),
+            subject: subject.to_owned(),
+            holder: new_holder,
+            prev,
+            root: None,
+            timestamp,
+            payload,
+            sig_holder: None,
+            sig_platform: None,
+        };
+        record.sign(suite_id, platform_key, Some(current_holder_key))?;
+        self.records.push(record);
+        Ok(())
     }
 
     /// The record id of record `n` (§18.2), or E2 when `n` is out of range.

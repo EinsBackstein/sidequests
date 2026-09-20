@@ -297,6 +297,36 @@ impl ChallengeDoc {
                 &g.determinism,
                 &["strict", "flag_only", "none"],
             );
+
+            // The determinism mode fixes whether a generator exists at all (spec
+            // §7.6, §23.7). `flag_only` requires no generator; every other mode
+            // requires one, because a mode that promises reproducibility without a
+            // module to reproduce is a claim the bundle cannot back.
+            if g.determinism == "flag_only" {
+                if g.wasm.is_some() {
+                    issues.push(ValidationIssue::new(
+                        "generate.wasm",
+                        "`flag_only` needs no generator; remove `wasm` or use \
+                         `determinism: strict`",
+                    ));
+                }
+                if !g.outputs.is_empty() {
+                    issues.push(ValidationIssue::new(
+                        "generate.outputs",
+                        "`flag_only` produces no outputs; remove `outputs` or use \
+                         `determinism: strict`",
+                    ));
+                }
+            } else {
+                match &g.wasm {
+                    None => issues.push(ValidationIssue::new(
+                        "generate.wasm",
+                        "a generator is required unless `determinism: flag_only`",
+                    )),
+                    Some(wasm) => non_empty(&mut issues, "generate.wasm", wasm),
+                }
+            }
+
             let mut seen: Vec<&str> = Vec::new();
             for (i, output) in g.outputs.iter().enumerate() {
                 let key = format!("generate.outputs[{i}].name");
@@ -307,6 +337,19 @@ impl ChallengeDoc {
                     issues.push(ValidationIssue::new(key, "duplicate output name"));
                 }
                 seen.push(&output.name);
+            }
+
+            // The interface and profile are versions, and 0 is not one (spec
+            // §23.5). A higher version is *not* rejected here: a newer interface is
+            // a forward-compatibility question the host answers by refusing to run
+            // it (G6/G7), and the authoring tool must not decide it for the reader.
+            for (key, value) in [
+                ("generate.interface", g.interface),
+                ("generate.profile", g.profile),
+            ] {
+                if value == Some(0) {
+                    issues.push(ValidationIssue::new(key, "must be at least 1"));
+                }
             }
         }
 
@@ -499,27 +542,52 @@ impl<'de> Deserialize<'de> for FlagSpec {
 }
 
 /// `generate:` — how the deterministic generator is declared.
+///
+/// `wasm` and `outputs` are optional at the schema level because the
+/// `flag_only` determinism mode has no generator at all (spec §7.6, §23.7);
+/// [`ChallengeDoc::validate`] enforces the pairing the mode requires, naming the
+/// key that is wrong rather than making the shape unrepresentable and forcing the
+/// error into serde's anonymous "missing field".
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerateSpec {
-    /// Generator module, by name.
-    pub wasm: String,
+    /// Generator module, by name. Required unless `determinism: flag_only`.
+    #[serde(default)]
+    pub wasm: Option<String>,
     /// `strict`, `flag_only`, or `none`.
     pub determinism: String,
-    /// Named outputs the generator produces.
+    /// Named outputs the generator produces. Absent when `flag_only`.
+    #[serde(default)]
     pub outputs: Vec<OutputSpec>,
+    /// Generator interface version (spec §23.5). Absent means 1.
+    #[serde(default)]
+    pub interface: Option<u64>,
+    /// WASM feature profile (spec §23.5). Absent means 1.
+    #[serde(default)]
+    pub profile: Option<u64>,
 }
 
 impl GenerateSpec {
     fn to_cbor(&self) -> Value {
-        map(vec![
-            ("wasm", text(&self.wasm)),
-            ("determinism", text(&self.determinism)),
-            (
+        let mut entries = vec![("determinism", text(&self.determinism))];
+        if let Some(wasm) = &self.wasm {
+            entries.push(("wasm", text(wasm)));
+        }
+        // A `flag_only` generator carries neither `wasm` nor `outputs` (spec
+        // §7.6); every other mode carries both, even when the output list is empty.
+        if self.determinism != "flag_only" {
+            entries.push((
                 "outputs",
                 Value::Array(self.outputs.iter().map(OutputSpec::to_cbor).collect()),
-            ),
-        ])
+            ));
+        }
+        if let Some(interface) = self.interface {
+            entries.push(("interface", Value::Uint(interface)));
+        }
+        if let Some(profile) = self.profile {
+            entries.push(("profile", Value::Uint(profile)));
+        }
+        map(entries)
     }
 }
 

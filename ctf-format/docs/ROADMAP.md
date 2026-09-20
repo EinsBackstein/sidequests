@@ -20,7 +20,9 @@ go/                       independent second implementation — phase 8
 docs/
 ```
 
-`ctf-format`, `ctf-cli`, and `fuzz/` exist today. Remaining crates get created
+`ctf-format`, `ctf-cli`, `ctf-generator`, `sdk/`, and `fuzz/` exist today. The
+generator host is its own crate rather than part of `ctf-format`, so the container
+library stays free of the Wasmtime dependency. Remaining crates get created
 when their phase starts, not before.
 
 ---
@@ -187,36 +189,48 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
 
 ---
 
-## Phase 3 — Generator (design §8)
+## Phase 3 — Generator (design §8) ▸ *landed in 0.10.0*
 
-- [ ] Wasmtime host, no WASI, custom capability-free ABI
-- [ ] Determinism config: `relaxed_simd_deterministic`, `cranelift_nan_canonicalization`,
-      threads off, **fuel not epochs** for CPU limits
-- [ ] WIT interface + `wit-bindgen` guest SDKs (Rust first, then C)
-- [ ] Determinism gate: two runs in-process, plus x86-64 and aarch64 in CI
-- [ ] `determinism: flag_only` path requiring no generator at all — this is the
-      default and it carries most challenges
-- [ ] `ctf init <archetype>` scaffolds a working generator per archetype
-- [x] **Authoring-time schema validation**: `ctf pack` rejects unknown YAML keys, so
-      a typo'd optional key (`visibilty`) is caught at the authoring surface. The
-      manifest's `crit` mechanism provides *reader forward compatibility*, not typo
-      detection (spec §7.3) — a misspelled optional key is otherwise carried and
-      ignored, which is exactly the "silently publish a hidden challenge" incident
-      design §10 names. — **schema landed in 0.5.0** (ticket 32, `authoring`
-      module + spec §7.8); the five declaration keys are carried and round-tripped
-      (ticket 33, spec §7.6), and the `platform` overlay is specified (ticket 57,
-      spec §7.7). **`ctf validate` landed in 0.6.0** (ticket 34): schema and policy
-      checks with the offending key named and a non-zero exit on any finding.
-      **`ctf pack` landed in 0.7.0** (ticket 35): YAML → an unsigned bundle with the
-      manifest and a synthesized name table, refusing an invalid document.
+- [x] Wasmtime host, no WASI, custom capability-free ABI — **landed in 0.10.0**
+      (spec §23, `crates/ctf-generator`). The module is a core WebAssembly module
+      with **no imports**; a module that imports anything is rejected before it
+      runs, so it cannot observe a clock, network, filesystem, or randomness.
+- [x] Determinism config: `relaxed_simd_deterministic`, `cranelift_nan_canonicalization`,
+      threads off, **fuel not epochs** for CPU limits — **landed in 0.10.0**
+      (`host::pinned_config`). The configuration is not parameterised: profile 1
+      *is* the setting, so a host that runs a generator under a different feature
+      set cannot be constructed.
+- [x] WIT interface + guest SDKs (Rust and C) — **landed in 0.10.0**
+      (`spec/generator.wit`, `sdk/rust`, `sdk/c`). One deviation from this
+      roadmap's wording: the concrete ABI is the **flattened core-module ABI of
+      spec §23.2**, not the component-model canonical ABI, because it matches
+      design §8's "minimal host ABI" and is runnable without the component
+      toolchain. The WIT file is the interface's source of truth; the SDKs and the
+      host tests keep the two consistent.
+- [x] Determinism gate: two runs in-process, plus x86-64 and aarch64 in CI
+      — **landed in 0.10.0** (`gate::determinism_gate`, rules G9/G11). The two
+      in-process runs share one instance, so a generator that varies across calls
+      is caught, not just one that varies across instantiations.
+- [x] `determinism: flag_only` path requiring no generator at all — **landed in
+      0.10.0** (spec §7.6, §23.7; `generate` may omit `wasm`/`outputs`). This is
+      the default and it carries most challenges.
+- [x] `ctf init <archetype>` scaffolds a working generator per archetype
+      — **landed in 0.10.0** (`scaffold.rs`, `ctf init`). osint is generator-free;
+      rev emits a generator; pwn/web declare a runtime; forensics notes the
+      authoring `external` gap.
+- [x] **Authoring-time schema validation** — `ctf pack` rejects unknown YAML keys
+      (0.5.0–0.7.0, tickets 32–35).
+- [x] Generator output → `names` mapping and the `generate.interface`/`profile`
+      declarations — **landed in 0.10.0** (spec §7.6, ticket 25): the mapping is
+      enforced by the authoring tool, not the container reader, which carries the
+      declaration without acting on it.
 - [ ] `ctf pack` emits the optional `paths` tree (ticket 88). The format-level key
-      and its M22–M25 validation landed in **0.9.0** (spec §7.2): a `name_id` maps
-      to a relative POSIX path, checked component-by-component so traversal is
-      unrepresentable. `names` stays flat; the YAML surface that fills `paths` is
-      the remaining authoring work.
+      and its M22–M25 validation landed in **0.9.0** (spec §7.2). Still open.
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
-aarch64, and a deliberately nondeterministic generator is rejected at ingest.
+aarch64, and a deliberately nondeterministic generator is rejected at ingest. The
+gate, the fuel limit, and the two-architecture CI job are in place; wiring the gate
+into a bundle-level `ctf run` is phase 4.
 
 ---
 
@@ -268,10 +282,15 @@ touching the CLI.
 - [x] `transfer` requires the current holder's signature — non-repudiable handoff
       (E8 requires it; E9 verifies it against the holder named by the previous record)
 - [ ] `progress` carries earned stage flags sealed to the new holder's key
+      — **landed in 0.10.0** (spec §24, `progress::{seal_progress, open_progress}`,
+      ticket 41). A `holder`-context envelope wraps a fresh content key; the
+      ciphertext's AAD binds suite, challenge, and subject.
 - [x] Ordering by `seq`; `timestamp` is advisory display only
 - [x] Offline validation: chain verifies with no platform reachable (air-gapped
       forensics workstation on USB media)
-- [ ] `ctf transfer`
+- [ ] `ctf transfer` — **landed in 0.10.0** (ticket 43), with the authoring surface
+      of ticket 44: the updated chain is embedded back into a bundle with
+      `--bundle`, or written as chain plaintext.
 
 **Done when** a handoff mid-multi-stage challenge preserves progress and the chain
 validates offline.
@@ -305,7 +324,10 @@ deliberately disabled in the test.
       section of an undefined kind. The only way to test forward compatibility
       before a real extension exists, and the check that spec §12's compatibility
       matrix is true rather than aspirational
-- [ ] `wasmi` as a second engine in the determinism cross-check
+- [ ] `wasmi` as a second engine in the determinism cross-check — **landed in
+      0.10.0** for the generator (rule G10, `second::run_second_engine`). A module
+      `wasmi` cannot run (SIMD) reports `cross_engine: false` rather than passing
+      silently.
 - [ ] **Go second implementation written from `spec/SPEC.md` alone**, no peeking at
       the Rust source
 - [ ] Both implementations produce byte-identical output on every vector
@@ -348,7 +370,9 @@ a `ponytail:` comment at its site in the code.
   (0.5.0). Header, section table, CBOR, manifest, footer, and chunk index are still
   pure `std`. A YAML parser is not hand-written the way CBOR is: the reason for
   hand-writing CBOR was that no crate enforces canonical decoding, and no
-  equivalent property is at stake for authoring input.
+  equivalent property is at stake for authoring input. The generator host
+  (`ctf-generator`, 0.10.0) adds `wasmtime` and `wasmi`, and it is a separate crate
+  precisely so those never enter the container library's dependency graph.
 
 ## Out of scope (see design §2)
 

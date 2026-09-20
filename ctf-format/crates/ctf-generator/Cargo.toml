@@ -1,0 +1,27 @@
+[package]
+name = "ctf-generator"
+version = "0.10.0"
+description = "Deterministic WebAssembly generator host for the .ctf format"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ctf-format = { path = "../ctf-format" }
+blake3 = "1.8"
+# The primary engine. `cranelift` provides the JIT and the determinism knobs
+# (relaxed-SIMD lowering, NaN canonicalization); `runtime` provides the store,
+# fuel, and resource limits. No WASI and no component model: a generator is a core
+# module with no imports (spec §23.1).
+wasmtime = { version = "38", default-features = false, features = ["cranelift", "runtime", "threads", "gc-drc"] }
+# The second engine of rule G10. Deliberately a different implementation from
+# Wasmtime, so agreement between the two is evidence the settings are right rather
+# than an echo of one engine's behaviour.
+wasmi = "0.40"
+
+[dev-dependencies]
+# Parses the WAT fixtures in `tests/`. Not a runtime dependency: a generator ships
+# as a compiled module, and the host never parses text format.
+wat = "1"
+
+[lints]
+workspace = true

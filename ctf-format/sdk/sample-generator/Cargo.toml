@@ -1,0 +1,15 @@
+[package]
+name = "ctf-sample-generator"
+version = "0.1.0"
+description = "A sample .ctf generator built with the Rust guest SDK"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ctf-generator-sdk = { path = "../rust" }
+
+[profile.release]
+opt-level = "z"
+lto = true

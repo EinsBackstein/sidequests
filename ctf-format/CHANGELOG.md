@@ -7,6 +7,84 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.10.0] — 2026-09-20
+
+Phase 3, the deterministic generator, and the sealed-progress payload a handoff
+carries. **No byte-layout change:** `version_minor` stays `3`, the header, section
+table, footer, commitment root, and signature transcript are untouched, and every
+`.ctf` file this version's writer produces is byte-identical to a 0.9 file's for
+the same inputs. Two new normative sections fix interfaces a previous version left
+unspecified, and one rule is relaxed; neither narrows what is legal, so no feature
+bit is spent (§15).
+
+### Added — the generator interface and its sandbox (tickets 20–23, 27, spec §23)
+
+`gen.wasm` is a **core WebAssembly module with no imports**. The host provides no
+WASI, clock, network, filesystem, or randomness, so a conforming module cannot
+observe one; a module that imports anything is rejected before it runs (G2). The
+module exports `memory`, `ctf_alloc`, `ctf_generate`, and `ctf_output_len`
+(§23.2), and `ctf_generate` returns a canonical little-endian output block of named
+byte streams plus the flag (§23.3).
+
+- **Determinism is enforced by the sandbox.** Relaxed SIMD is lowered
+  deterministically rather than banned, float NaN bits are canonicalized, threads
+  are off, and CPU limits use **fuel** rather than wall-clock interruption, so a
+  near-limit generator cannot pass ingest and fail in production (§23.6).
+- **The gate validates the settings rather than trusting them** (G9, G10): it runs
+  the generator twice **in one instance** — catching a generator that varies across
+  calls, not just across instantiations — and then on a second engine (`wasmi`). A
+  module `wasmi` cannot run reports `cross_engine: false` rather than passing
+  silently. The CI workflow runs the same fixture on x86-64 and aarch64 (G11).
+- **Two independent versions**: `generate.interface` (the ABI version, `1`) and
+  `generate.profile` (the pinned WASM feature set, `1`), neither tied to
+  `version_minor` (§23.5).
+- **New crate `ctf-generator`** (`wasmtime` primary, `wasmi` cross-check), kept
+  separate so the container library never depends on a WASM engine.
+- **Guest SDKs**: `sdk/rust` (a `Generator` trait, an `Outputs` builder, and an
+  `export_generator!` macro) and `sdk/c` (a header and example), with
+  `spec/generator.wit` as the interface's source of truth. The sample Rust module
+  is committed as a test fixture, so the host tests run real guest code.
+
+### Added — sealed progress across a handoff (ticket 41, spec §24)
+
+A `progress` record's `payload` is a canonical-CBOR map of a `holder`-context key
+envelope and an AEAD ciphertext whose AAD binds suite, challenge, and subject
+(§24). `seal_progress`/`open_progress` implement it, so a handoff mid-multi-stage
+challenge preserves the earned stages, readable by the new holder only.
+
+### Added — `ctf transfer` and the bundle authoring surface (tickets 43, 44)
+
+`ctf transfer` appends a holder-signed `transfer` to an entitlement chain, seals
+progress to the new holder, verifies the whole chain before writing, and either
+writes the updated chain or — with `--bundle` — embeds it back into the bundle's
+`entitlement` section. `EntitlementChain::append_grant`/`append_transfer` build the
+`seq`/`prev` links so a caller cannot get the hash chain wrong.
+
+### Added — `ctf init` archetype scaffolds (ticket 26)
+
+`ctf init <archetype>` writes a `challenge.yaml` that validates, plus a generator
+for `rev`; the five archetypes are `osint`, `rev`, `pwn`, `web`, and `forensics`.
+
+### Changed — `generate` declaration (tickets 24, 25, spec §7.6)
+
+- **`flag_only` needs no generator.** `generate.determinism` is required and one of
+  `strict`, `flag_only`, `none`; `wasm` and `outputs` are required for the first and
+  last and MUST be absent for `flag_only` (§23.7). A minimal challenge with
+  `flag: derived` and no `generate` key already needed no generator; this makes the
+  explicit declaration match the design.
+- **The output-to-`names` mapping is enforced by the authoring tool, not the
+  container reader.** A generator output becomes a section, and a section's
+  identity is its `name_id`, so `ctf pack` refuses an output with no name-table
+  entry. The reader still carries the declaration without acting on it (§7.6).
+- `generate.interface` and `generate.profile` are carried declarations, default 1.
+
+### Fixed — regression tests for tickets 81 and 85
+
+The two fixes were already shipped (0.9.0 and 0.7.0); this release adds tests that
+fail if either regresses: a chunked inline section's root equals
+`blake3::hash` and the stored chunk index reduces to it, and a verify pass lists
+**every** mismatched section by `name_id` rather than aborting on the first.
+
 ## [0.9.0] — 2026-09-20
 
 The remaining post-fix review tickets — 81, 83, 86–88, 90–92, 95–97. **No

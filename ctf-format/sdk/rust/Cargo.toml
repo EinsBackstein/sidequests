@@ -1,0 +1,13 @@
+[package]
+name = "ctf-generator-sdk"
+version = "0.1.0"
+description = "Rust guest SDK for the .ctf deterministic generator interface"
+edition = "2021"
+
+# A guest is built to `wasm32-unknown-unknown` as a `cdylib`, which exports
+# `memory` and the three ABI functions. The crate is deliberately outside the
+# workspace: it is guest code, it targets a different architecture than the host,
+# and `#[unsafe(no_mangle)]` exports are not something the host crates' lint
+# configuration is meant to cover.
+[lib]
+crate-type = ["rlib", "cdylib"]
