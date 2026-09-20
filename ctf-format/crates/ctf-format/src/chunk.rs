@@ -1,6 +1,6 @@
 //! Chunk indices: verified streaming without a second commitment.
 //!
-//! Normative: `spec/SPEC.md` §9, rules C1–C7.
+//! Normative: `spec/SPEC.md` §9, rules C1–C8.
 //!
 //! # What a chunk index is
 //!
@@ -194,7 +194,11 @@ impl ChunkIndex {
     /// Parse an index of `count` entries.
     ///
     /// `count` comes from `ceil(len_plain / chunk_size)`, never from the file, so
-    /// there is no length field here for an attacker to inflate.
+    /// there is no length field here for an attacker to inflate. The input must be
+    /// **exactly** `count × 32` bytes: accepting a longer buffer and silently
+    /// dropping the excess would break the byte-for-byte round trip this type
+    /// documents, and a structure with two accepted spellings is what the
+    /// commitment cannot tolerate.
     pub fn parse(b: &[u8], count: u64) -> Result<Self> {
         // C4. A zero-entry index describes an empty section and a one-entry index
         // cannot be reduced to a root, so neither can be checked against anything.
@@ -211,6 +215,12 @@ impl ChunkIndex {
             .ok_or(Error::LengthOverflow { at: "chunk index" })?;
         if b.len() < need {
             return Err(Error::Truncated { need, got: b.len() });
+        }
+        if b.len() > need {
+            return Err(Error::TrailingBytes {
+                at: need,
+                len: b.len(),
+            });
         }
         let mut cvs = Vec::with_capacity(
             // Bounded by the bytes actually present, so the capacity cannot be
@@ -242,36 +252,109 @@ impl ChunkIndex {
         &self.cvs
     }
 
-    /// Check the index against the section root it claims to describe.
+    /// Check the index against the section root it claims to describe, and adopt the
+    /// chunk size the section's record fixed.
     ///
-    /// This is the step that makes the index trustworthy without a commitment of
-    /// its own: the root lives in the section table, which the footer commits to,
-    /// so an index that reduces to it is as authenticated as the table is.
-    /// **Call this before [`ChunkIndex::verify_chunk`]**, or per-chunk checks are
-    /// only checking the payload against an attacker's index.
-    pub fn verify_root(&self, root: &[u8; ROOT_LEN]) -> Result<()> {
+    /// This is the step that makes the index trustworthy without a commitment of its
+    /// own: the root lives in the section table, which the footer commits to, so an
+    /// index that reduces to it is as authenticated as the table is.
+    ///
+    /// **Consumes the index, and that is C6 made unrepresentable rather than
+    /// documented.** The only type that can check a chunk is the
+    /// [`VerifiedChunkIndex`] this returns, so a chunk cannot be checked against an
+    /// index that has not already been shown to reduce to the committed root. The
+    /// order C6 requires is enforced by the type, not by a comment telling the caller
+    /// which method to call first.
+    ///
+    /// It takes `chunk_size` here, from the section record, rather than letting
+    /// [`VerifiedChunkIndex::verify_chunk`] accept one per call: the record already
+    /// fixed it, and re-supplying it from memory is the same footgun as getting the
+    /// ordering wrong.
+    ///
+    /// ```compile_fail
+    /// use ctf_format::chunk::ChunkIndex;
+    /// let index: ChunkIndex = todo!();
+    /// // No such method: an index must be reduced to its root first, and the only
+    /// // result that can check a chunk is a `VerifiedChunkIndex`.
+    /// index.verify_chunk(0, &[]);
+    /// ```
+    pub fn verify_root(self, root: &[u8; ROOT_LEN], chunk_size: u32) -> Result<VerifiedChunkIndex> {
+        // The size comes from the record, which R14 already range-checked in a real
+        // file — but this function is `pub`, so the guard belongs here too. An
+        // index of fewer than two entries likewise cannot be reduced (C4).
+        if !chunk_size.is_power_of_two() || !(MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size)
+        {
+            return Err(Error::BadChunkSize { got: chunk_size });
+        }
         let got = root_from_cvs(&self.cvs).ok_or(Error::Inconsistent {
             what: "chunk index needs at least two entries",
         })?;
         if got != *root {
             return Err(Error::RootMismatch { at: "chunk index" });
         }
-        Ok(())
+        Ok(VerifiedChunkIndex {
+            cvs: self.cvs,
+            chunk_size,
+        })
+    }
+}
+
+/// A chunk index that has been reduced to its section's root.
+///
+/// **The only type that exposes per-chunk verification.** C6 requires C4 (reduce the
+/// index to the root) to be checked before C5 (check a chunk against an entry), and
+/// the way to make an ordering rule unbreakable is to make the reversed order
+/// unwritable: a caller cannot check a chunk against a bare [`ChunkIndex`] because
+/// no method for it exists. The same move as [`crate::SectionKind::Unknown`]
+/// carrying a [`crate::FutureKind`] instead of a bare `u16`.
+///
+/// It also owns the `chunk_size` resolved from the section record, so a chunk can
+/// only ever be checked at the size the record declared — a caller cannot re-supply,
+/// from memory, a value the file already fixed.
+///
+/// **C7 is the other half, and it is an absence.** A reader MUST NOT expose a
+/// chunk's bytes before that chunk passes C5. There is no method here that returns
+/// chunk bytes at all — [`VerifiedChunkIndex::verify_chunk`] returns `Result<()>`,
+/// and the caller supplies the bytes it is checking — so there is no non-verifying
+/// accessor to reach for:
+///
+/// ```compile_fail
+/// use ctf_format::chunk::VerifiedChunkIndex;
+/// let index: VerifiedChunkIndex = todo!();
+/// // No such method: chunks are checked, never handed back through the index.
+/// let _bytes: &[u8] = index.chunk(0);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedChunkIndex {
+    cvs: Vec<ChainingValue>,
+    chunk_size: u32,
+}
+
+impl VerifiedChunkIndex {
+    /// The entries, carried over from the index that verified.
+    pub fn entries(&self) -> &[ChainingValue] {
+        &self.cvs
+    }
+
+    /// The chunk size the section record fixed.
+    pub fn chunk_size(&self) -> u32 {
+        self.chunk_size
     }
 
     /// Check one chunk's plaintext against its entry.
     ///
     /// Chunks may be checked in any order and independently of each other, which is
     /// what lets a 40 GB payload be verified in a stream of bounded memory, and
-    /// what lets a broken transfer resume rather than restart.
-    pub fn verify_chunk(&self, index: u64, data: &[u8], chunk_size: u32) -> Result<()> {
+    /// what lets a broken transfer resume rather than restart. The chunk size is the
+    /// one the verified index carries, never an argument.
+    pub fn verify_chunk(&self, index: u64, data: &[u8]) -> Result<()> {
         let want = usize::try_from(index)
             .ok()
             .and_then(|i| self.cvs.get(i))
             .ok_or(Error::Inconsistent {
                 what: "chunk index out of range",
             })?;
-        if chunk_cv(data, index, chunk_size)? != *want {
+        if chunk_cv(data, index, self.chunk_size)? != *want {
             return Err(Error::RootMismatch { at: "chunk" });
         }
         Ok(())

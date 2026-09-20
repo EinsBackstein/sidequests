@@ -148,18 +148,40 @@ fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error
             r.len_plain,
             flag_names(r.flags)
         );
+        // The expected digest for this section's payload, inline or fetched
+        // out-of-band. An operator fetching a 40 GB external image needs it from the
+        // tool: without it, the only copy is inside the very file being checked. It
+        // is a digest and a number, so printing it cannot leak payload or echo
+        // attacker text. For an external section it is the record's `root`, which
+        // spec §5.7 makes authoritative over the manifest's copy.
+        println!(
+            "      root    {}{}",
+            hexstr(&r.root),
+            if r.flags.contains(SectionFlags::EXTERNAL) {
+                "  (external)"
+            } else {
+                ""
+            }
+        );
         if let Some(ext) = b.manifest.external(r.name_id) {
             for m in &ext.mirrors {
                 println!("      mirror  {m:?}");
             }
         }
         if r.chunk_size != 0 {
-            println!(
-                "      chunks  {} × {} bytes, index at {}",
-                b.chunk_index(r)?.map_or(0, |i| i.entries().len()),
-                r.chunk_size,
-                r.chunk_index_off
-            );
+            // A sealed or unknown-kind section's index is deliberately not read
+            // (C8). Report where it is, not what is in it, rather than failing the
+            // whole inspection over one unreadable section.
+            match b.chunk_index(r) {
+                Ok(Some(i)) => println!(
+                    "      chunks  {} × {} bytes, index at {}",
+                    i.entries().len(),
+                    r.chunk_size,
+                    r.chunk_index_off
+                ),
+                Ok(None) => println!("      chunks  none × {} bytes", r.chunk_size),
+                Err(_) => println!("      chunks  index at {} (not read)", r.chunk_index_off),
+            }
         }
     }
 

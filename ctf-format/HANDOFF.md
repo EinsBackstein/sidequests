@@ -5,13 +5,16 @@ Cold-start context for whoever picks this up. Read this, then
 [`docs/ROADMAP.md`](docs/ROADMAP.md) (what is built and what is next).
 
 > **Resuming mid-stream?** [`TODO.md`](TODO.md) holds the state of the 0.3 review.
-> **Tier 1 is complete** — all four blockers fixed, plus H1, L1 and L8. Outstanding:
-> H2–H6 and L2–L7. It also carries one rejected finding that must not be re-raised,
-> and the reasoning behind every decision, including two cases where what shipped is
-> deliberately *not* what the review proposed.
+> **All review tiers are complete** — B1–B4, H1–H6, L1–L8. The 2026-09-20 post-fix
+> re-review recorded 28 further findings as tickets (70–97) and explicitly deferred
+> them rather than folding them in; see
+> `docs/reviews/0.3-phase1/post-fix/REVIEW.md`. **0.3 is tagged.** TODO.md also carries
+> one rejected finding that must not be re-raised, and the reasoning behind every
+> decision, including cases where what shipped is deliberately *not* what a review
+> proposed.
 
-**Last updated:** 2026-08-16, at format version 0.3 (phase 1 complete, Tier 1 of the
-review applied; `cargo test` 137 pass).
+**Last updated:** 2026-09-20, at format version 0.3 (phase 1 complete, all review
+debt closed; `cargo test` 163 pass).
 
 ## Where this lives
 
@@ -130,7 +133,7 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 137 tests, 0 clippy warnings, one dependency
+parses them back before returning. 163 tests, 0 clippy warnings, one dependency
 (`blake3`), `unsafe_code = "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
@@ -183,21 +186,16 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**Tier 1 is done, so phase 2 is unblocked.** The one that had to land first was B4:
-inter-structure padding was committed to by nothing and sat outside the signed
-transcript, so one signature would have verified two different files. Phase 2 could
-not have fixed it — the transcript is already correct, and those bytes were never in
-scope of anything — which is why it closed in the container first. Rule T8 now
-requires unclaimed bytes to be zero.
-
-**Do not tag 0.3 without re-reading `TODO.md`'s open question 2.** R21, T8 and the
-`names` bidi rule were folded into 0.3 rather than given a feature bit of their own,
-on the grounds that nothing is published yet. A tag is the moment that stops being
-true.
+**Review debt is closed, 0.3.1 was tagged, and 0.4.0 fixes the two post-fix
+blockers.** All first-review findings are fixed; the post-fix re-review's new
+findings are tickets 70–97. **70 and 71 are fixed in 0.4.0** — a sealed or
+unknown-kind section's chunk index is withheld (C8), and the signature transcript is
+now `v2`, binding both slot lengths. The rest are deferred with the reasoning in
+`docs/reviews/0.3-phase1/post-fix/REVIEW.md`.
 
 1. **Phase 2 crypto.** The footer's signature slots, the transcript, and
    `suite_id` are all fixed and testable already — `Footer::sig_input` produces the
-   exact 59 bytes phase 2 must sign. What is missing is the suite registry, the
+   exact 67 bytes phase 2 must sign. What is missing is the suite registry, the
    hybrid KEM combiner, AEAD-STREAM, and the key envelopes. Start with the
    registry behind one trait per primitive role, so ML-DSA stays retireable.
 2. **zstd**, which is blocked on nothing but the two limits spec §14 leaves open:
@@ -207,7 +205,8 @@ true.
 3. **`ctf pack`**, the YAML authoring surface of design §10. The manifest's `crit`
    mechanism already carries the later phases' keys (`flag`, `generate`, `runtime`,
    `sealed`, `verify`) as ignorable unknowns, so `pack` can emit them before
-   anything consumes them.
+   anything consumes them. The `names` typo/duplicate and directory-tree tickets
+   (88) belong here too.
 
 ## Gotchas that will bite you
 
@@ -304,7 +303,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 124 tests
+cargo test                    # 163 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 

@@ -93,11 +93,30 @@ pub enum Error {
     /// attacker-controlled input like everything else, and an error string is not a
     /// place to echo it.
     Manifest { what: &'static str },
+    /// A manifest rule violation tied to a specific entry.
+    ///
+    /// The same no-oracle rule as [`Error::Manifest`], and the reason the position is
+    /// a *number* rather than the offending name or URL: an index into `names`, a
+    /// `name_id`, and a mirror's position are all safe to report, while the text they
+    /// point at is attacker-controlled. This is what turns "names entry is not text"
+    /// into a diagnostic an operator can act on across a 50-artifact bundle.
+    ManifestEntry {
+        what: &'static str,
+        /// Position in the `names` or `mirrors` array, when the rule is about a list.
+        index: Option<usize>,
+        /// The `name_id` the entry belongs to, when the rule is about an `external`
+        /// entry or a section named in the table.
+        name_id: Option<u64>,
+    },
     /// CBOR input ended inside a value.
     CborTruncated,
     /// CBOR input has bytes after the value. A manifest section is entirely the
     /// manifest.
     CborTrailing { at: usize, len: usize },
+    /// A structure was handed more bytes than its derived length accounts for.
+    /// Accepting the excess and dropping it on re-encode would be a second spelling
+    /// of one structure, which the commitment cannot tolerate.
+    TrailingBytes { at: usize, len: usize },
     /// An integer argument was not encoded in the shortest form RFC 8949 §4.2.1
     /// requires. Admitting the longer forms would give one value several encodings
     /// and so several commitment roots.
@@ -190,9 +209,25 @@ impl fmt::Display for Error {
             }
             Self::RootMismatch { at } => write!(f, "BLAKE3 root mismatch at {at}"),
             Self::Manifest { what } => write!(f, "manifest: {what}"),
+            Self::ManifestEntry {
+                what,
+                index,
+                name_id,
+            } => {
+                write!(f, "manifest: {what}")?;
+                match (name_id, index) {
+                    (Some(n), Some(i)) => write!(f, " (name_id {n}, entry {i})"),
+                    (Some(n), None) => write!(f, " (name_id {n})"),
+                    (None, Some(i)) => write!(f, " (entry {i})"),
+                    (None, None) => Ok(()),
+                }
+            }
             Self::CborTruncated => write!(f, "cbor: input ended inside a value"),
             Self::CborTrailing { at, len } => {
                 write!(f, "cbor: value ends at {at}, input is {len} bytes")
+            }
+            Self::TrailingBytes { at, len } => {
+                write!(f, "structure ends at {at}, input is {len} bytes")
             }
             Self::CborNotShortest => write!(f, "cbor: integer is not in shortest form"),
             Self::CborUnsupported { initial } => {

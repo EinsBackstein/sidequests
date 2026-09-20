@@ -27,10 +27,14 @@
 //!
 //! The mechanism is COSE's, and it is strictly stronger than either extreme. A
 //! `crit` array names the keys a reader must understand. An unknown key listed in
-//! `crit` is a hard reject; an unknown key not listed is carried and ignored. A
-//! typo is still caught, because a typo appears in neither place — which is the
-//! failure design §10 actually cares about, an author writing `visibilty` and
-//! silently publishing a hidden challenge.
+//! `crit` is a hard reject; an unknown key not listed is carried and ignored.
+//!
+//! Criticality is *reader forward compatibility*, not typo detection. A misspelled
+//! optional key is carried and ignored here, and catching it is the authoring
+//! tool's job — `ctf pack` (phase 3) rejects unknown keys against its fixed schema.
+//! A misspelled *required* key is still caught, because the required key is then
+//! absent. Conflating the two would make the manifest the one unextendable part of
+//! an extensible format, which is what `crit` exists to prevent.
 //!
 //! Carrying means byte-exact: an ignored key survives a decode/encode round trip
 //! unchanged, so a rewriter cannot destroy what it does not understand.
@@ -44,6 +48,8 @@
 //! validated (spec §2.3).
 
 use crate::{Error, Result, SectionRecord, cbor::Value, footer::ROOT_LEN, section::SectionFlags};
+
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The manifest schema version this build implements.
 pub const MANIFEST_SPEC: u64 = 1;
@@ -204,18 +210,31 @@ impl Manifest {
                 what: "manifest `names` is longer than the `name_id` space",
             });
         }
-        let mut seen: Vec<&str> = Vec::with_capacity(names.len());
-        for entry in names {
-            let n = entry.as_text().ok_or(Error::Manifest {
-                what: "manifest `names` entry is not text",
+        let mut seen: Vec<(usize, &str)> = Vec::with_capacity(names.len());
+        for (index, entry) in names.iter().enumerate() {
+            let n = entry.as_text().ok_or(Error::ManifestEntry {
+                what: "a `names` entry is not text",
+                index: Some(index),
+                name_id: None,
             })?;
-            check_name(n)?;
-            seen.push(n);
+            if let Some(what) = check_name(n) {
+                return Err(Error::ManifestEntry {
+                    what,
+                    index: Some(index),
+                    name_id: None,
+                });
+            }
+            seen.push((index, n));
         }
-        seen.sort_unstable();
-        if seen.windows(2).any(|w| w.first() == w.get(1)) {
-            return Err(Error::Manifest {
-                what: "manifest `names` contains a duplicate",
+        seen.sort_unstable_by(|a, b| a.1.cmp(b.1));
+        if let Some(dup) = seen
+            .windows(2)
+            .find(|w| w.first().map(|x| x.1) == w.get(1).map(|x| x.1))
+        {
+            return Err(Error::ManifestEntry {
+                what: "`names` contains a duplicate",
+                index: dup.get(1).map(|x| x.0),
+                name_id: None,
             });
         }
 
@@ -223,16 +242,20 @@ impl Manifest {
             let entries = ext.as_map().ok_or(Error::Manifest {
                 what: "manifest `external` is not a map",
             })?;
-            for (k, v) in entries {
-                let id = k.as_uint().ok_or(Error::Manifest {
-                    what: "manifest `external` key is not an unsigned integer",
+            for (index, (k, v)) in entries.iter().enumerate() {
+                let id = k.as_uint().ok_or(Error::ManifestEntry {
+                    what: "an `external` key is not an unsigned integer",
+                    index: Some(index),
+                    name_id: None,
                 })?;
                 if u16::try_from(id).is_err() {
-                    return Err(Error::Manifest {
-                        what: "manifest `external` key is outside the `name_id` space",
+                    return Err(Error::ManifestEntry {
+                        what: "an `external` key is outside the `name_id` space",
+                        index: None,
+                        name_id: Some(id),
                     });
                 }
-                parse_external(v)?;
+                parse_external(v, id)?;
             }
         }
 
@@ -311,7 +334,7 @@ impl Manifest {
         let (_, v) = entries
             .iter()
             .find(|(k, _)| k.as_uint() == Some(u64::from(name_id)))?;
-        parse_external(v).ok()
+        parse_external(v, u64::from(name_id)).ok()
     }
 
     /// Cross-check the manifest against the section table.
@@ -333,8 +356,10 @@ impl Manifest {
         let names = self.names();
         for r in records {
             if usize::from(r.name_id) >= names.len() {
-                return Err(Error::Manifest {
+                return Err(Error::ManifestEntry {
                     what: "a section's name_id is past the end of the manifest name table",
+                    index: None,
+                    name_id: Some(u64::from(r.name_id)),
                 });
             }
         }
@@ -344,43 +369,60 @@ impl Manifest {
             .get("external")
             .and_then(Value::as_map)
             .unwrap_or(&[]);
+        // Build both lookups once, so the cross-checks are O(records + entries)
+        // rather than O(records × entries). `MAX_SECTIONS` is 4096, and a
+        // structurally valid but hostile bundle should not be able to buy quadratic
+        // comparisons at that size. Canonical CBOR makes the keys unique, so the
+        // map cannot silently drop one.
+        let declared: BTreeMap<u64, &Value> = entries
+            .iter()
+            .filter_map(|(k, v)| k.as_uint().map(|id| (id, v)))
+            .collect();
+        let external_ids: BTreeSet<u64> = records
+            .iter()
+            .filter(|r| r.flags.contains(SectionFlags::EXTERNAL))
+            .map(|r| u64::from(r.name_id))
+            .collect();
         for r in records {
-            let declared = entries
-                .iter()
-                .find(|(k, _)| k.as_uint() == Some(u64::from(r.name_id)));
-            match (r.flags.contains(SectionFlags::EXTERNAL), declared) {
+            let id = u64::from(r.name_id);
+            match (r.flags.contains(SectionFlags::EXTERNAL), declared.get(&id)) {
                 (true, None) => {
-                    return Err(Error::Manifest {
+                    return Err(Error::ManifestEntry {
                         what: "an EXTERNAL section has no entry in the manifest's `external` map",
+                        index: None,
+                        name_id: Some(id),
                     });
                 }
                 (false, Some(_)) => {
-                    return Err(Error::Manifest {
+                    return Err(Error::ManifestEntry {
                         what: "the manifest declares external metadata for a section that is not EXTERNAL",
+                        index: None,
+                        name_id: Some(id),
                     });
                 }
                 (false, None) => {}
-                (true, Some((_, v))) => {
-                    let ext = parse_external(v)?;
+                (true, Some(v)) => {
+                    let ext = parse_external(v, id)?;
                     if ext.size != r.len_plain || ext.root != r.root {
-                        return Err(Error::Inconsistent {
-                            what: "manifest external metadata disagrees with the section record",
+                        return Err(Error::ManifestEntry {
+                            what: "external metadata disagrees with the section record",
+                            index: None,
+                            name_id: Some(id),
                         });
                     }
                 }
             }
         }
 
-        // An entry naming a `name_id` no section uses describes nothing. Caught
-        // separately from the loop above, which only walks sections.
+        // An entry naming a `name_id` no `EXTERNAL` section uses describes nothing.
+        // Caught separately from the loop above, which only walks sections.
         for (k, _) in entries {
             let id = k.as_uint().unwrap_or(u64::MAX);
-            if !records
-                .iter()
-                .any(|r| u64::from(r.name_id) == id && r.flags.contains(SectionFlags::EXTERNAL))
-            {
-                return Err(Error::Manifest {
+            if !external_ids.contains(&id) {
+                return Err(Error::ManifestEntry {
                     what: "the manifest's `external` map names a section that does not exist",
+                    index: None,
+                    name_id: Some(id),
                 });
             }
         }
@@ -408,39 +450,51 @@ impl Manifest {
     }
 }
 
-fn parse_external(v: &Value) -> Result<External<'_>> {
+fn parse_external(v: &Value, name_id: u64) -> Result<External<'_>> {
     let size = v
         .get("size")
         .and_then(Value::as_uint)
-        .ok_or(Error::Manifest {
-            what: "external entry is missing `size`, or it is not an unsigned integer",
+        .ok_or(Error::ManifestEntry {
+            what: "an `external` entry is missing `size`, or it is not an unsigned integer",
+            index: None,
+            name_id: Some(name_id),
         })?;
     let root: [u8; ROOT_LEN] = v
         .get("root")
         .and_then(Value::as_bytes)
         .and_then(|b| b.try_into().ok())
-        .ok_or(Error::Manifest {
-            what: "external entry is missing `root`, or it is not a 32-byte string",
+        .ok_or(Error::ManifestEntry {
+            what: "an `external` entry is missing `root`, or it is not a 32-byte string",
+            index: None,
+            name_id: Some(name_id),
         })?;
     let list = v
         .get("mirrors")
         .and_then(Value::as_array)
-        .ok_or(Error::Manifest {
-            what: "external entry is missing `mirrors`, or it is not an array",
+        .ok_or(Error::ManifestEntry {
+            what: "an `external` entry is missing `mirrors`, or it is not an array",
+            index: None,
+            name_id: Some(name_id),
         })?;
     if list.is_empty() {
-        return Err(Error::Manifest {
-            what: "external entry has an empty `mirrors` list",
+        return Err(Error::ManifestEntry {
+            what: "an `external` entry has an empty `mirrors` list",
+            index: None,
+            name_id: Some(name_id),
         });
     }
     let mut mirrors = Vec::with_capacity(list.len());
-    for m in list {
-        let s = m.as_text().ok_or(Error::Manifest {
-            what: "external entry `mirrors` contains a non-text value",
+    for (index, m) in list.iter().enumerate() {
+        let s = m.as_text().ok_or(Error::ManifestEntry {
+            what: "an `external` `mirrors` entry is not text",
+            index: Some(index),
+            name_id: Some(name_id),
         })?;
         if s.is_empty() || s.len() > MAX_MIRROR_LEN {
-            return Err(Error::Manifest {
-                what: "external entry mirror URL is empty or too long",
+            return Err(Error::ManifestEntry {
+                what: "an `external` mirror URL is empty or too long",
+                index: Some(index),
+                name_id: Some(name_id),
             });
         }
         mirrors.push(s);
@@ -497,7 +551,11 @@ const fn is_bidi_control(c: char) -> bool {
 /// renders as a different extension than it has is the classic version of this
 /// attack. Rejecting at the format boundary covers every consumer, including the
 /// ones not written yet.
-fn check_name(n: &str) -> Result<()> {
+///
+/// Returns the *reason* rather than an [`Error`] so the caller can attach the entry's
+/// index, which it alone knows. The reason is static, so no part of the name is ever
+/// echoed into a diagnostic.
+fn check_name(n: &str) -> Option<&'static str> {
     let bad = n.is_empty()
         || n.len() > MAX_NAME_LEN
         || n == "."
@@ -505,10 +563,5 @@ fn check_name(n: &str) -> Result<()> {
         || n.bytes()
             .any(|c| c == b'/' || c == b'\\' || c < 0x20 || c == 0x7f)
         || n.chars().any(is_bidi_control);
-    if bad {
-        return Err(Error::Manifest {
-            what: "manifest name is empty, too long, path-like, or contains a control character",
-        });
-    }
-    Ok(())
+    bad.then_some("name is empty, too long, path-like, or contains a control character")
 }

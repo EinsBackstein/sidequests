@@ -7,6 +7,110 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.4.0] — 2026-09-20
+
+Closes the two post-fix issues that phase 2 must settle before building on the
+footer and the serving boundary: 70 (a sealed section's chunk index was servable)
+and 71 (the footer's signature-slot lengths were unauthenticated).
+
+**No byte-layout change.** `version_minor` stays `3` and every `.ctf` file is
+byte-identical. This is a version break rather than a patch only because §15
+reserves a change to the signature transcript construction for one.
+
+### Fixed
+
+- **A `SEALED` section's chunk index is no longer served (C8).** `Bundle::chunk_index`
+  returned a root-verified index for a `SEALED` record, or for one whose kind this
+  build does not implement, while `section_bytes` refused the same record. Each
+  entry is a chaining value of the section's **plaintext** (spec §9.1), so the index
+  is a plaintext-derived guess-confirmation oracle: a caller with no key could
+  confirm guesses about contents the serving boundary refuses to hand over. The
+  guards now mirror `section_bytes`, and `ctf inspect` reports that an index was not
+  read instead of failing the whole inspection. New rule C8 states it normatively.
+- **The two signature-slot lengths are now signed (transcript `v1` → `v2`).** F3–F5
+  bound each length, require both-or-neither, and fix their sum, but leave the split
+  between the classical and post-quantum slots free — and §8.1 locates the slots
+  from those very fields, while nothing else (not the §8.3 root, which covers the
+  header and table only) commits to them. An attacker could exchange the two lengths
+  and steer a verifier that trusted the fields to different slot boundaries. The
+  §8.4 transcript now covers `sig_classical_len` and `sig_pq_len` as well; any change
+  to the split fails both signatures. A `v1` transcript is not accepted, and a
+  verifier must derive slot boundaries from `suite_id`'s suite rather than the
+  fields.
+
+Neither change can invalidate an existing artifact: phase 1 produces unsigned
+bundles and does not verify signatures, so no signed bundle exists for the transcript
+change to break, and C8 only withholds an index from a section no 0.3 writer can
+emit.
+
+163 tests, zero clippy warnings, `unsafe_code = forbid`, one dependency.
+
+## [0.3.1] — 2026-09-20
+
+The review-debt release. Everything the first multi-agent review found is now
+closed, the specification's weak spots are corrected or pinned, and a post-fix
+re-review's new findings are recorded and deferred rather than folded in.
+
+**No on-disk change.** `version_minor` stays `3` and every 0.3 file is byte-identical;
+this is the same container with tighter code, better diagnostics, and clearer text.
+0.3.0's entry below is preserved as the historical record of what that tag contains.
+
+### Changed — chunk verification is enforced by a type
+
+`ChunkIndex::verify_root` now consumes the index and returns a
+`VerifiedChunkIndex`, which owns the `chunk_size` the record fixed and is the only
+type carrying `verify_chunk`. C6 ("reduce the index to the root before checking any
+chunk") and C7 ("expose no chunk before it passes C5") stop being doc comments and
+become unwritable in the wrong order. Two `compile_fail` doctests pin that a bare
+index has no per-chunk method and that no method returns chunk bytes.
+
+### Changed — diagnostics name the entry
+
+New `Error::ManifestEntry` carries an index, a `name_id`, or a mirror position —
+numbers, never text, so the no-oracle rule holds — for the `names`, `external`, and
+`mirrors` rules. `ctf inspect` prints every section's `root` (the digest an operator
+needs to check an out-of-band fetch) and marks externally stored sections.
+
+### Changed — the spec is implementable alone
+
+- **§9.2 is pinned to BLAKE3 specification revision `20211102173700`**, with the
+  parent-node and root compression given in full and a worked three-chunk example
+  whose intermediate chaining values are printed. An independent reimplementation
+  reproduced the example and §11's golden vector.
+- **§7.3 no longer claims `crit` catches typos.** Criticality is reader forward
+  compatibility; typo detection belongs to `ctf pack` (recorded as a phase 3
+  requirement in `docs/ROADMAP.md`).
+- **§8.2 cites F4 for the downgrade check**, not a requirement label that collides
+  with record rule R1, and states plainly that key distribution is unspecified.
+- `cv(i)` is stated to be the non-root chaining value of an aligned subtree, not a
+  single-chunk value.
+
+### Added — tests and fuzz coverage
+
+- **Every previously untested rule** now has a single-property fixture: R17, R20, T7,
+  C7, M2–M6, M8, M11–M18, and M20.
+- **The `section_table` fuzz target reaches `validate_layout`**, so T1–T8 are fuzzed;
+  a committed seed is asserted to reach T8.
+- 161 tests, zero clippy warnings, still `unsafe_code = "forbid"`, one dependency.
+
+### Fixed
+
+- **`ChunkIndex::parse` accepted trailing bytes** while `to_bytes` dropped them, so
+  one index had two byte spellings and the documented round trip did not hold. It now
+  requires exactly `count × 32` bytes (`Error::TrailingBytes`), and the fuzz oracles
+  compare against the whole input.
+- **`Manifest::validate_against` was O(records × external entries).** Both lookups are
+  built once, so cross-validation is linear in the section count capped at 4096.
+
+### Review debt
+
+All first-review findings (B1–B4, H1–H6, L1–L8) are closed. The post-fix re-review's
+new findings are tickets 70–97, explicitly deferred so the tagged tree is exactly the
+tree the review saw; see `docs/reviews/0.3-phase1/post-fix/REVIEW.md`. Phase 2 must
+settle two before building on them: **71** (the footer's signature-slot lengths are
+in neither the root nor the transcript) and **70** (a sealed section's chunk index is
+served while its plaintext is refused).
+
 ## [0.3.0] — 2026-08-16
 
 Phase 1 complete: the container is whole. A `.ctf` now carries a manifest, commits
@@ -365,6 +469,9 @@ requirement and why the two mechanisms are not alternatives.
   byte-identical chunks still get different chaining values.
 
 ### Known issues
+
+**Superseded: every item below was fixed in [0.3.1].** This list is preserved
+because it describes the 0.3.0 tag as shipped; do not read it as the current state.
 
 Found by a six-role multi-agent review of this release (`docs/reviews/0.3-phase1/`,
 with the exact prompts committed alongside the reports) and a second verification

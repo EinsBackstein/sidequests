@@ -95,14 +95,40 @@ fn index_round_trips() {
 fn index_verifies_each_chunk_independently() {
     let d = data(4096 * 4 + 100);
     let index = ChunkIndex::build(&d, 4096).unwrap();
-    index
-        .verify_root(blake3::hash(&d).as_bytes())
+    // Reducing the index to the root is what yields the only type that can check a
+    // chunk, so the ordering cannot be reversed.
+    let index = index
+        .verify_root(blake3::hash(&d).as_bytes(), 4096)
         .expect("index must reduce to the section root");
     for i in 0..5u64 {
         let start = i as usize * 4096;
         let end = (start + 4096).min(d.len());
-        index.verify_chunk(i, &d[start..end], 4096).unwrap();
+        index.verify_chunk(i, &d[start..end]).unwrap();
     }
+}
+
+/// C6, as a type rather than a comment. A chunk cannot be checked against an index
+/// that has not already been shown to reduce to the committed root: the wrong root
+/// yields no [`ctf_format::chunk::VerifiedChunkIndex`], and a bare `ChunkIndex` has
+/// no per-chunk method at all (pinned by a `compile_fail` doctest on
+/// `ChunkIndex::verify_root`).
+#[test]
+fn a_chunk_cannot_be_checked_against_an_unverified_index() {
+    let d = data(4096 * 3);
+    let index = ChunkIndex::build(&d, 4096).unwrap();
+    // A forged root is rejected here, before any chunk is in play.
+    assert!(matches!(
+        index.verify_root(&[0u8; 32], 4096),
+        Err(Error::RootMismatch { at: "chunk index" })
+    ));
+    // The size the record fixed is validated here too, so a verified index cannot
+    // carry a size that would reach `chunk_cv`'s panic path.
+    assert!(matches!(
+        ChunkIndex::build(&d, 4096)
+            .unwrap()
+            .verify_root(blake3::hash(&d).as_bytes(), 1),
+        Err(Error::BadChunkSize { got: 1 })
+    ));
 }
 
 /// A flipped byte inside one chunk is caught by that chunk's entry alone — the
@@ -110,11 +136,15 @@ fn index_verifies_each_chunk_independently() {
 #[test]
 fn index_rejects_a_flipped_chunk() {
     let d = data(4096 * 3);
-    let index = ChunkIndex::build(&d, 4096).unwrap();
+    let root = *blake3::hash(&d).as_bytes();
+    let index = ChunkIndex::build(&d, 4096)
+        .unwrap()
+        .verify_root(&root, 4096)
+        .unwrap();
     let mut bad = d[4096..8192].to_vec();
     bad[0] ^= 1;
     assert!(matches!(
-        index.verify_chunk(1, &bad, 4096),
+        index.verify_chunk(1, &bad),
         Err(Error::RootMismatch { at: "chunk" })
     ));
 }
@@ -124,9 +154,13 @@ fn index_rejects_a_flipped_chunk() {
 #[test]
 fn index_rejects_swapped_chunks() {
     let d = data(4096 * 3);
-    let index = ChunkIndex::build(&d, 4096).unwrap();
-    assert!(index.verify_chunk(0, &d[4096..8192], 4096).is_err());
-    assert!(index.verify_chunk(1, &d[0..4096], 4096).is_err());
+    let root = *blake3::hash(&d).as_bytes();
+    let index = ChunkIndex::build(&d, 4096)
+        .unwrap()
+        .verify_root(&root, 4096)
+        .unwrap();
+    assert!(index.verify_chunk(0, &d[4096..8192]).is_err());
+    assert!(index.verify_chunk(1, &d[0..4096]).is_err());
 }
 
 /// Position binding, isolated from content: two byte-identical chunks still get
@@ -152,7 +186,7 @@ fn index_rejects_a_forged_entry() {
     index_bytes[0] ^= 1;
     let forged = ChunkIndex::parse(&index_bytes, 3).unwrap();
     assert!(matches!(
-        forged.verify_root(blake3::hash(&d).as_bytes()),
+        forged.verify_root(blake3::hash(&d).as_bytes(), 4096),
         Err(Error::RootMismatch { at: "chunk index" })
     ));
 }
@@ -173,6 +207,20 @@ fn index_rejects_truncation() {
     assert!(matches!(
         ChunkIndex::parse(&bytes[..bytes.len() - 1], 3),
         Err(Error::Truncated { .. })
+    ));
+}
+
+/// The other direction: bytes beyond `count × 32`. Accepting them and dropping
+/// them on re-encode would give one index two byte spellings, which is exactly what
+/// the commitment over bytes forbids.
+#[test]
+fn index_rejects_trailing_bytes() {
+    let d = data(4096 * 3);
+    let mut bytes = ChunkIndex::build(&d, 4096).unwrap().to_bytes();
+    bytes.push(0);
+    assert!(matches!(
+        ChunkIndex::parse(&bytes, 3),
+        Err(Error::TrailingBytes { at: 96, len: 97 })
     ));
 }
 
@@ -291,14 +339,63 @@ fn chunk_cv_rejects_sizes_outside_the_legal_range() {
     assert!(chunk_cv(&[0], 1, MIN_CHUNK_SIZE).is_ok());
 }
 
-/// The same guard through the public verification path, so a caller cannot reach
-/// the panic by going one level up.
+/// C7: a reader MUST NOT expose a chunk's bytes before that chunk passes C5.
+///
+/// The library enforces this by not having an accessor that returns chunk bytes at
+/// all — `verify_chunk` returns `Result<()>`, and the caller supplies the bytes it
+/// is checking (pinned by the `compile_fail` doctest on `VerifiedChunkIndex`). This
+/// test pins the behaviour that remains: success is signalled by `Ok(())`, and a
+/// chunk that fails C5 yields an error, never bytes.
 #[test]
-fn verify_chunk_rejects_sizes_outside_the_legal_range() {
-    let d = data(MIN_CHUNK_SIZE as usize * 2);
-    let index = ChunkIndex::build(&d, MIN_CHUNK_SIZE).unwrap();
+fn c7_chunk_bytes_are_never_exposed_without_passing_c5() {
+    let d = data(4096 * 2);
+    let root = *blake3::hash(&d).as_bytes();
+    let index = ChunkIndex::build(&d, 4096)
+        .unwrap()
+        .verify_root(&root, 4096)
+        .unwrap();
+    assert_eq!(index.verify_chunk(0, &d[..4096]), Ok(()));
+
+    let mut bad = d[..4096].to_vec();
+    bad[0] ^= 1;
     assert!(matches!(
-        index.verify_chunk(1, &[0], 1),
-        Err(Error::BadChunkSize { got: 1 })
+        index.verify_chunk(0, &bad),
+        Err(Error::RootMismatch { at: "chunk" })
     ));
+}
+
+/// The guard now lives where the size enters the verified type. A caller can no
+/// longer hand `chunk_cv` an illegal size through the verification path, because
+/// `VerifiedChunkIndex::verify_chunk` takes no size at all — so the old direct
+/// `verify_chunk(..., 1)` call is unrepresentable, and this is the replacement.
+#[test]
+fn verified_index_rejects_sizes_outside_the_legal_range() {
+    let d = data(MIN_CHUNK_SIZE as usize * 2);
+    let root = *blake3::hash(&d).as_bytes();
+    for bad in [
+        0,
+        1,
+        2,
+        2048,
+        MIN_CHUNK_SIZE / 2,
+        MIN_CHUNK_SIZE + 1,
+        MAX_CHUNK_SIZE * 2,
+    ] {
+        assert!(
+            matches!(
+                ChunkIndex::build(&d, MIN_CHUNK_SIZE)
+                    .unwrap()
+                    .verify_root(&root, bad),
+                Err(Error::BadChunkSize { .. })
+            ),
+            "chunk_size {bad} must be rejected"
+        );
+    }
+    // The smallest legal size still works, so the guard rejects rather than blocks.
+    assert!(
+        ChunkIndex::build(&d, MIN_CHUNK_SIZE)
+            .unwrap()
+            .verify_root(&root, MIN_CHUNK_SIZE)
+            .is_ok()
+    );
 }

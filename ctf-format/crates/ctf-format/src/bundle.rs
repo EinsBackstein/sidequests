@@ -8,7 +8,7 @@
 use crate::{
     Error, HEADER_LEN, Header, Result, SECTION_RECORD_LEN, SectionFlags, SectionKind,
     SectionRecord,
-    chunk::{self, ChunkIndex},
+    chunk::{self, ChunkIndex, VerifiedChunkIndex},
     footer::{Footer, MIN_FOOTER_LEN, ROOT_LEN, Signing, commitment_root},
     manifest::Manifest,
     section::{parse_table, validate_layout},
@@ -163,15 +163,36 @@ impl<'a> Bundle<'a> {
     /// `Ok(None)` when the section has no index. The root check happens here rather
     /// than being left to the caller because an unchecked index is worse than none:
     /// per-chunk verification against an attacker's index proves nothing.
-    pub fn chunk_index(&self, record: &SectionRecord) -> Result<Option<ChunkIndex>> {
+    ///
+    /// Returns a [`VerifiedChunkIndex`], which is the only type that can check a
+    /// chunk — so the ordering C6 requires (reduce the index to the root, then check
+    /// chunks) cannot be reversed, and the `chunk_size` the record fixed travels with
+    /// the index instead of being re-supplied per call.
+    ///
+    /// **The index is refused for a section the serving boundary refuses (C8).** An
+    /// entry is a chaining value of the section's *plaintext* (spec §9.1), so it is
+    /// information about contents a reader must not serve: exposing it for a `SEALED`
+    /// section, or for a kind this build does not implement, would hand out a
+    /// plaintext-derived guess-confirmation oracle while `section_bytes` refuses the
+    /// bytes themselves. This mirrors the guards in [`Bundle::section_bytes`].
+    pub fn chunk_index(&self, record: &SectionRecord) -> Result<Option<VerifiedChunkIndex>> {
+        if !record.kind.is_known() {
+            return Err(Error::Inconsistent {
+                what: "a section of a kind this build does not implement has no readable chunk index",
+            });
+        }
+        if record.flags.sealed() {
+            return Err(Error::Inconsistent {
+                what: "a SEALED section's chunk index is not readable in this version",
+            });
+        }
         let Some((start, end)) = record.index_range()? else {
             return Ok(None);
         };
         let bytes = slice(self.file, start, end, "chunk index")?;
         let count = chunk::chunk_count(record.len_plain, record.chunk_size)?;
         let index = ChunkIndex::parse(bytes, count)?;
-        index.verify_root(&record.root)?;
-        Ok(Some(index))
+        Ok(Some(index.verify_root(&record.root, record.chunk_size)?))
     }
 
     /// Verify every inline, unencrypted, uncompressed section against its root.

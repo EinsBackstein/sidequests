@@ -105,6 +105,24 @@ fn mark_encrypted(file: &mut [u8], i: usize) {
     file[footer..footer + 32].copy_from_slice(&root);
 }
 
+/// Make the section at table index `i` `SEALED` **and** `AEAD-STREAM`, re-rooting the
+/// commitment so the file still opens. R21 requires the pair, so a sealed section
+/// the phase-1 writer cannot emit has to be built by hand.
+fn mark_sealed_encrypted(file: &mut [u8], i: usize) {
+    let header = Header::parse(file).unwrap();
+    let table = header.section_table_off as usize;
+    let at = table + i * SECTION_RECORD_LEN;
+    // Replace the flags outright: R5 forbids SEALED together with PLAYER_VISIBLE.
+    file[at + 4..at + 6].copy_from_slice(&SectionFlags::SEALED.to_le_bytes());
+    file[at + 6] = 1; // OFF_ENC, Encryption::AeadStream
+    let root = commitment_root(
+        &file[..HEADER_LEN as usize],
+        &file[table..table + header.section_table_count as usize * SECTION_RECORD_LEN],
+    );
+    let footer = header.footer_off as usize;
+    file[footer..footer + 32].copy_from_slice(&root);
+}
+
 // ---------------------------------------------------------------------------
 // Round trips
 // ---------------------------------------------------------------------------
@@ -314,10 +332,11 @@ fn artifact_bundle_round_trips_with_a_chunk_index() {
 
     let index = b.chunk_index(artifact).unwrap().unwrap();
     assert_eq!(index.entries().len(), 2);
+    assert_eq!(index.chunk_size(), 4096);
     let bytes = b.section_bytes(artifact).unwrap();
     assert_eq!(bytes.len(), 5000);
-    index.verify_chunk(0, &bytes[..4096], 4096).unwrap();
-    index.verify_chunk(1, &bytes[4096..], 4096).unwrap();
+    index.verify_chunk(0, &bytes[..4096]).unwrap();
+    index.verify_chunk(1, &bytes[4096..]).unwrap();
 }
 
 /// The manifest section is the only one whose root is checked during `parse`;
@@ -401,15 +420,21 @@ fn commitment_root_is_the_documented_construction() {
 
 /// The transcript is fixed by design §6 and both signatures cover it identically.
 /// Phase 1 cannot sign, but it can pin the bytes phase 2 will sign.
+///
+/// v2 binds the two signature-slot lengths. F3–F5 leave the split between the two
+/// slots free, and §8.1 locates the slots from those fields, so without this the
+/// same bytes could be read with two different slot boundaries.
 #[test]
 fn signature_transcript_is_the_documented_construction() {
     let root = [0xab; 32];
-    let t = sig_input(1, &root, 8448);
-    assert_eq!(&t[..17], b"ctf/footer-sig/v1");
+    let t = sig_input(1, 64, 3309, &root, 8448);
+    assert_eq!(&t[..17], b"ctf/footer-sig/v2");
     assert_eq!(&t[17..19], &1u16.to_le_bytes());
-    assert_eq!(&t[19..51], &root);
-    assert_eq!(&t[51..59], &8448u64.to_le_bytes());
-    assert_eq!(t.len(), 59);
+    assert_eq!(&t[19..23], &64u32.to_le_bytes());
+    assert_eq!(&t[23..27], &3309u32.to_le_bytes());
+    assert_eq!(&t[27..59], &root);
+    assert_eq!(&t[59..67], &8448u64.to_le_bytes());
+    assert_eq!(t.len(), 67);
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +696,7 @@ fn manifest_rejects_path_like_names() {
         assert!(
             matches!(
                 Manifest::decode(&v.encode().unwrap()),
-                Err(Error::Manifest { .. })
+                Err(Error::ManifestEntry { .. })
             ),
             "accepted the name {bad:?}"
         );
@@ -710,7 +735,7 @@ fn manifest_rejects_bidi_controls_in_names() {
         assert!(
             matches!(
                 Manifest::decode(&v.encode().unwrap()),
-                Err(Error::Manifest { .. })
+                Err(Error::ManifestEntry { .. })
             ),
             "accepted the name {bad:?}"
         );
@@ -757,6 +782,265 @@ fn manifest_rejects_a_bad_id() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Manifest rules with no other dedicated test (M2-M6, M8, M11-M18)
+// ---------------------------------------------------------------------------
+
+/// A minimal valid manifest map. Tests mutate this vector rather than appending a
+/// duplicate required key, which the canonical encoder rejects before `decode`
+/// would ever see it.
+fn base_manifest() -> Vec<(Value, Value)> {
+    vec![
+        (Value::Text("spec".into()), Value::Uint(1)),
+        (Value::Text("id".into()), Value::Text("x".into())),
+        (Value::Text("name".into()), Value::Text("X".into())),
+        (Value::Text("names".into()), Value::Array(vec![])),
+    ]
+}
+
+fn manifest_error(entries: Vec<(Value, Value)>) -> Error {
+    let bytes = Value::Map(entries)
+        .encode()
+        .expect("test manifest must encode canonically");
+    Manifest::decode(&bytes).expect_err("test manifest must be rejected")
+}
+
+/// M2: the outermost value must be a map.
+#[test]
+fn m2_manifest_must_be_a_map() {
+    let bytes = Value::Array(vec![]).encode().unwrap();
+    assert!(matches!(
+        Manifest::decode(&bytes),
+        Err(Error::Manifest { .. })
+    ));
+}
+
+/// M3: every top-level key must be text.
+#[test]
+fn m3_manifest_keys_must_be_text() {
+    let entries = vec![(Value::Uint(1), Value::Uint(2))];
+    assert!(matches!(manifest_error(entries), Error::Manifest { .. }));
+}
+
+/// M4/M5: `spec` must be present, an unsigned integer, and at least 1.
+#[test]
+fn m4_m5_spec_must_be_a_positive_uint() {
+    let mut not_uint = base_manifest();
+    not_uint[0] = (Value::Text("spec".into()), Value::Text("1".into()));
+    assert!(matches!(manifest_error(not_uint), Error::Manifest { .. }));
+
+    let mut zero = base_manifest();
+    zero[0] = (Value::Text("spec".into()), Value::Uint(0));
+    assert!(matches!(manifest_error(zero), Error::Manifest { .. }));
+}
+
+/// M6: `crit` must be an array of text strings.
+#[test]
+fn m6_crit_must_be_an_array_of_text() {
+    let mut not_array = base_manifest();
+    not_array.push((Value::Text("crit".into()), Value::Uint(1)));
+    assert!(matches!(manifest_error(not_array), Error::Manifest { .. }));
+
+    let mut non_text = base_manifest();
+    non_text.push((
+        Value::Text("crit".into()),
+        Value::Array(vec![Value::Uint(1)]),
+    ));
+    assert!(matches!(manifest_error(non_text), Error::Manifest { .. }));
+}
+
+/// M8: a `crit` entry must name a key that is present. (M7 — a key the reader does
+/// not implement — has its own test above.)
+#[test]
+fn m8_crit_must_name_a_present_key() {
+    let mut entries = base_manifest();
+    // `category` is a known key, but it is absent from this manifest.
+    entries.push((
+        Value::Text("crit".into()),
+        Value::Array(vec![Value::Text("category".into())]),
+    ));
+    assert!(matches!(manifest_error(entries), Error::Manifest { .. }));
+}
+
+/// M11: `category` and `description` are optional, but must be text when present.
+#[test]
+fn m11_category_and_description_must_be_text() {
+    for key in ["category", "description"] {
+        let mut entries = base_manifest();
+        entries.push((Value::Text(key.into()), Value::Uint(1)));
+        assert!(
+            matches!(manifest_error(entries), Error::Manifest { .. }),
+            "{key} must be rejected when it is not text"
+        );
+    }
+}
+
+/// M12: `version` is optional, but must be an unsigned integer.
+#[test]
+fn m12_version_must_be_a_uint() {
+    let mut entries = base_manifest();
+    entries.push((Value::Text("version".into()), Value::Text("1".into())));
+    assert!(matches!(manifest_error(entries), Error::Manifest { .. }));
+}
+
+/// M14: the name table cannot exceed the `name_id` space.
+#[test]
+fn m14_name_table_cannot_exceed_the_name_id_space() {
+    let mut entries = base_manifest();
+    entries[3] = (
+        Value::Text("names".into()),
+        Value::Array(
+            (0..=ctf_format::manifest::MAX_NAMES)
+                .map(|i| Value::Text(format!("n{i}")))
+                .collect(),
+        ),
+    );
+    assert!(matches!(manifest_error(entries), Error::Manifest { .. }));
+}
+
+/// M15: a `names` entry must be text. (Shape violations are covered by
+/// `manifest_rejects_path_like_names` and `manifest_rejects_bidi_controls_in_names`.)
+#[test]
+fn m15_names_entries_must_be_text() {
+    let mut entries = base_manifest();
+    entries[3] = (
+        Value::Text("names".into()),
+        Value::Array(vec![Value::Uint(1)]),
+    );
+    // The diagnostic names the entry by index, never by its non-text content.
+    assert!(matches!(
+        manifest_error(entries),
+        Error::ManifestEntry { index: Some(0), .. }
+    ));
+}
+
+/// M16: duplicate names are rejected, not resolved.
+#[test]
+fn m16_duplicate_names_are_rejected() {
+    let mut entries = base_manifest();
+    entries[3] = (
+        Value::Text("names".into()),
+        Value::Array(vec![Value::Text("a".into()), Value::Text("a".into())]),
+    );
+    assert!(matches!(
+        manifest_error(entries),
+        Error::ManifestEntry { .. }
+    ));
+}
+
+/// M17: the `external` value must be a map, keyed by unsigned integers within the
+/// `name_id` space.
+#[test]
+fn m17_external_map_shape() {
+    // Not a map.
+    let mut not_map = base_manifest();
+    not_map.push((Value::Text("external".into()), Value::Uint(1)));
+    assert!(matches!(manifest_error(not_map), Error::Manifest { .. }));
+
+    // A key that is not an unsigned integer.
+    let mut bad_key = base_manifest();
+    bad_key.push((
+        Value::Text("external".into()),
+        Value::Map(vec![(Value::Bool(true), Value::Map(vec![]))]),
+    ));
+    assert!(matches!(
+        manifest_error(bad_key),
+        Error::ManifestEntry { .. }
+    ));
+
+    // A key outside the `name_id` space.
+    let mut out_of_range = base_manifest();
+    out_of_range.push((
+        Value::Text("external".into()),
+        Value::Map(vec![(
+            Value::Uint(70_000),
+            Value::Map(vec![
+                (Value::Text("size".into()), Value::Uint(1)),
+                (Value::Text("root".into()), Value::Bytes(vec![0; 32])),
+                (
+                    Value::Text("mirrors".into()),
+                    Value::Array(vec![Value::Text("m".into())]),
+                ),
+            ]),
+        )]),
+    ));
+    assert!(matches!(
+        manifest_error(out_of_range),
+        Error::ManifestEntry {
+            name_id: Some(70_000),
+            ..
+        }
+    ));
+}
+
+/// M18: an `external` entry's required fields, types, and `root` length.
+#[test]
+fn m18_external_entry_shape() {
+    let entry_without = |missing: &str| -> Vec<(Value, Value)> {
+        let mut fields = vec![
+            (Value::Text("size".into()), Value::Uint(1)),
+            (Value::Text("root".into()), Value::Bytes(vec![0; 32])),
+            (
+                Value::Text("mirrors".into()),
+                Value::Array(vec![Value::Text("m".into())]),
+            ),
+        ];
+        fields.retain(|(k, _)| k.as_text() != Some(missing));
+        fields
+    };
+
+    for missing in ["size", "root", "mirrors"] {
+        let mut entries = base_manifest();
+        entries.push((
+            Value::Text("external".into()),
+            Value::Map(vec![(Value::Uint(1), Value::Map(entry_without(missing)))]),
+        ));
+        assert!(
+            matches!(manifest_error(entries), Error::ManifestEntry { .. }),
+            "an external entry missing {missing} must be rejected"
+        );
+    }
+
+    // `root` present but not exactly 32 bytes.
+    let mut short_root = base_manifest();
+    short_root.push((
+        Value::Text("external".into()),
+        Value::Map(vec![(
+            Value::Uint(1),
+            Value::Map(vec![
+                (Value::Text("size".into()), Value::Uint(1)),
+                (Value::Text("root".into()), Value::Bytes(vec![0; 3])),
+                (
+                    Value::Text("mirrors".into()),
+                    Value::Array(vec![Value::Text("m".into())]),
+                ),
+            ]),
+        )]),
+    ));
+    assert!(matches!(
+        manifest_error(short_root),
+        Error::ManifestEntry { .. }
+    ));
+
+    // An empty `mirrors` list.
+    let mut empty_mirrors = base_manifest();
+    empty_mirrors.push((
+        Value::Text("external".into()),
+        Value::Map(vec![(
+            Value::Uint(1),
+            Value::Map(vec![
+                (Value::Text("size".into()), Value::Uint(1)),
+                (Value::Text("root".into()), Value::Bytes(vec![0; 32])),
+                (Value::Text("mirrors".into()), Value::Array(vec![])),
+            ]),
+        )]),
+    ));
+    assert!(matches!(
+        manifest_error(empty_mirrors),
+        Error::ManifestEntry { .. }
+    ));
+}
+
 /// Every section must be nameable, or a section exists that nothing can refer to.
 #[test]
 fn rejects_a_name_id_past_the_name_table() {
@@ -771,12 +1055,101 @@ fn rejects_a_name_id_past_the_name_table() {
         )],
     )
     .unwrap_err();
-    assert!(matches!(err, Error::Manifest { .. }));
+    assert!(matches!(
+        err,
+        Error::ManifestEntry {
+            name_id: Some(0),
+            ..
+        }
+    ));
 }
 
-// ---------------------------------------------------------------------------
-// External sections
-// ---------------------------------------------------------------------------
+/// Entry-level diagnostics: a manifest error names the offending entry by *number*,
+/// so an operator can find it across a 50-artifact bundle without hand-decoding
+/// CBOR. The number is an index or a `name_id`, never the text, so the diagnostic
+/// stays an oracle for nothing (spec §13).
+#[test]
+fn manifest_errors_name_the_offending_entry_by_number() {
+    // A bad `names` entry: the second one, at index 1.
+    let v = Value::Map(vec![
+        (Value::Text("spec".into()), Value::Uint(1)),
+        (Value::Text("id".into()), Value::Text("x".into())),
+        (Value::Text("name".into()), Value::Text("X".into())),
+        (
+            Value::Text("names".into()),
+            Value::Array(vec![
+                Value::Text("manifest".into()),
+                Value::Text("bad/name".into()),
+            ]),
+        ),
+    ]);
+    let err = Manifest::decode(&v.encode().unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::ManifestEntry {
+            index: Some(1),
+            name_id: None,
+            ..
+        }
+    ));
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("bad/name"),
+        "the diagnostic echoed attacker text: {msg}"
+    );
+    assert!(
+        msg.contains("entry 1"),
+        "the diagnostic lost the index: {msg}"
+    );
+
+    // A bad mirror inside the `external` entry for `name_id` 1: an over-long URL at
+    // position 0. The URL is attacker text and must not reach the diagnostic.
+    let long = format!("https://secret.example/{}", "a".repeat(3000));
+    let v = Value::Map(vec![
+        (Value::Text("spec".into()), Value::Uint(1)),
+        (Value::Text("id".into()), Value::Text("x".into())),
+        (Value::Text("name".into()), Value::Text("X".into())),
+        (
+            Value::Text("names".into()),
+            Value::Array(vec![
+                Value::Text("manifest".into()),
+                Value::Text("payload".into()),
+            ]),
+        ),
+        (
+            Value::Text("external".into()),
+            Value::Map(vec![(
+                Value::Uint(1),
+                Value::Map(vec![
+                    (Value::Text("size".into()), Value::Uint(9)),
+                    (Value::Text("root".into()), Value::Bytes(vec![0; 32])),
+                    (
+                        Value::Text("mirrors".into()),
+                        Value::Array(vec![Value::Text(long)]),
+                    ),
+                ]),
+            )]),
+        ),
+    ]);
+    let err = Manifest::decode(&v.encode().unwrap()).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::ManifestEntry {
+            index: Some(0),
+            name_id: Some(1),
+            ..
+        }
+    ));
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("secret.example"),
+        "the diagnostic echoed a mirror URL: {msg}"
+    );
+    assert!(
+        msg.contains("name_id 1") && msg.contains("entry 0"),
+        "the diagnostic lost the position: {msg}"
+    );
+}
 
 fn external_bundle(size: u64, root: [u8; 32]) -> ctf_format::Result<Vec<u8>> {
     let manifest = Manifest::decode(
@@ -905,11 +1278,103 @@ fn an_unreadable_inline_payload_is_counted_not_skipped() {
 fn external_metadata_must_agree_with_the_record() {
     assert!(matches!(
         external_bundle(41_231_986_687, [0x33; 32]),
-        Err(Error::Inconsistent { .. })
+        Err(Error::ManifestEntry { .. })
     ));
     assert!(matches!(
         external_bundle(41_231_986_688, [0x34; 32]),
-        Err(Error::Inconsistent { .. })
+        Err(Error::ManifestEntry { .. })
+    ));
+}
+
+/// M20: the `external` map's key set is exactly the `name_id`s of `EXTERNAL`
+/// sections — no more, no fewer. Checked against the section table, so it is a
+/// `validate_against` rule and needs no whole file.
+#[test]
+fn m20_external_metadata_must_match_the_external_sections() {
+    fn external_manifest(ids: &[u64]) -> Manifest {
+        let entries: Vec<(Value, Value)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    Value::Uint(*id),
+                    Value::Map(vec![
+                        (Value::Text("size".into()), Value::Uint(10)),
+                        (Value::Text("root".into()), Value::Bytes(vec![0x33; 32])),
+                        (
+                            Value::Text("mirrors".into()),
+                            Value::Array(vec![Value::Text("m".into())]),
+                        ),
+                    ]),
+                )
+            })
+            .collect();
+        Manifest::decode(
+            &Value::Map(vec![
+                (Value::Text("spec".into()), Value::Uint(1)),
+                (Value::Text("id".into()), Value::Text("x".into())),
+                (Value::Text("name".into()), Value::Text("X".into())),
+                (
+                    Value::Text("names".into()),
+                    Value::Array(vec![
+                        Value::Text("manifest".into()),
+                        Value::Text("payload".into()),
+                    ]),
+                ),
+                (Value::Text("external".into()), Value::Map(entries)),
+            ])
+            .encode()
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn record(name_id: u16, external: bool) -> SectionRecord {
+        SectionRecord {
+            kind: SectionKind::Artifact,
+            name_id,
+            flags: SectionFlags(if external {
+                SectionFlags::EXTERNAL | SectionFlags::PLAYER_VISIBLE
+            } else {
+                SectionFlags::PLAYER_VISIBLE
+            }),
+            enc: ctf_format::Encryption::None,
+            comp: ctf_format::Compression::None,
+            offset: if external { 0 } else { 4096 },
+            len_stored: if external { 0 } else { 10 },
+            len_plain: 10,
+            chunk_size: 0,
+            chunk_index_off: 0,
+            root: [0x33; 32],
+        }
+    }
+
+    // An EXTERNAL section with no metadata entry.
+    let no_metadata = Manifest::minimal("x", "X", &["manifest", "payload"]).unwrap();
+    assert!(matches!(
+        no_metadata.validate_against(&[record(1, true)]),
+        Err(Error::ManifestEntry {
+            name_id: Some(1),
+            ..
+        })
+    ));
+
+    // Metadata for a section that is not EXTERNAL.
+    assert!(matches!(
+        external_manifest(&[1]).validate_against(&[record(1, false)]),
+        Err(Error::ManifestEntry {
+            name_id: Some(1),
+            ..
+        })
+    ));
+
+    // Metadata naming a `name_id` no EXTERNAL section uses. The entry for 1 is
+    // valid, so the extra entry for 2 is what is left over.
+    assert!(matches!(
+        external_manifest(&[1, 2]).validate_against(&[record(1, true)]),
+        Err(Error::ManifestEntry {
+            name_id: Some(2),
+            ..
+        })
     ));
 }
 
@@ -974,8 +1439,10 @@ fn chunk_index_matches_a_freshly_built_one() {
     let record = *b.section(1).unwrap();
     let bytes = b.section_bytes(&record).unwrap();
     assert_eq!(
-        b.chunk_index(&record).unwrap().unwrap(),
-        ChunkIndex::build(bytes, record.chunk_size).unwrap()
+        b.chunk_index(&record).unwrap().unwrap().entries(),
+        ChunkIndex::build(bytes, record.chunk_size)
+            .unwrap()
+            .entries()
     );
 }
 
@@ -1072,6 +1539,82 @@ fn a_sealed_section_is_never_served() {
         b.section_bytes(&record),
         Err(Error::Inconsistent { .. })
     ));
+}
+
+/// C8: the chunk index of a section the serving boundary refuses is withheld too.
+/// An entry is a chaining value of the section's plaintext (§9.1), so exposing it
+/// would hand out a plaintext-derived guess-confirmation oracle for a section whose
+/// bytes `section_bytes` refuses.
+#[test]
+fn a_sealed_sections_chunk_index_is_not_served() {
+    let mut file = artifact_bundle();
+    mark_sealed_encrypted(&mut file, 1);
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert!(record.flags.sealed());
+    assert_ne!(record.chunk_index_off, 0, "the fixture must carry an index");
+    assert!(matches!(
+        b.chunk_index(&record),
+        Err(Error::Inconsistent { .. })
+    ));
+}
+
+/// The same guard for a kind this build does not implement. The section is still
+/// committed to and still verified against its root; only the plaintext-derived
+/// index is withheld.
+#[test]
+fn an_unknown_kinds_chunk_index_is_not_served() {
+    let manifest = Manifest::decode(
+        &Value::Map(vec![
+            (Value::Text("spec".into()), Value::Uint(1)),
+            (
+                Value::Text("id".into()),
+                Value::Text("from-the-future".into()),
+            ),
+            (
+                Value::Text("name".into()),
+                Value::Text("From The Future".into()),
+            ),
+            (
+                Value::Text("names".into()),
+                Value::Array(vec![
+                    Value::Text("manifest".into()),
+                    Value::Text("mystery".into()),
+                ]),
+            ),
+        ])
+        .encode()
+        .unwrap(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let payload = vec![0x77u8; 5000];
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::unknown(9).unwrap(),
+                1,
+                SectionFlags(SectionFlags::OPTIONAL | SectionFlags::PLAYER_VISIBLE),
+                &payload,
+            )
+            .chunked(4096),
+        ],
+    )
+    .unwrap();
+
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert!(!record.kind.is_known());
+    assert_ne!(record.chunk_index_off, 0, "the fixture must carry an index");
+    assert!(matches!(
+        b.chunk_index(&record),
+        Err(Error::Inconsistent { .. })
+    ));
+    // Still committed and still verified — only the index is withheld.
+    assert_eq!(b.verify_inline_sections().unwrap().verified, 2);
 }
 
 /// R21's deliberate consequence, asserted rather than left in a comment: R6 forces

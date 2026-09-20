@@ -14,11 +14,16 @@ fuzz_target!(|data: &[u8]| {
     let Ok(index) = ChunkIndex::parse(body, u64::from(count)) else {
         return;
     };
-    assert_eq!(index.to_bytes(), body[..index.entries().len() * 32]);
-    // Must not panic for any root, chunk size, or index.
-    let _ = index.verify_root(&[0u8; 32]);
-    let _ = index.verify_chunk(u64::MAX, body, 4096);
+    // Parse requires the buffer to be exactly `count × 32`, so the round trip is
+    // against the whole input, not a prefix.
+    assert_eq!(index.to_bytes(), body);
+    // Must not panic for any root or chunk size. Reducing the index to a root is the
+    // only way to reach per-chunk verification (C6), and the size then travels with
+    // the verified index rather than being re-supplied per chunk.
     for cs in [0u32, 1, 4096, u32::MAX] {
-        let _ = index.verify_chunk(0, body, cs);
+        if let Ok(verified) = index.clone().verify_root(&[0u8; 32], cs) {
+            let _ = verified.verify_chunk(u64::MAX, body);
+            let _ = verified.verify_chunk(0, body);
+        }
     }
 });
