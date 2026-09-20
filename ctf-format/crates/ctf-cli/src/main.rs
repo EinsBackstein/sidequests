@@ -29,8 +29,9 @@ use ctf_format::authoring::ChallengeDoc;
 use ctf_format::cbor::Value;
 use ctf_format::pack::{self, PackError};
 use ctf_format::{
-    Bundle, Compression, Encryption, HEADER_LEN, HybridPublicKey, HybridSigningKey, KemKeyPair,
-    Payload, Recipient, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionSpec, Signing,
+    Bundle, Compression, Encryption, EntitlementChain, HEADER_LEN, HolderKeys, HybridPublicKey,
+    HybridSigningKey, KemKeyPair, MAGIC, Payload, Recipient, SECTION_RECORD_LEN, SectionFlags,
+    SectionKind, SectionSpec, Signing, Timestamp, VERSION_MAJOR, holder_hash, seal_progress,
 };
 
 /// `ctf` — the command-line tool for `.ctf` challenge bundles.
@@ -74,6 +75,10 @@ enum Commands {
     Seal(SealArgs),
     /// Decrypt a sealed section with a recipient's secret key.
     Unseal(UnsealArgs),
+    /// Scaffold a working authoring project for an archetype.
+    Init(InitArgs),
+    /// Append a signed handoff to an entitlement chain.
+    Transfer(TransferArgs),
     /// Generate a shell completion script to stdout.
     Completions(CompletionsArgs),
 }
@@ -232,6 +237,88 @@ struct CompletionsArgs {
     shell: Shell,
 }
 
+/// `ctf init`: write an archetype scaffold, ready to `ctf validate` and `ctf pack`.
+#[derive(Args)]
+struct InitArgs {
+    /// osint, rev, pwn, web, or forensics.
+    archetype: String,
+
+    /// Directory to scaffold into. Must not already contain a `challenge.yaml`.
+    #[arg(long)]
+    out: String,
+
+    /// Challenge id for the generated `challenge.yaml`.
+    #[arg(long, default_value = "my-challenge")]
+    id: String,
+}
+
+/// `ctf transfer`: append a holder-signed `transfer` to an entitlement chain.
+///
+/// The chain is read from a `.ctf` bundle's `entitlement` section, or from a file
+/// holding the chain plaintext. The updated chain is written to `--out`; with
+/// `--bundle` it is embedded back into the input bundle instead.
+#[derive(Args)]
+struct TransferArgs {
+    /// A `.ctf` bundle with an `entitlement` section, or a chain-plaintext file.
+    input: String,
+
+    /// Where to write the updated chain, or the rewritten bundle with `--bundle`.
+    #[arg(long)]
+    out: String,
+
+    /// Challenge `id` the record is about.
+    #[arg(long)]
+    challenge: String,
+
+    /// Subject the record binds.
+    #[arg(long)]
+    subject: String,
+
+    /// The new holder's 32-byte public-key hash, lowercase hex.
+    #[arg(long, conflicts_with = "new_holder_pub")]
+    new_holder: Option<String>,
+
+    /// The new holder's hybrid signing public-key file; its hash is the new holder.
+    #[arg(long = "new-holder-pub", conflicts_with = "new_holder")]
+    new_holder_pub: Option<String>,
+
+    /// The current holder's hybrid signing key file (signs the handoff).
+    #[arg(long)]
+    holder_key: String,
+
+    /// The current holder's hybrid signing public-key file (checked against).
+    #[arg(long = "holder-pub")]
+    holder_pub: String,
+
+    /// The platform's hybrid signing key file.
+    #[arg(long)]
+    platform_key: String,
+
+    /// The platform's hybrid signing public-key file.
+    #[arg(long = "platform-pub")]
+    platform_pub: String,
+
+    /// Plaintext progress to seal to the new holder.
+    #[arg(long)]
+    progress: Option<String>,
+
+    /// The new holder's hybrid KEM public-key file (required with `--progress`).
+    #[arg(long = "holder-kem", requires = "progress")]
+    holder_kem: Option<String>,
+
+    /// Advisory timestamp stored on the record.
+    #[arg(long)]
+    timestamp: Option<i64>,
+
+    /// Embed the updated chain back into `input` and write a bundle.
+    #[arg(long)]
+    bundle: bool,
+
+    /// Crypto suite id.
+    #[arg(long, default_value_t = pack::DEFAULT_SUITE_ID)]
+    suite: u16,
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => run(cli),
@@ -261,6 +348,8 @@ fn run(cli: Cli) -> ExitCode {
         Commands::Sign(args) => run_sign(&args),
         Commands::Seal(args) => run_seal(&args),
         Commands::Unseal(args) => run_unseal(&args),
+        Commands::Init(args) => run_init(&args),
+        Commands::Transfer(args) => run_transfer(&args),
         Commands::Completions(args) => run_completions(&args),
     }
 }
@@ -519,6 +608,286 @@ fn run_unseal(args: &UnsealArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `ctf init`: write an archetype scaffold to disk.
+///
+/// The scaffold is a pure function in the library (`ctf_format::scaffold`), so
+/// this only creates directories and files. It refuses to overwrite an existing
+/// `challenge.yaml`: a scaffold is a starting point, and clobbering an author's
+/// work is worse than a second command.
+fn run_init(args: &InitArgs) -> ExitCode {
+    let files = match ctf_format::scaffold::scaffold(&args.archetype, &args.id) {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("ctf: init {}: {e}", args.archetype);
+            return ExitCode::FAILURE;
+        }
+    };
+    let root = std::path::Path::new(&args.out);
+    if root.join("challenge.yaml").exists() {
+        eprintln!(
+            "ctf: {}: already contains a challenge.yaml; refusing to overwrite",
+            args.out
+        );
+        return ExitCode::FAILURE;
+    }
+    for file in &files {
+        let path = root.join(&file.path);
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("ctf: {}: {e}", parent.display());
+            return ExitCode::FAILURE;
+        }
+        if let Err(e) = std::fs::write(&path, &file.contents) {
+            eprintln!("ctf: {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        println!("{}", path.display());
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ctf transfer`: append a holder-signed handoff.
+fn run_transfer(args: &TransferArgs) -> ExitCode {
+    match transfer(args) {
+        Ok(message) => {
+            println!("{message}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("ctf: {}: {e}", args.input);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn transfer(args: &TransferArgs) -> Result<String, Box<dyn std::error::Error>> {
+    let suite = args.suite;
+    let mut chain = read_chain(&args.input)?;
+
+    let platform_key = read_signing_key(&args.platform_key)?;
+    let platform_pub = read_public_key(&args.platform_pub)?;
+    let holder_key = read_signing_key(&args.holder_key)?;
+    let holder_pub = read_public_key(&args.holder_pub)?;
+
+    let new_holder = match (&args.new_holder, &args.new_holder_pub) {
+        (Some(hex), _) => <[u8; 32]>::try_from(hex_decode(hex)?.as_slice())
+            .map_err(|_| "--new-holder must be exactly 32 bytes of hex")?,
+        (None, Some(path)) => holder_hash(&read_public_key(path)?),
+        (None, None) => {
+            return Err("one of --new-holder or --new-holder-pub is required".into());
+        }
+    };
+
+    let payload = match (&args.progress, &args.holder_kem) {
+        (Some(progress_path), Some(kem_path)) => {
+            let plaintext = std::fs::read(progress_path)?;
+            let kem_public = read_hex_key_file(kem_path).map_err(|e| format!("{kem_path}: {e}"))?;
+            Some(seal_progress(
+                suite,
+                VERSION_MAJOR,
+                &kem_public,
+                &args.challenge,
+                &args.subject,
+                &plaintext,
+            )?)
+        }
+        (None, None) => None,
+        _ => return Err("--progress requires --holder-kem, and vice versa".into()),
+    };
+
+    let timestamp = args.timestamp.map(|v| {
+        if v < 0 {
+            Timestamp::Nint((-(v + 1)) as u64)
+        } else {
+            Timestamp::Uint(v as u64)
+        }
+    });
+
+    chain.append_transfer(
+        &args.challenge,
+        &args.subject,
+        new_holder,
+        suite,
+        &platform_key,
+        &holder_key,
+        timestamp,
+        payload,
+    )?;
+    chain.validate()?;
+
+    // Fail before writing if the keys do not actually vouch for the chain: a
+    // transfer that does not verify is not a handoff. The current holder's key is
+    // the one the predecessor record names.
+    let mut holders = HolderKeys::new();
+    holders.insert(holder_hash(&holder_pub), holder_pub);
+    chain.verify_signatures(suite, &platform_pub, &holders)?;
+
+    let encoded = chain.encode()?;
+    let written = if args.bundle {
+        let bytes = embed_entitlement(&args.input, &encoded)?;
+        std::fs::write(&args.out, &bytes)?;
+        bytes.len()
+    } else {
+        std::fs::write(&args.out, &encoded)?;
+        encoded.len()
+    };
+    Ok(format!(
+        "{}: {written} bytes, entitlement chain of {} record(s)",
+        args.out,
+        chain.len()
+    ))
+}
+
+/// Read a chain from a `.ctf` bundle's `entitlement` section, or from a file of
+/// chain plaintext. The magic check is what lets one argument accept both.
+fn read_chain(path: &str) -> Result<EntitlementChain, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.starts_with(&MAGIC) {
+        let bundle = Bundle::parse(&bytes)?;
+        let record = bundle
+            .sections
+            .iter()
+            .find(|r| r.kind == SectionKind::Entitlement)
+            .ok_or("bundle has no entitlement section")?;
+        Ok(EntitlementChain::from_bytes(
+            &bundle.section_bytes(record)?,
+        )?)
+    } else {
+        Ok(EntitlementChain::from_bytes(&bytes)?)
+    }
+}
+
+/// Re-emit `path` with its `entitlement` section replaced by `chain`, appending a
+/// section and a name-table entry when the bundle has none.
+///
+/// This is the authoring surface of ticket 44: a chain is a section of the bundle,
+/// so updating it is a rewrite, not a side file. A signed bundle is refused — a
+/// rewrite would invalidate its signature — and the writer's parse-back enforces
+/// every format rule.
+fn embed_entitlement(path: &str, chain: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let file = std::fs::read(path)?;
+    let bundle = Bundle::parse(&file)?;
+    if bundle.signing() != Signing::Unsigned {
+        return Err(
+            "refusing to rewrite a bundle that already carries signatures; a rewrite \
+             would invalidate them"
+                .into(),
+        );
+    }
+    let manifest_record = bundle
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .ok_or("bundle has no manifest section")?;
+
+    let existing = bundle
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Entitlement);
+    let (name_id, appended_name) = match existing {
+        Some(r) => (r.name_id, None),
+        None => {
+            let names = bundle.manifest.names();
+            let next = u16::try_from(names.len()).map_err(
+                |_| "the manifest name table is full; no room for an entitlement section",
+            )?;
+            (next, Some(unique_name(&names, "entitlement")))
+        }
+    };
+
+    let manifest_plain = bundle.section_bytes(manifest_record)?;
+    let mut manifest_value = Value::decode(&manifest_plain)?;
+    if let Some(name) = &appended_name {
+        append_manifest_name(&mut manifest_value, name)?;
+    }
+    let manifest_bytes = manifest_value.encode()?;
+
+    let mut payloads: Vec<std::borrow::Cow<'_, [u8]>> = Vec::with_capacity(bundle.sections.len());
+    let mut kept: Vec<usize> = Vec::with_capacity(bundle.sections.len());
+    for (i, r) in bundle.sections.iter().enumerate() {
+        if r.kind == SectionKind::Entitlement {
+            continue;
+        }
+        kept.push(i);
+        if r.kind == SectionKind::Manifest {
+            payloads.push(std::borrow::Cow::Owned(manifest_bytes.clone()));
+        } else if r.flags.contains(SectionFlags::EXTERNAL) {
+            payloads.push(std::borrow::Cow::Owned(Vec::new()));
+        } else {
+            payloads.push(bundle.section_bytes(r)?);
+        }
+    }
+
+    let mut specs: Vec<SectionSpec<'_>> = Vec::with_capacity(kept.len() + 1);
+    for (slot, &i) in kept.iter().enumerate() {
+        let Some(r) = bundle.sections.get(i) else {
+            continue;
+        };
+        let plain = payloads.get(slot).map_or(&[][..], |c| c.as_ref());
+        if r.flags.contains(SectionFlags::EXTERNAL) {
+            specs.push(SectionSpec {
+                kind: r.kind,
+                name_id: r.name_id,
+                flags: r.flags,
+                chunk_size: r.chunk_size,
+                comp: r.comp,
+                payload: Payload::External {
+                    len_plain: r.len_plain,
+                    root: r.root,
+                },
+                chunk_index: None,
+                encryption: None,
+            });
+            continue;
+        }
+        let mut spec = SectionSpec::inline(r.kind, r.name_id, r.flags, plain).chunked(r.chunk_size);
+        if r.comp == Compression::Zstd {
+            spec = spec.compressed();
+        }
+        specs.push(spec);
+    }
+    specs.push(SectionSpec::inline(
+        SectionKind::Entitlement,
+        name_id,
+        SectionFlags::empty(),
+        chain,
+    ));
+
+    let bytes = ctf_format::write_bundle(bundle.header.suite_id, &specs)?;
+    Ok(bytes)
+}
+
+/// A name not already in the table, preferring `preferred`, then
+/// `<preferred>.1`, `.2`, …; all pass the manifest's name-shape rules.
+fn unique_name(existing: &[&str], preferred: &str) -> String {
+    if !existing.contains(&preferred) {
+        return preferred.to_owned();
+    }
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("{preferred}.{n}");
+        if candidate.len() <= ctf_format::manifest::MAX_NAME_LEN
+            && !existing.contains(&candidate.as_str())
+        {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
+}
+
+/// Read a hybrid signing key from a two-line hex key file.
+fn read_signing_key(path: &str) -> Result<HybridSigningKey, Box<dyn std::error::Error>> {
+    let (classical, pq) = read_key_file(path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(HybridSigningKey { classical, pq })
+}
+
+/// Read a hybrid public key from a two-line hex key file.
+fn read_public_key(path: &str) -> Result<HybridPublicKey, Box<dyn std::error::Error>> {
+    let (classical, pq) = read_key_file(path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(HybridPublicKey { classical, pq })
 }
 
 /// `ctf completions`: emit a completion script for `shell` to stdout. Built from

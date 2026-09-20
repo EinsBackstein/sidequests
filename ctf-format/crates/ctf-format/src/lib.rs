@@ -53,6 +53,8 @@ pub mod footer;
 pub mod header;
 pub mod manifest;
 pub mod pack;
+pub mod progress;
+pub mod scaffold;
 pub mod section;
 pub mod suite;
 
@@ -63,13 +65,14 @@ pub use bundle::{
 pub use chunk::ChainingValue;
 pub use crypto::sign::{Authentication, verify_footer};
 pub use entitlement::{
-    EntitlementChain, EntitlementRecord, HolderKeys, RECORD_LABEL, RecordType, SIG_LABEL,
-    Timestamp, sig_input,
+    EntitlementChain, EntitlementRecord, HOLDER_HASH_LABEL, HolderKeys, RECORD_LABEL, RecordType,
+    SIG_LABEL, Timestamp, holder_hash, sig_input,
 };
 pub use error::{Error, Result};
 pub use footer::{Footer, Signing};
 pub use header::Header;
 pub use manifest::Manifest;
+pub use progress::{open_progress, seal_progress};
 pub use section::{
     Compression, Encryption, FutureKind, RuleSet, SectionFlags, SectionKind, SectionRecord,
 };

@@ -5,3 +5,12 @@
 # fuzz/corpus/<target>/ is committed on purpose; artifacts are not.
 /fuzz/target
 /fuzz/artifacts
+
+# Guest SDK build output. The sample is built on demand and its wasm is committed
+# as a test fixture; the SDKs are outside the workspace, so their targets are not
+# covered by `/target` above.
+/sdk/rust/target
+/sdk/sample-generator/target
+/sdk/rust/Cargo.lock
+/sdk/sample-generator/Cargo.lock
+

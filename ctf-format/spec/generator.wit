@@ -1,0 +1,34 @@
+/// The logical generator interface of `.ctf` (spec §23).
+///
+/// The concrete ABI a profile-1 host calls is the flattened core-module ABI of
+/// spec §23.2 — `memory`, `ctf_alloc`, `ctf_generate`, and `ctf_output_len` — not
+/// the component-model canonical ABI. This file is the source of truth for the
+/// interface's shape and version; §23.2 is the source of truth for the bytes a
+/// guest must export. The two are kept consistent by hand and by the host tests,
+/// which run a module built from the Rust SDK.
+package ctf:generator@1.0.0;
+
+interface api {
+    /// One named artifact byte stream. `name` indexes the manifest name table once
+    /// the output is packed into a section (spec §7.6).
+    record output {
+        name: string,
+        bytes: list<u8>,
+    }
+
+    /// What one run produces: the named outputs and the flag.
+    record generated {
+        outputs: list<output>,
+        flag: string,
+    }
+
+    /// Deterministically derive the artifacts and the flag from the seed. Pure:
+    /// the host provides no clock, network, filesystem, or randomness, and runs
+    /// the module under a pinned, deterministic feature profile (spec §23.1,
+    /// §23.6).
+    generate: func(seed: list<u8>) -> result<generated, string>;
+}
+
+world generator {
+    export api;
+}
