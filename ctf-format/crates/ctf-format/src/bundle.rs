@@ -107,11 +107,24 @@ impl<'a> Bundle<'a> {
 
     /// Whether the bundle carries signatures at all.
     ///
-    /// [`Signing::Present`] means present, **not verified**: the suite registry and
-    /// both verifiers land in phase 2. A caller that must not act on unauthenticated
-    /// content has nothing here that lets it, which is deliberate.
+    /// [`Signing::Present`] means present, **not verified**. Authenticity comes only
+    /// from [`Bundle::verify_signatures`], which needs a trusted public key the
+    /// bundle does not carry (spec §8.2).
     pub fn signing(&self) -> Signing {
         self.footer.signing()
+    }
+
+    /// Verify both hybrid signatures over the §8.4 transcript with a trusted public
+    /// key, returning [`Authentication`](crate::Authentication) only on success.
+    ///
+    /// This is step 9 of the spec §10 procedure. The trusted key is an input, never
+    /// read from the file; an unsigned bundle returns an error rather than a token.
+    /// A failure of either component is a failure of the whole.
+    pub fn verify_signatures(
+        &self,
+        public_key: &crate::HybridPublicKey,
+    ) -> core::result::Result<crate::Authentication, crate::suite::SuiteError> {
+        crate::crypto::sign::verify_footer(self.header.suite_id, &self.footer, public_key)
     }
 
     /// The transcript both signatures cover.

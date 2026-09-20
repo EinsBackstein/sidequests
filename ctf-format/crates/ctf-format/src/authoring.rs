@@ -31,6 +31,7 @@ use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 
 use crate::cbor::Value;
+use crate::manifest::{check_id, check_name};
 
 /// The highest authoring `spec` this build understands.
 ///
@@ -163,6 +164,195 @@ impl ChallengeDoc {
             out.push((text("verify"), v.to_cbor()));
         }
         out
+    }
+}
+
+/// One finding from [`ChallengeDoc::validate`].
+///
+/// `key` is the dotted path of the offending key — `generate.determinism`,
+/// `runtime.ports[0].protocol`, `sealed.members` — so an author knows exactly what to
+/// fix. Authoring input is the author's own file, not a hostile byte stream, so this
+/// names the key rather than restating the rule abstractly (spec §7.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationIssue {
+    key: String,
+    message: String,
+}
+
+impl ValidationIssue {
+    fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            message: message.into(),
+        }
+    }
+
+    /// The dotted path of the offending key.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// What is wrong with it.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "`{}`: {}", self.key, self.message)
+    }
+}
+
+impl core::error::Error for ValidationIssue {}
+
+/// One value from a fixed set, reported under its key when it is not one of them.
+fn one_of(issues: &mut Vec<ValidationIssue>, key: &str, value: &str, allowed: &[&str]) {
+    if !allowed.contains(&value) {
+        issues.push(ValidationIssue::new(
+            key,
+            format!("must be one of {}", allowed.join(", ")),
+        ));
+    }
+}
+
+fn non_empty(issues: &mut Vec<ValidationIssue>, key: &str, value: &str) {
+    if value.is_empty() {
+        issues.push(ValidationIssue::new(key, "must not be empty"));
+    }
+}
+
+/// `event_end`, `manual`, or `stage:<id>` with a non-empty id (spec §7.6).
+fn valid_release(release: &str) -> bool {
+    matches!(release, "event_end" | "manual")
+        || release
+            .strip_prefix("stage:")
+            .is_some_and(|id| !id.is_empty())
+}
+
+impl ChallengeDoc {
+    /// Check the values the typed schema cannot express, plus the policy rules that
+    /// span keys.
+    ///
+    /// The schema itself (unknown keys, required keys, value types) is enforced by
+    /// [`ChallengeDoc::from_yaml`] before this runs. What is left is *semantics*: an
+    /// enum whose value is not one of its allowed names, an `id` or output name that
+    /// violates the manifest's shape rules, and the serving policy that a section may
+    /// not be both sealed and player-visible (spec §5.3, R5).
+    ///
+    /// An empty return means the document is valid and `ctf pack` will not be
+    /// surprised by it.
+    pub fn validate(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+
+        if check_id(&self.id).is_err() {
+            issues.push(ValidationIssue::new(
+                "id",
+                "must be 1-64 bytes of lowercase ASCII letters, digits, and hyphens, \
+                 and must not begin or end with a hyphen",
+            ));
+        }
+
+        match &self.flag {
+            Some(FlagSpec::Shorthand(s)) => non_empty(&mut issues, "flag", s),
+            Some(FlagSpec::Detailed(d)) => {
+                non_empty(&mut issues, "flag.derive", &d.derive);
+                if let Some(scope) = &d.scope {
+                    one_of(
+                        &mut issues,
+                        "flag.scope",
+                        scope,
+                        &["player", "team", "event"],
+                    );
+                }
+            }
+            None => {}
+        }
+
+        if let Some(g) = &self.generate {
+            one_of(
+                &mut issues,
+                "generate.determinism",
+                &g.determinism,
+                &["strict", "flag_only", "none"],
+            );
+            let mut seen: Vec<&str> = Vec::new();
+            for (i, output) in g.outputs.iter().enumerate() {
+                let key = format!("generate.outputs[{i}].name");
+                if let Some(reason) = check_name(&output.name) {
+                    issues.push(ValidationIssue::new(key.clone(), reason));
+                }
+                if seen.contains(&output.name.as_str()) {
+                    issues.push(ValidationIssue::new(key, "duplicate output name"));
+                }
+                seen.push(&output.name);
+            }
+        }
+
+        if let Some(r) = &self.runtime {
+            one_of(
+                &mut issues,
+                "runtime.instancing",
+                &r.instancing,
+                &["shared", "per_team"],
+            );
+            non_empty(&mut issues, "runtime.image", &r.image);
+            non_empty(&mut issues, "runtime.ttl", &r.ttl);
+            non_empty(&mut issues, "runtime.resources.cpu", &r.resources.cpu);
+            non_empty(&mut issues, "runtime.resources.memory", &r.resources.memory);
+            non_empty(
+                &mut issues,
+                "runtime.readiness.timeout",
+                &r.readiness.timeout,
+            );
+            for (i, port) in r.ports.iter().enumerate() {
+                one_of(
+                    &mut issues,
+                    &format!("runtime.ports[{i}].protocol"),
+                    &port.protocol,
+                    &["tcp", "udp"],
+                );
+            }
+        }
+
+        if let Some(s) = &self.sealed {
+            if !valid_release(&s.release) {
+                issues.push(ValidationIssue::new(
+                    "sealed.release",
+                    "must be `event_end`, `manual`, or `stage:<id>`",
+                ));
+            }
+            // The serving policy, enforced here so an author sees it before packing
+            // and again in the container (R5). A member cannot be sealed and
+            // player-visible at once: it is either withheld until release or served,
+            // never both.
+            if let Some(g) = &self.generate {
+                for member in &s.members {
+                    if g.outputs
+                        .iter()
+                        .any(|o| &o.name == member && o.player_visible)
+                    {
+                        issues.push(ValidationIssue::new(
+                            "sealed.members",
+                            format!(
+                                "`{member}` is both sealed and player-visible \
+                                 (spec §5.3, R5)"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(v) = &self.verify {
+            non_empty(&mut issues, "verify.solver", &v.solver);
+            non_empty(&mut issues, "verify.expect", &v.expect);
+            if let Some(live) = &v.live {
+                non_empty(&mut issues, "verify.live.interval", &live.interval);
+            }
+        }
+
+        issues
     }
 }
 

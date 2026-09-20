@@ -13,32 +13,44 @@
 
 use std::process::ExitCode;
 
+use ctf_format::authoring::ChallengeDoc;
 use ctf_format::{Bundle, HEADER_LEN, SECTION_RECORD_LEN, SectionFlags, SectionKind, Signing};
 
 const USAGE: &str = "\
 usage: ctf inspect [--hex] [--verify] <file.ctf>
+       ctf validate <challenge.yaml>
 
-  --hex     annotated hexdump of the header, section table, and footer
-  --verify  re-hash every inline section against its root (reads the whole file).
-            Exits non-zero if any section's bytes are present but unreadable by
-            this build. External payloads are reported, not counted as failures:
-            their bytes are elsewhere by design.
+  inspect  parse a bundle and print its structures
+    --hex     annotated hexdump of the header, section table, and footer
+    --verify  re-hash every inline section against its root (reads the whole file).
+              Exits non-zero if any section's bytes are present but unreadable by
+              this build. External payloads are reported, not counted as failures:
+              their bytes are elsewhere by design.
+  validate  schema- and policy-check an authoring file, naming every offending key.
+              Exits non-zero if the document is invalid.
 ";
 
 fn main() -> ExitCode {
-    let mut hex = false;
-    let mut verify = false;
-    let mut path: Option<String> = None;
-    let mut args = std::env::args().skip(1);
-    let Some(cmd) = args.next() else {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some((cmd, rest)) = args.split_first() else {
         eprint!("{USAGE}");
         return ExitCode::FAILURE;
     };
-    if cmd != "inspect" {
-        eprintln!("ctf: unknown command `{cmd}`");
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
+    match cmd.as_str() {
+        "inspect" => run_inspect(rest),
+        "validate" => run_validate(rest),
+        other => {
+            eprintln!("ctf: unknown command `{other}`");
+            eprint!("{USAGE}");
+            ExitCode::FAILURE
+        }
     }
+}
+
+fn run_inspect(args: &[String]) -> ExitCode {
+    let mut hex = false;
+    let mut verify = false;
+    let mut path: Option<String> = None;
     for a in args {
         match a.as_str() {
             "--hex" => hex = true,
@@ -69,6 +81,56 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `ctf validate`: schema and policy check, prose errors that name the key, and an
+/// exit status that reflects validity. The point is that an author learns what is
+/// wrong *before* packing (design §10), which is why the same check is not deferred
+/// to `ctf pack`.
+fn run_validate(args: &[String]) -> ExitCode {
+    let mut path: Option<String> = None;
+    for a in args {
+        if a.starts_with('-') {
+            eprintln!("ctf: unknown option `{a}`");
+            return ExitCode::FAILURE;
+        }
+        if path.is_some() {
+            eprintln!("ctf: validate takes one file; got `{a}` as well");
+            return ExitCode::FAILURE;
+        }
+        path = Some(a.clone());
+    }
+    let Some(path) = path else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // A schema error already names the offending key (spec §7.8); a semantic or
+    // policy error is produced by `validate` below.
+    let doc = match ChallengeDoc::from_yaml(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let issues = doc.validate();
+    if issues.is_empty() {
+        println!("{path}: ok");
+        return ExitCode::SUCCESS;
+    }
+    for issue in &issues {
+        eprintln!("ctf: {path}: {issue}");
+    }
+    eprintln!("ctf: {path}: {} problem(s) found", issues.len());
+    ExitCode::FAILURE
 }
 
 fn inspect(path: &str, hex: bool, verify: bool) -> Result<(), Box<dyn std::error::Error>> {

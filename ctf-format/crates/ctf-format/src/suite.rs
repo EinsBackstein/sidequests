@@ -22,11 +22,13 @@
 //!
 //! # Status
 //!
-//! Only the *hash* role is implemented today: BLAKE3 is the one primitive the
-//! container already depends on. The remaining roles are declared here so the
-//! dispatch surface is fixed, and resolving one returns
-//! [`SuiteError::NotImplemented`] rather than panicking. Tickets 10–17 fill them in
-//! behind these traits; none of them needs to move a field to do it.
+//! All five roles are implemented for suites 1 and 2: BLAKE3 `hash`, HKDF-SHA-256
+//! `kdf`, X25519+ML-KEM-768 `kem`, AES-256-GCM / XChaCha20-Poly1305 `aead`, and
+//! Ed25519+ML-DSA-65 `signature`. The constructions are normative in spec §20.
+//!
+//! Suite 3's `signature` adds SLH-DSA, which this build does not implement, so
+//! resolving it returns [`SuiteError::NotImplemented`] naming the suite and role
+//! rather than silently reducing the hybrid to two of its three components.
 
 use crate::footer::ROOT_LEN;
 
@@ -58,7 +60,8 @@ impl Role {
     }
 }
 
-/// Why a suite or one of its primitives could not be resolved.
+/// Why a suite or one of its primitives could not be resolved, or why a
+/// primitive operation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SuiteError {
     /// No suite in the registry has this id.
@@ -66,6 +69,23 @@ pub enum SuiteError {
     /// The suite exists, but this build has not implemented the requested role
     /// yet. Reported where the primitive is used, never at header parse.
     NotImplemented { suite: u16, role: Role },
+    /// A key, nonce, ciphertext, or signature was not the length its suite
+    /// requires. Lengths are suite properties (spec §8.1), never read from the
+    /// input, so a mismatch is rejected rather than accepted and padded.
+    InvalidLength {
+        role: Role,
+        expected: usize,
+        got: usize,
+    },
+    /// A public or secret key could not be parsed. The bytes are never echoed: an
+    /// error string must not become an oracle for key material.
+    InvalidKey { role: Role },
+    /// A primitive failed for a reason its suite names. The reason is a static
+    /// description, never input bytes.
+    Primitive { role: Role, reason: &'static str },
+    /// One component of a hybrid signature failed to verify. Both must verify
+    /// (design §7, spec §8.4); a bundle carrying one valid half is a downgrade.
+    VerificationFailed { component: &'static str },
 }
 
 impl core::fmt::Display for SuiteError {
@@ -79,11 +99,80 @@ impl core::fmt::Display for SuiteError {
                     role.name()
                 )
             }
+            Self::InvalidLength {
+                role,
+                expected,
+                got,
+            } => write!(
+                f,
+                "{} input is {got} bytes, suite requires {expected}",
+                role.name()
+            ),
+            Self::InvalidKey { role } => write!(f, "invalid {} key", role.name()),
+            Self::Primitive { role, reason } => {
+                write!(f, "{} primitive failed: {reason}", role.name())
+            }
+            Self::VerificationFailed { component } => {
+                write!(f, "hybrid signature {component} component did not verify")
+            }
         }
     }
 }
 
 impl core::error::Error for SuiteError {}
+
+/// The context a KEM operation is bound to (design §7).
+///
+/// The hybrid combiner's salt is `"ctf/kem/v1" ‖ u16_le(suite_id) ‖
+/// u16_le(version_major)` and its `info` transcript ends with the length-prefixed
+/// `label`. `version_major` only is bound, never `version_minor`: binding the minor
+/// would silently re-key every bundle on a spec bump that moved no field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KemContext<'a> {
+    /// The header's `suite_id`.
+    pub suite_id: u16,
+    /// The header's `version_major`. Never the minor.
+    pub version_major: u16,
+    /// One of `storage`, `seal`, `stage:N`, or `holder` (design §7).
+    pub label: &'a [u8],
+}
+
+/// A hybrid KEM keypair. The public key and secret key are both the concatenation
+/// of a classical and a post-quantum component, in that order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KemKeyPair {
+    /// X25519 public key ‖ ML-KEM-768 encapsulation key.
+    pub public_key: Vec<u8>,
+    /// X25519 secret key ‖ ML-KEM-768 decapsulation key.
+    pub secret_key: Vec<u8>,
+}
+
+/// A hybrid public key, split into its two components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HybridPublicKey {
+    /// The classical (Ed25519) component.
+    pub classical: Vec<u8>,
+    /// The post-quantum (ML-DSA-65) component.
+    pub pq: Vec<u8>,
+}
+
+/// A hybrid signing key, split into its two components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HybridSigningKey {
+    /// The classical (Ed25519) component.
+    pub classical: Vec<u8>,
+    /// The post-quantum (ML-DSA-65) component.
+    pub pq: Vec<u8>,
+}
+
+/// A hybrid signature. Both components cover the identical transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HybridSignature {
+    /// The classical (Ed25519) component.
+    pub classical: Vec<u8>,
+    /// The post-quantum (ML-DSA-65) component.
+    pub pq: Vec<u8>,
+}
 
 /// A hashing primitive. Every suite provides one; the `root` field is 32 bytes in
 /// the frozen layout, so the digest size is fixed (spec §12).
@@ -104,30 +193,107 @@ pub trait Kdf: core::fmt::Debug + Send + Sync {
     ) -> Result<(), SuiteError>;
 }
 
-/// The hybrid KEM of design §7. Implemented by ticket 14 on top of ticket 11's
-/// transcript-binding combiner.
+/// The hybrid KEM of design §7: X25519 + ML-KEM-768, with a transcript-binding
+/// HKDF combiner (ticket 11). Both shared secrets and the full transcript of both
+/// ciphertexts and both public keys enter the derivation, so steering one component
+/// cannot steer the resulting key.
 pub trait Kem: core::fmt::Debug + Send + Sync {
-    /// Length of an encapsulation key.
+    /// Length of a hybrid public key (X25519 ‖ ML-KEM-768 encapsulation key).
     fn public_key_len(&self) -> usize;
-    /// Length of a ciphertext this KEM produces.
+    /// Length of a hybrid secret key (X25519 ‖ ML-KEM-768 decapsulation key).
+    fn secret_key_len(&self) -> usize;
+    /// Length of a hybrid ciphertext (X25519 ephemeral public key ‖ ML-KEM-768
+    /// ciphertext).
     fn ciphertext_len(&self) -> usize;
+    /// Length of the derived content key. The combiner always produces 32 bytes,
+    /// which is the frozen `root`/content-key size (spec §12).
+    fn shared_secret_len(&self) -> usize;
+
+    /// Generate a fresh hybrid keypair.
+    fn generate(&self) -> Result<KemKeyPair, SuiteError>;
+
+    /// Encapsulate to `public_key`, returning the hybrid ciphertext and the derived
+    /// content key.
+    fn encapsulate(
+        &self,
+        public_key: &[u8],
+        context: &KemContext<'_>,
+    ) -> Result<(Vec<u8>, [u8; ROOT_LEN]), SuiteError>;
+
+    /// Decapsulate `ciphertext` under `secret_key`, deriving the same content key
+    /// the sender computed.
+    fn decapsulate(
+        &self,
+        secret_key: &[u8],
+        ciphertext: &[u8],
+        context: &KemContext<'_>,
+    ) -> Result<[u8; ROOT_LEN], SuiteError>;
 }
 
-/// The AEAD. The chunked STREAM construction is ticket 12's job; this trait is the
-/// per-message primitive it builds on.
+/// The AEAD. The chunked STREAM construction of ticket 12 builds on this
+/// per-message primitive: the STREAM layer derives the nonce and AAD and calls
+/// [`Aead::seal`] or [`Aead::open`] once per chunk.
 pub trait Aead: core::fmt::Debug + Send + Sync {
     /// Length of a content key.
     fn key_len(&self) -> usize;
     /// Length of a nonce.
     fn nonce_len(&self) -> usize;
+    /// Length of the authentication tag appended to each ciphertext.
+    fn tag_len(&self) -> usize;
+
+    /// Seal `plaintext`, returning `ciphertext ‖ tag`.
+    fn seal(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, SuiteError>;
+
+    /// Open `ciphertext ‖ tag`, returning the plaintext. A tag mismatch is a hard
+    /// failure: no plaintext is returned.
+    fn open(
+        &self,
+        key: &[u8],
+        nonce: &[u8],
+        aad: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, SuiteError>;
 }
 
-/// The hybrid signature. Both components MUST verify (design §7).
+/// The hybrid signature: Ed25519 + ML-DSA-65 (spec §19, suite 1). Both components
+/// MUST verify over the identical transcript (design §7, spec §8.4); a bundle that
+/// carries one of the pair is a downgrade and is refused by F4 before it reaches a
+/// verifier.
 pub trait Signature: core::fmt::Debug + Send + Sync {
-    /// Length of a signing key.
-    fn public_key_len(&self) -> usize;
-    /// Length of a signature this suite produces.
-    fn signature_len(&self) -> usize;
+    /// Length of the classical public key.
+    fn classical_public_key_len(&self) -> usize;
+    /// Length of the classical signature.
+    fn classical_signature_len(&self) -> usize;
+    /// Length of the post-quantum public key.
+    fn pq_public_key_len(&self) -> usize;
+    /// Length of the post-quantum signature.
+    fn pq_signature_len(&self) -> usize;
+
+    /// Generate a fresh hybrid signing key and its public key.
+    fn keypair(&self) -> Result<(HybridSigningKey, HybridPublicKey), SuiteError>;
+
+    /// Produce both signatures over `transcript`.
+    fn sign(
+        &self,
+        transcript: &[u8],
+        signing_key: &HybridSigningKey,
+    ) -> Result<HybridSignature, SuiteError>;
+
+    /// Verify **both** components over `transcript`. Returns an error naming the
+    /// first component that failed; a caller must treat any error as "not
+    /// authentic".
+    fn verify(
+        &self,
+        transcript: &[u8],
+        public_key: &HybridPublicKey,
+        signature: &HybridSignature,
+    ) -> Result<(), SuiteError>;
 }
 
 /// The BLAKE3 hash role, implemented.
@@ -141,6 +307,20 @@ impl Hash for Blake3 {
 }
 
 static BLAKE3: Blake3 = Blake3;
+
+// The phase 2 primitives (tickets 10–12). Each is a zero-sized role implementation;
+// `suite_id` selects which one a file uses, and the registry below is the only place
+// that mapping lives.
+use crate::crypto::aead::{Aes256Gcm, XChaCha20Poly1305Aead};
+use crate::crypto::hybrid_kem::X25519MlKem768;
+use crate::crypto::kdf::HkdfSha256;
+use crate::crypto::sign::Ed25519MlDsa65;
+
+static HKDF_SHA256_ROLE: HkdfSha256 = HkdfSha256;
+static X25519_MLKEM768_ROLE: X25519MlKem768 = X25519MlKem768;
+static AES_256_GCM_ROLE: Aes256Gcm = Aes256Gcm;
+static XCHACHA20_POLY1305_ROLE: XChaCha20Poly1305Aead = XChaCha20Poly1305Aead;
+static ED25519_MLDSA65_ROLE: Ed25519MlDsa65 = Ed25519MlDsa65;
 
 /// The hash algorithm a suite selects. Every suite uses BLAKE3 today; the enum
 /// exists so a future suite can select another without a new field.
@@ -291,10 +471,10 @@ static SUITE_1: Suite = Suite {
     aead_id: AeadId::Aes256Gcm,
     signature_id: SignatureId::Ed25519MlDsa65,
     hash: &BLAKE3,
-    kdf: None,
-    kem: None,
-    aead: None,
-    signature: None,
+    kdf: Some(&HKDF_SHA256_ROLE),
+    kem: Some(&X25519_MLKEM768_ROLE),
+    aead: Some(&AES_256_GCM_ROLE),
+    signature: Some(&ED25519_MLDSA65_ROLE),
 };
 
 /// Suite 2: identical to suite 1 with XChaCha20-Poly1305 for hosts without AES
@@ -308,13 +488,18 @@ static SUITE_2: Suite = Suite {
     aead_id: AeadId::XChaCha20Poly1305,
     signature_id: SignatureId::Ed25519MlDsa65,
     hash: &BLAKE3,
-    kdf: None,
-    kem: None,
-    aead: None,
-    signature: None,
+    kdf: Some(&HKDF_SHA256_ROLE),
+    kem: Some(&X25519_MLKEM768_ROLE),
+    aead: Some(&XCHACHA20_POLY1305_ROLE),
+    signature: Some(&ED25519_MLDSA65_ROLE),
 };
 
 /// Suite 3: suite 1 plus SLH-DSA, for the long-term archive copy.
+///
+/// The signature role is deliberately absent: SLH-DSA is not in this build, and a
+/// suite with one unimplemented component of a *hybrid* signature is not a working
+/// signature role. Resolving it reports `NotImplemented` naming the suite, which is
+/// the accurate diagnostic — a suite is not silently reduced to Ed25519+ML-DSA.
 static SUITE_3: Suite = Suite {
     id: 3,
     name: "hybrid-archive",
@@ -324,9 +509,9 @@ static SUITE_3: Suite = Suite {
     aead_id: AeadId::Aes256Gcm,
     signature_id: SignatureId::Ed25519MlDsa65SlhDsa,
     hash: &BLAKE3,
-    kdf: None,
-    kem: None,
-    aead: None,
+    kdf: Some(&HKDF_SHA256_ROLE),
+    kem: Some(&X25519_MLKEM768_ROLE),
+    aead: Some(&AES_256_GCM_ROLE),
     signature: None,
 };
 
