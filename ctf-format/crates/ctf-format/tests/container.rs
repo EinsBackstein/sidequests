@@ -12,8 +12,8 @@
 )]
 
 use ctf_format::{
-    Compression, Encryption, Error, HEADER_LEN, Header, MAGIC, MAX_SECTIONS, SECTION_RECORD_LEN,
-    SectionFlags, SectionKind, SectionRecord, section,
+    Compression, Encryption, Error, HEADER_LEN, Header, MAGIC, MAX_SECTIONS, RuleSet,
+    SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionRecord, section,
 };
 
 const PAYLOAD_OFF: u64 = 4096;
@@ -328,7 +328,7 @@ fn record_round_trips() {
 }
 
 /// The second half of phase 0's definition of done: the record layout pinned to
-/// exact bytes, mirrored in `spec/SPEC.md` §5.7. Any change here is a format break.
+/// exact bytes, mirrored in `spec/SPEC.md` §5.8. Any change here is a format break.
 #[test]
 fn record_golden_vector() {
     let expected: [u8; SECTION_RECORD_LEN] = [
@@ -538,6 +538,51 @@ fn record_accepts_external_with_zeroed_storage() {
     assert_eq!(SectionRecord::parse(&r.to_bytes()).unwrap(), r);
 }
 
+/// R22: an `EXTERNAL` record may not carry a codec. §5.7 and §9.4 verify an external
+/// payload against the record's plaintext `root` and `len_plain`, but nothing states
+/// what a mirror serves when the record also sets `comp` or `enc`; two
+/// implementations would disagree about the mirror bytes.
+///
+/// Trap check: `comp = 1` with `enc = 0` (so R15 cannot demand a chunk size),
+/// `offset` and `len_stored` are 0 (R11), and R13 does not apply to an `EXTERNAL`
+/// record — so R22 is the only rule that can reject it.
+#[test]
+fn r22_external_with_a_codec_is_rejected() {
+    let mut r = good_manifest_record();
+    r.kind = SectionKind::Artifact;
+    r.name_id = 3;
+    r.flags = SectionFlags(SectionFlags::EXTERNAL);
+    r.offset = 0;
+    r.len_stored = 0;
+    r.comp = Compression::Zstd;
+    assert!(
+        matches!(
+            SectionRecord::parse_with(&r.to_bytes(), RuleSet::Container),
+            Err(Error::Inconsistent { .. })
+        ),
+        "an EXTERNAL section may not carry a codec"
+    );
+}
+
+/// R22 is gated on `CONTAINER_V1` for the same reason R20 and R21 are: it narrows a
+/// combination 0.1 and 0.2 did not forbid, so a file legal when written stays legal.
+/// The same record that is rejected above is accepted here.
+#[test]
+fn r22_is_not_applied_to_a_legacy_file() {
+    let mut r = good_manifest_record();
+    r.kind = SectionKind::Artifact;
+    r.name_id = 3;
+    r.flags = SectionFlags(SectionFlags::EXTERNAL);
+    r.offset = 0;
+    r.len_stored = 0;
+    r.comp = Compression::Zstd;
+    assert_eq!(
+        SectionRecord::parse_with(&r.to_bytes(), RuleSet::Legacy).unwrap(),
+        r,
+        "a 0.2 file is read under the rules it was actually written to"
+    );
+}
+
 #[test]
 fn record_rejects_misaligned_payload_offset() {
     let mut r = good_manifest_record();
@@ -649,6 +694,39 @@ fn record_rejects_encrypted_or_compressed_manifest() {
         SectionRecord::parse(&comp.to_bytes()),
         Err(Error::Inconsistent { .. })
     ));
+}
+
+/// R20 is gated on `CONTAINER_V1` like R21 and T8. 0.2 defined no manifest codec
+/// carve-out, and §16 promises a 0.3 reader accepts a 0.2 file's table in full, so
+/// the rule must not reach a file that does not set the bit.
+///
+/// Trap check: `comp = 1`, not `enc = 1`, so R15 (`enc = 1` requires a chunk size)
+/// cannot fire first and take credit for the rejection.
+#[test]
+fn r20_manifest_with_a_codec_is_rejected_under_container_v1() {
+    let mut r = good_manifest_record();
+    r.comp = Compression::Zstd;
+    assert!(
+        matches!(
+            SectionRecord::parse_with(&r.to_bytes(), RuleSet::Container),
+            Err(Error::Inconsistent { .. })
+        ),
+        "a manifest with a codec must be rejected in a CONTAINER_V1 file"
+    );
+}
+
+/// The regression that proves the gating: the *same* record is legal in a legacy
+/// file. Nothing earlier may fire — the manifest sets no flags, is not external, and
+/// R13 is skipped because a codec is present.
+#[test]
+fn r20_is_not_applied_to_a_legacy_file() {
+    let mut r = good_manifest_record();
+    r.comp = Compression::Zstd;
+    assert_eq!(
+        SectionRecord::parse_with(&r.to_bytes(), RuleSet::Legacy).unwrap(),
+        r,
+        "a 0.2 file is read under the rules it was actually written to"
+    );
 }
 
 #[test]

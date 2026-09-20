@@ -86,6 +86,7 @@ fn main() {
                     len_plain: 41_231_986_688,
                     root: [0x33; 32],
                 },
+                chunk_index: None,
             },
         ],
     )

@@ -100,6 +100,28 @@ pub fn verify_footer(
     Ok(Authentication::verified())
 }
 
+/// Produce both hybrid signatures over the §8.4 transcript.
+///
+/// The slot lengths are inputs rather than derived from a footer because the
+/// transcript binds them (spec §8.4, the `v2` change): a signer must fix the
+/// lengths before it can sign the bytes that locate the slots. The caller takes them
+/// from the suite ([`Signature::classical_signature_len`] and
+/// [`Signature::pq_signature_len`]), never from a file.
+pub fn sign_footer(
+    suite_id: u16,
+    root: &[u8; crate::footer::ROOT_LEN],
+    total_len: u64,
+    sig_classical_len: u32,
+    sig_pq_len: u32,
+    signing_key: &HybridSigningKey,
+) -> Result<HybridSignature, SuiteError> {
+    let suite = crate::suite::suite(suite_id)?;
+    let role = suite.signature()?;
+    let transcript =
+        crate::footer::sig_input(suite_id, sig_classical_len, sig_pq_len, root, total_len);
+    role.sign(&transcript, signing_key)
+}
+
 impl Signature for Ed25519MlDsa65 {
     fn classical_public_key_len(&self) -> usize {
         ED25519_PUBLIC_KEY_LEN

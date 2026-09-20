@@ -19,8 +19,8 @@
 //!  80    48  reserved          MUST be zero
 //! ```
 //!
-//! Normative: `spec/SPEC.md` §5 (record rules R1–R18) and §6 (table rules
-//! T1–T5), which this module implements one-for-one. Rationale is design §6.
+//! Normative: `spec/SPEC.md` §5 (record rules R1–R22) and §6 (table rules
+//! T1–T8), which this module implements one-for-one. Rationale is design §6.
 //!
 //! # Why unknown kinds are a separate type
 //!
@@ -326,12 +326,12 @@ pub struct SectionRecord {
 
 /// Which version's rules a file is read under.
 ///
-/// 0.3 narrowed two rules that a 0.1 or 0.2 file could legally violate: **R21**
-/// (`SEALED` requires `enc ≠ 0`) and **T8** (unclaimed bytes must be zero). Both
-/// narrowings are announced by `feat_ro_compat` bit 0, [`CONTAINER_V1`], so a file
-/// that does not set the bit is read under the rules it was actually written to —
-/// which is what the §16 compatibility matrix promises, and what a feature bit is
-/// for.
+/// 0.3 narrowed three rules that a 0.1 or 0.2 file could legally violate: **R20**
+/// (`manifest` requires `enc = 0` and `comp = 0`), **R21** (`SEALED` requires
+/// `enc ≠ 0`), and **T8** (unclaimed bytes must be zero). All three narrowings are
+/// announced by `feat_ro_compat` bit 0, [`CONTAINER_V1`], so a file that does not
+/// set the bit is read under the rules it was actually written to — which is what
+/// the §16 compatibility matrix promises, and what a feature bit is for.
 ///
 /// Derive this with [`RuleSet::of`] rather than choosing it. The header is the
 /// authority on which rules a file claims, and a caller that picks by hand can pick
@@ -344,8 +344,13 @@ pub enum RuleSet {
     Container,
     /// A 0.1 or 0.2 file, predating `CONTAINER_V1`.
     ///
-    /// R21 and T8 are not applied. Neither is a concession:
+    /// R20, R21 and T8 are not applied. None is a concession:
     ///
+    /// - **R20** requires the manifest to carry no codec so the file stays
+    ///   self-describing with no key and no decoder. 0.2 defined no manifest codec
+    ///   carve-out, so the rule would narrow what a 0.2 writer was entitled to emit;
+    ///   and a legacy file is refused at §10 step 2 before any manifest is read, so
+    ///   the rule protects nothing there.
     /// - **R21** exists because a `SEALED` section with `enc = 0` is a claim nothing
     ///   backs. 0.2 implemented no encryption at all, so *every* sealed section a
     ///   0.2 writer could produce carried `enc = 0` — applying R21 would reject not
@@ -443,7 +448,17 @@ impl SectionRecord {
         // codec — otherwise the file stops being self-describing, and a reader
         // would have to decompress untrusted input to learn the very limits that
         // make decompressing it safe.
-        if kind == SectionKind::Manifest && (enc != Encryption::None || comp != Compression::None) {
+        //
+        // Gated on `CONTAINER_V1` like R21 below and T8: 0.2 defined no manifest
+        // codec carve-out, so the rule would narrow what a 0.2 writer was entitled
+        // to emit, and a legacy file is refused at §10 step 2 before any manifest is
+        // read, so the rule protects nothing there. This is the same treatment R21
+        // and T8 get, for the same reason — a file that was legal when written stays
+        // legal. See [`RuleSet::Legacy`].
+        if rules == RuleSet::Container
+            && kind == SectionKind::Manifest
+            && (enc != Encryption::None || comp != Compression::None)
+        {
             return Err(Error::Inconsistent {
                 what: "manifest section must be neither encrypted nor compressed",
             });
@@ -502,6 +517,28 @@ impl SectionRecord {
                 .ok_or(Error::LengthOverflow {
                     at: "section range",
                 })?;
+        }
+
+        // R22. §5.7 and §9.4 verify an external payload against the record's
+        // plaintext `root` and `len_plain`, but nothing states what a mirror serves
+        // when the record carries a codec: is the fetched byte stream compressed,
+        // encrypted, or plaintext? Two implementations would each verify the mirror
+        // bytes against the same declared root and disagree about what those bytes
+        // should be. Forbidding a codec on an external record removes the ambiguity
+        // rather than guessing an answer no spec text supports.
+        //
+        // Gated on `CONTAINER_V1` like R20 above and R21 below: it narrows a
+        // combination 0.1 and 0.2 did not forbid, and a file that was legal when
+        // written stays legal. A legacy file is refused at §10 step 2 before an
+        // external payload is ever fetched, so no codec there has a consumer. See
+        // [`RuleSet::Legacy`].
+        if rules == RuleSet::Container
+            && flags.external()
+            && (enc != Encryption::None || comp != Compression::None)
+        {
+            return Err(Error::Inconsistent {
+                what: "EXTERNAL section must be neither encrypted nor compressed",
+            });
         }
 
         // Without compression or encryption, stored and plaintext lengths are the

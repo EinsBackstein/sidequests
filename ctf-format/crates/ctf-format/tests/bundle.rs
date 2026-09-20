@@ -12,13 +12,13 @@
 )]
 
 use ctf_format::{
-    Bundle, Error, FEAT_RO_COMPAT_CONTAINER_V1, Footer, HEADER_LEN, Header, MAGIC, Manifest,
-    Payload, RuleSet, SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionRecord, SectionSpec,
-    Signing,
+    Bundle, Error, FEAT_RO_COMPAT_CONTAINER_V1, Footer, HEADER_LEN, Header, HybridPublicKey,
+    HybridSigningKey, MAGIC, Manifest, Payload, RuleSet, SECTION_RECORD_LEN, SectionFlags,
+    SectionKind, SectionRecord, SectionSpec, Signing,
     cbor::Value,
     chunk::ChunkIndex,
     footer::{MAX_SIG_LEN, MIN_FOOTER_LEN, commitment_root, sig_input},
-    section, write_bundle,
+    section, sign_bundle, suite, write_bundle, write_signed_bundle,
 };
 
 const SUITE: u16 = 1;
@@ -1201,6 +1201,7 @@ fn external_bundle(size: u64, root: [u8; 32]) -> ctf_format::Result<Vec<u8>> {
                     len_plain: 41_231_986_688,
                     root: [0x33; 32],
                 },
+                chunk_index: None,
             },
         ],
     )
@@ -1815,4 +1816,290 @@ fn a_0_2_sealed_section_is_not_judged_by_r21() {
     // legacy file carry an unsealed writeup, which was never legal.
     r.flags = SectionFlags::empty();
     assert!(SectionRecord::parse_with(&r.to_bytes(), RuleSet::Legacy).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Signing: an unsigned bundle is a valid intermediate state (ticket 13)
+// ---------------------------------------------------------------------------
+
+fn signing_keypair() -> (HybridSigningKey, HybridPublicKey) {
+    suite(SUITE)
+        .unwrap()
+        .signature()
+        .unwrap()
+        .keypair()
+        .unwrap()
+}
+
+/// Signing changes no byte outside the footer.
+///
+/// The commitment root covers the header and the section table, and neither moves —
+/// so the root is identical before and after, and every payload byte is copied
+/// verbatim. The footer necessarily grows: its two length fields locate the slots,
+/// and `total_len` grows with them, and all three are inside the transcript (§8.4),
+/// which is why the lengths must be fixed before the bytes they describe are signed.
+#[test]
+fn signing_changes_no_byte_outside_the_footer() {
+    let (sk, pk) = signing_keypair();
+    let unsigned = minimal_bundle();
+    let footer_off = Header::parse(&unsigned).unwrap().footer_off as usize;
+    let root_before = Bundle::parse(&unsigned).unwrap().footer.root;
+
+    let signed = sign_bundle(&unsigned, &sk, &pk).unwrap();
+
+    assert_eq!(
+        &signed[..footer_off],
+        &unsigned[..footer_off],
+        "header, table and payloads must be byte-identical"
+    );
+    assert!(
+        signed.len() > unsigned.len(),
+        "the footer grew to hold the slots"
+    );
+
+    let b = Bundle::parse(&signed).unwrap();
+    assert_eq!(b.signing(), Signing::Present);
+    assert_eq!(
+        b.footer.root, root_before,
+        "the commitment root is unchanged"
+    );
+    assert_eq!(b.footer.sig_classical.len(), 64);
+    assert_eq!(b.footer.sig_pq.len(), 3309);
+    assert!(
+        b.verify_signatures(&pk).is_ok(),
+        "both components must verify"
+    );
+}
+
+/// The unsigned form is a valid intermediate state, and the signed convenience
+/// produces the same file signing an unsigned one would.
+#[test]
+fn an_unsigned_bundle_remains_a_valid_intermediate_state() {
+    let (sk, pk) = signing_keypair();
+    let unsigned = minimal_bundle();
+    let b = Bundle::parse(&unsigned).unwrap();
+    assert_eq!(b.signing(), Signing::Unsigned);
+    assert!(
+        b.verify_signatures(&pk).is_err(),
+        "an unsigned bundle authenticates nothing"
+    );
+
+    let m = minimal_manifest().encode().unwrap();
+    let via_convenience = write_signed_bundle(
+        SUITE,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &m,
+        )],
+        &sk,
+        &pk,
+    )
+    .unwrap();
+    let signed = sign_bundle(&unsigned, &sk, &pk).unwrap();
+    assert_eq!(
+        via_convenience, signed,
+        "write_signed_bundle is write_bundle then sign_bundle"
+    );
+    assert!(
+        Bundle::parse(&via_convenience)
+            .unwrap()
+            .verify_signatures(&pk)
+            .is_ok()
+    );
+}
+
+/// Re-signing is refused rather than silently stripping the old signatures: that
+/// would be a rewrite, which spec §4.4 governs.
+#[test]
+fn signing_an_already_signed_bundle_is_refused() {
+    let (sk, pk) = signing_keypair();
+    let signed = sign_bundle(&minimal_bundle(), &sk, &pk).unwrap();
+    assert!(matches!(
+        sign_bundle(&signed, &sk, &pk),
+        Err(Error::Inconsistent { .. })
+    ));
+}
+
+/// A signature made under one suite fails under another, because `suite_id` is in
+/// the transcript (§8.4). Suite 2 shares the signature primitive but not the id.
+#[test]
+fn a_signature_does_not_verify_under_another_suite() {
+    let (sk, pk) = signing_keypair();
+    let signed = sign_bundle(&minimal_bundle(), &sk, &pk).unwrap();
+    // Re-label the file as suite 2 without re-signing. The commitment covers the
+    // header, so re-root first; then the transcript's `suite_id` no longer matches
+    // what was signed and verification must fail.
+    let mut relabelled = signed.clone();
+    relabelled[16..18].copy_from_slice(&2u16.to_le_bytes());
+    let header = Header::parse(&relabelled).unwrap();
+    let table = header.section_table_off as usize;
+    let root = commitment_root(
+        &relabelled[..HEADER_LEN as usize],
+        &relabelled[table..table + header.section_table_count as usize * SECTION_RECORD_LEN],
+    );
+    let footer = header.footer_off as usize;
+    relabelled[footer..footer + 32].copy_from_slice(&root);
+    let b = Bundle::parse(&relabelled).unwrap();
+    assert!(
+        b.verify_signatures(&pk).is_err(),
+        "a downgraded suite must not accept the signature"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A chunked writer hashes its plaintext once (ticket 85), and can write an
+// EXTERNAL section's index (ticket 89)
+// ---------------------------------------------------------------------------
+
+/// The writer takes a chunked section's `root` from the index it already built,
+/// rather than hashing the same bytes twice. The observable property is that the
+/// index reduces to the root the record carries — which is what C4 checks — and the
+/// golden vector (unchunked, so it still uses `BLAKE3(plaintext)`) does not move.
+#[test]
+fn a_chunked_sections_root_and_index_are_derived_from_one_hash() {
+    let file = artifact_bundle();
+    let b = Bundle::parse(&file).unwrap();
+    let record = b.section(1).unwrap();
+    let index = b.chunk_index(record).unwrap().unwrap();
+    // C4: reducing the entries reproduces exactly the record's root.
+    assert_eq!(
+        ctf_format::chunk::root_from_cvs(index.entries()).unwrap(),
+        record.root
+    );
+    // And the same index is what the writer emitted.
+    assert_eq!(
+        index.entries(),
+        ChunkIndex::build(&b.section_bytes(record).unwrap(), 4096)
+            .unwrap()
+            .entries()
+    );
+}
+
+fn external_bundle_with_index(
+    plaintext: &[u8],
+    chunk_size: u32,
+    index: Option<&[u8]>,
+) -> ctf_format::Result<Vec<u8>> {
+    let root = ChunkIndex::build(plaintext, chunk_size)
+        .map(|i| ctf_format::chunk::root_from_cvs(i.entries()).unwrap())
+        .unwrap_or([0u8; 32]);
+    let manifest = Manifest::decode(
+        &Value::Map(vec![
+            (Value::Text("spec".into()), Value::Uint(1)),
+            (Value::Text("id".into()), Value::Text("workstation".into())),
+            (
+                Value::Text("name".into()),
+                Value::Text("Workstation".into()),
+            ),
+            (
+                Value::Text("names".into()),
+                Value::Array(vec![
+                    Value::Text("manifest".into()),
+                    Value::Text("workstation.E01".into()),
+                ]),
+            ),
+            (
+                Value::Text("external".into()),
+                Value::Map(vec![(
+                    Value::Uint(1),
+                    Value::Map(vec![
+                        (
+                            Value::Text("size".into()),
+                            Value::Uint(plaintext.len() as u64),
+                        ),
+                        (Value::Text("root".into()), Value::Bytes(root.to_vec())),
+                        (
+                            Value::Text("mirrors".into()),
+                            Value::Array(vec![Value::Text(
+                                "https://mirror.example/workstation.E01".into(),
+                            )]),
+                        ),
+                    ]),
+                )]),
+            ),
+        ])
+        .encode()?,
+    )?
+    .encode()?;
+    write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec {
+                kind: SectionKind::Artifact,
+                name_id: 1,
+                flags: SectionFlags(SectionFlags::EXTERNAL | SectionFlags::PLAYER_VISIBLE),
+                chunk_size,
+                comp: ctf_format::Compression::None,
+                payload: Payload::External {
+                    len_plain: plaintext.len() as u64,
+                    root,
+                },
+                chunk_index: index,
+            },
+        ],
+    )
+}
+
+/// The forensics archetype: a 40 GB payload is not here, but its index is, so a
+/// broken transfer can resume per chunk (spec §9.4). The writer cannot index bytes
+/// it never sees, so the caller supplies the index and the writer validates it
+/// against the root before emitting.
+#[test]
+fn an_external_sections_index_is_written_and_verified() {
+    let plaintext = vec![0x42u8; 12_288];
+    let index = ChunkIndex::build(&plaintext, 4096).unwrap().to_bytes();
+    let file = external_bundle_with_index(&plaintext, 4096, Some(&index)).unwrap();
+
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert!(record.flags.external());
+    assert_ne!(record.chunk_index_off, 0, "the index must be in the file");
+    let verified = b.chunk_index(&record).unwrap().unwrap();
+    assert_eq!(verified.entries().len(), 3);
+    // Per-chunk verification works against bytes that are not in the bundle.
+    verified.verify_chunk(0, &plaintext[..4096]).unwrap();
+    verified.verify_chunk(2, &plaintext[8192..]).unwrap();
+}
+
+/// The writer refuses an index that does not reduce to the section root, so it
+/// cannot emit a file a reader would reject at use. C4 is an on-use rule, so the
+/// writer's own parse-back would not catch it.
+#[test]
+fn an_external_index_that_does_not_reduce_to_the_root_is_refused() {
+    let plaintext = vec![0x42u8; 12_288];
+    let mut index = ChunkIndex::build(&plaintext, 4096).unwrap().to_bytes();
+    index[0] ^= 1;
+    assert!(
+        external_bundle_with_index(&plaintext, 4096, Some(&index)).is_err(),
+        "a forged index must not be written"
+    );
+}
+
+/// C1–C7 are on-use rules, so the verify report discloses the indices it did not
+/// evaluate rather than silently counting them as checked (ticket 76).
+#[test]
+fn a_verify_report_discloses_chunk_indices() {
+    let artifact_bytes = artifact_bundle();
+    let artifact = Bundle::parse(&artifact_bytes).unwrap();
+    assert_eq!(artifact.verify_inline_sections().unwrap().chunk_indices, 1);
+
+    let external_bytes = external_bundle(41_231_986_688, [0x33; 32]).unwrap();
+    let external = Bundle::parse(&external_bytes).unwrap();
+    assert_eq!(
+        external.verify_inline_sections().unwrap().chunk_indices,
+        0,
+        "a section with no index has nothing to disclose"
+    );
+
+    let plaintext = vec![0x42u8; 12_288];
+    let index = ChunkIndex::build(&plaintext, 4096).unwrap().to_bytes();
+    let with_index_bytes = external_bundle_with_index(&plaintext, 4096, Some(&index)).unwrap();
+    let with_index = Bundle::parse(&with_index_bytes).unwrap();
+    assert_eq!(
+        with_index.verify_inline_sections().unwrap().chunk_indices,
+        1
+    );
 }
