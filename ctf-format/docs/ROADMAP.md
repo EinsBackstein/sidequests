@@ -140,9 +140,21 @@ R1 is mandated, so this lands before generators.
       — **landed in 0.5.0** (ticket 19, spec §5.4, D1–D2). Both caps are checked
       before the decoder runs, and chunk-aligned frames keep a section seekable. It
       is ahead of the rest of phase 2 because it blocked nothing.
-- [ ] Hybrid KEM: X25519 + ML-KEM-768, transcript-binding HKDF combiner
-- [ ] Hybrid signature: Ed25519 + ML-DSA-65, **both** must verify
-- [ ] AEAD-STREAM chunked encryption (`aead::stream`), `final_flag` on last chunk
+- [x] Hybrid KEM: X25519 + ML-KEM-768, transcript-binding HKDF combiner
+      — **landed in 0.6.0** (ticket 11, spec §20.1). Classical half from AWS-LC,
+      post-quantum half from RustCrypto `ml-kem`; the combiner binds both secrets and
+      the full transcript, and the salt binds `version_major` only.
+- [x] Hybrid signature: Ed25519 + ML-DSA-65, **both** must verify
+      — **verification landed in 0.6.0** (ticket 10, spec §20.3); production is
+      ticket 13. `Authentication` is a token constructible only by a successful
+      two-component check. Suite 3's SLH-DSA role stays `NotImplemented`.
+- [x] AEAD-STREAM chunked encryption (`aead::stream`), `final_flag` on last chunk
+      — **landed in 0.6.0** (ticket 12, spec §20.2), implemented directly on the
+      per-chunk AEAD rather than via the `aead::stream` crate, because the design's
+      nonce and AAD layout is its own and is now normative. Each chunk is framed as
+      `u32_le(ct_len) ‖ ct`, which is what makes the `comp = 1` + `enc = 1`
+      composition representable: one zstd frame per chunk, its compressed length in
+      the prefix. The writer's integration is ticket 16.
 - [ ] Key envelopes: `storage`, `seal`, `stage:N` recipients
 - [ ] Flag derivation from `event_secret`; `event_secret` never touches a bundle
 - [ ] `ctf keys` / `ctf seal` / `ctf unseal`
@@ -174,7 +186,9 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
       design §10 names. — **schema landed in 0.5.0** (ticket 32, `authoring`
       module + spec §7.8); the `ctf pack` wiring is ticket 35. The five declaration
       keys are carried and round-tripped (ticket 33, spec §7.6), and the
-      `platform` overlay is specified (ticket 57, spec §7.7).
+      `platform` overlay is specified (ticket 57, spec §7.7). — **`ctf validate`
+      landed in 0.6.0** (ticket 34): schema and policy checks with the offending key
+      named and a non-zero exit on any finding; `ctf pack` itself is still ticket 35.
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
 aarch64, and a deliberately nondeterministic generator is rejected at ingest.

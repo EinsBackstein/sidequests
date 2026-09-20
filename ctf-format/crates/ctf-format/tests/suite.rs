@@ -49,27 +49,37 @@ fn an_unknown_suite_is_named() {
     );
 }
 
-/// A role whose implementation has not landed yet fails where it is used, with the
-/// suite and role named — not by panicking and not at parse time.
+/// Tickets 10–12 filled the phases 2 roles, so suites 1 and 2 resolve all five.
 #[test]
-fn unimplemented_roles_fail_where_they_are_used() {
-    let s = suite(1).unwrap();
-    assert!(matches!(
-        s.kem().unwrap_err(),
+fn implemented_roles_resolve_through_the_registry() {
+    for id in [1u16, 2] {
+        let s = suite(id).unwrap();
+        assert!(s.kdf().is_ok(), "kdf role should resolve for suite {id}");
+        assert!(s.kem().is_ok(), "kem role should resolve for suite {id}");
+        assert!(s.aead().is_ok(), "aead role should resolve for suite {id}");
+        assert!(
+            s.signature().is_ok(),
+            "signature role should resolve for suite {id}"
+        );
+    }
+}
+
+/// Suite 3's signature is Ed25519 + ML-DSA-65 + SLH-DSA. SLH-DSA is not in this
+/// build, and a hybrid signature missing a component is not a working role, so it
+/// fails where it is used — named, not panicking, and not at header parse.
+#[test]
+fn the_archive_signature_role_is_not_implemented() {
+    let s3 = suite(3).unwrap();
+    assert!(s3.kdf().is_ok());
+    assert!(s3.kem().is_ok());
+    assert!(s3.aead().is_ok());
+    assert_eq!(
+        s3.signature().unwrap_err(),
         SuiteError::NotImplemented {
-            suite: 1,
-            role: Role::Kem
+            suite: 3,
+            role: Role::Signature
         }
-    ));
-    assert!(matches!(
-        s.aead().unwrap_err(),
-        SuiteError::NotImplemented {
-            role: Role::Aead,
-            ..
-        }
-    ));
-    assert!(s.kdf().is_err());
-    assert!(s.signature().is_err());
+    );
 }
 
 /// The header parser records `suite_id` verbatim and does not consult the

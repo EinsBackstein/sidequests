@@ -7,6 +7,74 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.6.0] — 2026-09-20
+
+Phase 2 constructions: tickets 10 (hybrid signature verification), 11 (hybrid KEM
+combiner), 12 (AEAD-STREAM), and 34 (`ctf validate`). **No byte-layout change.**
+`version_minor` stays `3` and every existing `.ctf` file is byte-identical; nothing
+here narrows what is legal, so no feature bit is spent (spec §15). Each construction
+defines a structure the previous revision left unspecified, and the previous writer
+emitted `enc = 0` only, so no artifact is invalidated.
+
+### Added — hybrid KEM combiner (ticket 11, spec §20.1)
+
+`src/crypto/hybrid_kem.rs`: X25519 + ML-KEM-768 with the transcript-binding HKDF
+combiner of design §7. Both shared secrets and both ciphertexts and public keys enter
+the derivation, so steering one component cannot steer the key. The salt binds
+`version_major` only, never the minor, and every variable-length transcript field is
+length-prefixed. The classical half comes from AWS-LC (`agreement`), the
+post-quantum half from the RustCrypto `ml-kem` FIPS 203 implementation.
+
+### Added — AEAD-STREAM section encryption (ticket 12, spec §20.2)
+
+`src/crypto/stream.rs` and `src/crypto/aead.rs`: the STREAM construction over
+AES-256-GCM (suite 1) and XChaCha20-Poly1305 (suite 2). The nonce is
+`nonce_prefix(name_id) ‖ u32_be(chunk_index) ‖ final_flag` and the AAD binds chunk
+position, total plaintext length, and `suite_id`, so a reordered, truncated, or
+spliced body fails. Every encryption draws a fresh random content key, which is what
+makes a re-encrypt under an unchanged `name_id` safe.
+
+The body frames every chunk as `u32_le(ct_len) ‖ ct`. That length is what lets a
+reader find chunk boundaries without a stored count, and it is what makes the
+`comp = 1` + `enc = 1` composition representable: each zstd frame is one chunk and
+its compressed length is the frame's own prefix, since a zstd header records the
+decompressed size and nothing else. `open_chunked_frames` reads such a body frame by
+frame; `open_chunked` is the `comp = 0` wrapper that also checks the chunk count and
+per-chunk plaintext lengths.
+
+### Added — hybrid signature verification (ticket 10, spec §20.3)
+
+`src/crypto/sign.rs`: Ed25519 + ML-DSA-65 over the §8.4 transcript, both required to
+verify. `Authentication` is a token whose only constructor is a successful
+two-component check, so a reader cannot report authenticity on a file it has not
+signed-checked; an unsigned footer yields an error. The transcript binds `suite_id`,
+so a signature made under one suite fails under another. Suite 3's SLH-DSA signature
+role remains unimplemented and reports `NotImplemented` rather than silently
+reducing the hybrid.
+
+### Added — `ctf validate` (ticket 34)
+
+`ctf validate <challenge.yaml>` schema- and policy-checks an authoring file, names
+every offending key, and exits non-zero on any finding. Beyond the schema's unknown
+key rejection (`from_yaml`), it validates enum values, `id` and output-name shapes,
+duplicate output names, and the serving policy that a member cannot be both sealed
+and player-visible (R5).
+
+### Spec
+
+Spec revision 0.6.0 adds §20 and shrinks §14: key envelopes, derived flags, the
+`comp = 1` + `enc = 1` composition, entitlement signatures, key distribution, and
+the live gate remain unspecified. §10 step 9 (signature verification) is now
+specified rather than absent, and §19 records the implemented roles.
+
+### Dependencies
+
+New: `aws-lc-rs` (AES-256-GCM, X25519, Ed25519, HKDF-SHA-256), `ml-kem`, `ml-dsa`,
+and `chacha20poly1305` (suite 2's extended-nonce AEAD, which AWS-LC does not expose).
+The container structures remain `std` + `blake3` + `zstd`.
+
+191 → 234 tests, zero clippy warnings, `unsafe_code = forbid`.
+
 ## [0.5.0] — 2026-09-20
 
 Phase 2 groundwork and the authoring surface: tickets 9, 19, 32, 33, 36, 38, and

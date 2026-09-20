@@ -550,7 +550,7 @@ fn parse_external(v: &Value, name_id: u64) -> Result<External<'_>> {
 /// `id` is used in the seed derivation (design §7) and in operator-facing output,
 /// so it is restricted to a shape that is unambiguous in both: lowercase ASCII
 /// alphanumerics and interior hyphens.
-fn check_id(id: &str) -> Result<()> {
+pub(crate) fn check_id(id: &str) -> Result<()> {
     let bad = id.is_empty()
         || id.len() > MAX_ID_LEN
         || id.starts_with('-')
@@ -596,7 +596,7 @@ const fn is_bidi_control(c: char) -> bool {
 /// Returns the *reason* rather than an [`Error`] so the caller can attach the entry's
 /// index, which it alone knows. The reason is static, so no part of the name is ever
 /// echoed into a diagnostic.
-fn check_name(n: &str) -> Option<&'static str> {
+pub(crate) fn check_name(n: &str) -> Option<&'static str> {
     let bad = n.is_empty()
         || n.len() > MAX_NAME_LEN
         || n == "."

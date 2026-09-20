@@ -35,12 +35,14 @@
 //! lost: every field here is decoded through the little-endian helpers, which are
 //! alignment-independent. A writer SHOULD still align `footer_off` to 8.
 //!
-//! # What a footer does not establish
+//! # What a footer does and does not establish
 //!
-//! Phase 1 computes and checks `root`. It does not verify signatures — that is
-//! phase 2 — so a bundle whose root matches is *intact*, not *authentic*. The two
-//! are distinguished in the type system by [`Signing`], which is why there is no
-//! `Footer::is_valid`.
+//! This module computes and checks `root`: a bundle whose root matches is *intact*.
+//! It does not verify the signatures, because that needs a trusted public key the
+//! bundle does not carry — [`crate::crypto::sign::verify_footer`] does, over the
+//! §8.4 transcript, and yields the [`crate::Authentication`] token only on success.
+//! [`Signing`] reports whether signatures are *present*, never whether they are
+//! valid, which is why there is no `Footer::is_valid`.
 
 use crate::{Error, HEADER_LEN, MAGIC, Result, u32_at, u64_at};
 

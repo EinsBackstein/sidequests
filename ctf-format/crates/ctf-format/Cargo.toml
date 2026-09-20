@@ -1,6 +1,6 @@
 [package]
 name = "ctf-format"
-version = "0.5.0"
+version = "0.6.0"
 description = "Reader and writer for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,18 @@ serde_yaml_ng = "0.10"
 # zstd for `comp = 1` sections (spec §5.4). The reader enforces the output and
 # ratio caps in `src/compress.rs` before it runs the decoder.
 zstd = "0.14"
+# Crypto providers (phase 2, design §7, §11). Hybrid by design: the classical
+# component comes from audited AWS-LC (AES-256-GCM, X25519, Ed25519, HKDF-SHA-256)
+# and the post-quantum component from the pure-Rust RustCrypto FIPS 203/204
+# implementations. ML-DSA lives behind its own trait so `suite_id` can retire it
+# without a format change (design §7's warning); the two sources are independent,
+# which is the property the design wants from a hybrid.
+aws-lc-rs = "1.18"
+ml-kem = { version = "0.3", features = ["getrandom"] }
+ml-dsa = { version = "0.1", features = ["getrandom"] }
+# XChaCha20-Poly1305, suite 2's AEAD. AWS-LC exposes ChaCha20-Poly1305 but not the
+# extended-nonce XChaCha variant, so this one role comes from RustCrypto.
+chacha20poly1305 = "0.11"
 
 [lints]
 workspace = true

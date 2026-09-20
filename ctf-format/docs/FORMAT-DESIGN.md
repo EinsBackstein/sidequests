@@ -414,6 +414,10 @@ aad   = "ctf/stream/v1" ‖ u16_le(section_id) ‖ u32_le(chunk_index)
 splicing detectable. For a 40 GB forensics image this is the difference between
 integrity and the appearance of integrity.
 
+`nonce_prefix` was left undefined here; spec §20.2 now fixes it, along with the
+per-chunk `u32_le(ct_len)` framing that lets a `comp = 1` body be walked without a
+stored compressed length. Where this sketch and the spec disagree, the spec wins.
+
 Two rules make the nonce safe, and both are load-bearing:
 
 - **`section_id` is `name_id`.** It is unique per file (spec T2), stable across a

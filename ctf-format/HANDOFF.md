@@ -13,8 +13,8 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 / release 0.5.0 (phase 1
-complete, phase 2 groundwork landed; `cargo test` 191 pass).
+**Last updated:** 2026-09-20, at format version 0.3 / release 0.6.0 (phase 1
+complete, phase 2 constructions landed; `cargo test` 234 pass).
 
 ## Where this lives
 
@@ -136,7 +136,7 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 190 tests, 0 clippy warnings, `unsafe_code =
+parses them back before returning. 234 tests, 0 clippy warnings, `unsafe_code =
 "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
@@ -154,14 +154,20 @@ is deliberately no API that reports a bundle as authentic.
 > else's, and that step does not exist yet, so nothing downstream may consume this
 > crate as an authentication boundary today.
 
-Not implemented: **signatures, KEM, and AEAD** — everything cryptographic beyond
-BLAKE3. No generator, no solver gate. The suite registry exists (spec §19) with one
-trait per primitive role and the BLAKE3 `hash` role implemented; resolving `kem`,
-`kdf`, `aead`, or `signature` reports `NotImplemented` at the point of use. The
-writer emits `enc = 0` only, but it *does* write `comp = 1` zstd sections now: the
-reader enforces an absolute output cap and an expansion-ratio cap before running the
-decoder (spec §5.4, D1–D2). The authoring surface (`authoring.rs`) parses design
-§10 YAML and rejects unknown keys; `ctf pack` is not wired up yet.
+Implemented since 0.6.0 (spec §20): the hybrid KEM combiner (X25519 + ML-KEM-768),
+the AEAD-STREAM construction (AES-256-GCM and XChaCha20-Poly1305), and hybrid
+signature verification (Ed25519 + ML-DSA-65, both required). `Authentication` is a
+token whose only constructor is a successful two-component check, so there is still
+no API that reports a bundle authentic without having verified it. Suite 3's SLH-DSA
+signature role reports `NotImplemented`.
+
+Not implemented: **key envelopes**, **derived flags**, entitlement signature
+verification, key distribution, and the live gate. No generator, no solver gate.
+The writer still emits `enc = 0` only, but it *does*
+write `comp = 1` zstd sections: the reader enforces an absolute output cap and an
+expansion-ratio cap before running the decoder (spec §5.4, D1–D2). The authoring
+surface (`authoring.rs`) parses design §10 YAML, rejects unknown keys, and now
+policy-checks via `ctf validate`; `ctf pack` is not wired up yet.
 
 ### What 0.3 changed, and why the bit is `ro_compat`
 
@@ -199,15 +205,16 @@ big, that is the wrong reason; run the four clauses.
 strict key rejection, the declaration keys and `platform` overlay, the entitlement
 record format, and inspector regression tests. What remains, in order:
 
-1. **Phase 2 crypto proper.** The registry is in place (spec §19); the next tickets
-   fill its roles: hybrid KEM (11/14), AEAD-STREAM (12/16), hybrid signatures
-   (10/13), flag derivation (15). Each plugs into an existing trait and needs no
-   byte-layout change.
-2. **`ctf pack`** (ticket 35). The authoring schema and the manifest declaration
-   keys now exist, so `pack` is the wiring: YAML → manifest + sections, resolving
-   output names to `name_id`s and external entries to records.
+1. **The rest of phase 2.** Tickets 10–12 landed in 0.6.0 (spec §20). What remains:
+   key envelopes (14), signing bundles (13), flag derivation (15), encrypted
+   sections end to end (16), and cross-library primitive vectors (17). Each plugs
+   into an existing trait and needs no byte-layout change.
+2. **`ctf pack`** (ticket 35). The authoring schema, the manifest declaration keys,
+   and `ctf validate` now exist, so `pack` is the wiring: YAML → manifest +
+   sections, resolving output names to `name_id`s and external entries to records.
 3. **The entitlement chain implementation** (ticket 39). The record format is
-   specified (spec §18); implementing it depends on the signature role.
+   specified (spec §18) and the signature primitive now exists (spec §20.3), so E9
+   is implementable.
 
 ## Gotchas that will bite you
 
@@ -304,7 +311,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 191 tests
+cargo test                    # 234 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 

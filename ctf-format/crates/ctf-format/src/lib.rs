@@ -25,10 +25,11 @@
 //!
 //! A bundle that survives all seven stages is **intact**: it commits to its own
 //! bytes and nothing has been appended, moved, or flipped without detection. It is
-//! not **authentic**. The signature slots exist and are parsed, but verifying them
-//! needs the crypto suite registry, which is phase 2 — so [`Bundle::signing`]
-//! reports whether signatures are present and there is deliberately no API here
-//! that reports them as valid.
+//! not **authentic** until both hybrid signatures verify over the §8.4 transcript
+//! with a trusted public key supplied out of band — see
+//! [`crypto::sign::verify_footer`], which returns an [`Authentication`] token that
+//! cannot be constructed any other way. [`Bundle::signing`] reports only whether
+//! signatures are *present*.
 //!
 //! Nothing downstream may serve, execute, or trust a bundle on the strength of a
 //! successful parse alone.
@@ -43,6 +44,7 @@ pub mod bundle;
 pub mod cbor;
 pub mod chunk;
 pub mod compress;
+pub mod crypto;
 pub mod error;
 pub mod footer;
 pub mod header;
@@ -51,6 +53,7 @@ pub mod section;
 pub mod suite;
 
 pub use bundle::{Bundle, Payload, SectionSpec, VerifyReport, write_bundle};
+pub use crypto::sign::{Authentication, verify_footer};
 pub use error::{Error, Result};
 pub use footer::{Footer, Signing};
 pub use header::Header;
@@ -58,7 +61,10 @@ pub use manifest::Manifest;
 pub use section::{
     Compression, Encryption, FutureKind, RuleSet, SectionFlags, SectionKind, SectionRecord,
 };
-pub use suite::{AeadId, HashId, KdfId, KemId, Role, SignatureId, Suite, SuiteError, suite};
+pub use suite::{
+    AeadId, HashId, HybridPublicKey, HybridSignature, HybridSigningKey, KdfId, KemContext, KemId,
+    KemKeyPair, Role, SignatureId, Suite, SuiteError, suite,
+};
 
 /// File signature: PNG's construction with `CTF` as the tag. Every byte earns its
 /// place — see design §6 for the per-byte rationale.

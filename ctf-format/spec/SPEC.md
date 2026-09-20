@@ -1,12 +1,12 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.5.0
+**Version:** 0.3 (major 0, minor 3); document revision 0.6.0
 **Status:** The container is complete and specified: header, section table,
-manifest, chunk index, footer, zstd compression (§5.4), and the entitlement record
-format (§18). The crypto suite registry is specified (§19) and its dispatch surface
-exists in the reference implementation, but only the BLAKE3 hash role is
-implemented; the AEAD construction, key management, and signature *verification*
-are still not implemented. See §14.
+manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
+format (§18), the crypto suite registry (§19), and the phase 2 constructions — the
+hybrid KEM combiner, the AEAD-STREAM construction, and hybrid signature verification
+(§20). Key envelopes, derived flags, entitlement signature verification, and the
+live gate remain unspecified. See §14.
 **Reference implementation:** `crates/ctf-format`.
 **Rationale, threat model, and design history:** `docs/FORMAT-DESIGN.md`. Where
 that document and this one disagree, this one wins.
@@ -22,10 +22,12 @@ version of this document (§2.3, §16).
 
 A reader implementing this document can determine a file's structure and can
 establish that the file **commits to its own bytes** — that nothing has been
-appended, moved, or flipped without detection. It cannot determine whether the
-file is **authentic**: the signature slots in the footer are located and bounded
-here, but the suite registry needed to verify them is not (§14). The distinction
-is normative and is stated again in §10 and §13.
+appended, moved, or flipped without detection. With a trusted public key supplied
+out of band, it can also establish that the file is **authentic**, by verifying both
+signatures of §20.3. The trusted key is not carried in the bundle (§8.2), and a
+suite whose signature role is not implemented cannot authenticate at all. The
+distinction between intact and authentic is normative and is stated again in §10
+and §13.
 
 ## 2. Conventions
 
@@ -81,7 +83,7 @@ one rule. Vectors that violate several rules at once MUST assert rejection only.
 | External section | A section whose bytes are stored elsewhere (§5.3, `EXTERNAL`) |
 | Understood | A section whose `kind` this reader implements (§5.2) |
 | Intact | The file's commitment root matches its own header and section table (§8.3) |
-| Authentic | Both signatures over the transcript verify — **not specified here** (§14) |
+| Authentic | Both signatures over the transcript verify with a trusted key (§20.3) |
 
 ### 2.3 Compatibility model
 
@@ -412,8 +414,8 @@ if fewer than `section_table_count × 128` bytes are available at
 Every field is naturally aligned within the record.
 
 **`name_id` is the section's identity, not a convenience.** It indexes the
-manifest's name table (§7.2), and phase 2 binds it into the AEAD nonce and
-additional authenticated data (design §7). Three consequences are normative:
+manifest's name table (§7.2), and §20.2 binds it into the AEAD nonce and
+additional authenticated data. Three consequences are normative:
 
 - It MUST be unique across the table (T2).
 - A rewriter MUST NOT reassign it. Re-encrypting a section's contents under an
@@ -546,8 +548,8 @@ encrypt.** `len_plain` is the length before either; `len_stored` is the length
 after both. The `comp = 1` framing and the decompression caps a reader must
 enforce follow.
 
-The AEAD construction itself and its nonce and AAD derivation are not specified in
-this version (§14).
+The AEAD construction, its nonce and AAD derivation, and the STREAM chunk framing are
+specified in §20.2, including the composition of `comp = 1` with `enc = 1`.
 
 #### zstd framing (`comp = 1`)
 
@@ -1078,7 +1080,8 @@ transcript constrain them.** For a reader that implements `suite_id`'s suite, th
 signature sizes are a property of the suite (§8.1's opening paragraph); a declared
 length that disagrees with the suite MUST be rejected rather than used, and a
 verifier MUST derive the slot boundaries from the suite rather than from the
-fields. The §8.4 transcript additionally covers both declared lengths, so any change
+fields. §20.3 fixes the slot lengths for suites 1 and 2. The §8.4 transcript
+additionally covers both declared lengths, so any change
 to the split between the slots is detectable even without a suite registry. The
 fields are therefore a bounded declaration, never the sole authority for where the
 signatures begin and end.
@@ -1122,12 +1125,13 @@ Notes, all normative:
 - **`sig_classical_len = sig_pq_len = 0` is legal** and means the bundle is
   unsigned. Such a bundle authenticates nothing and MUST NOT be served, executed,
   or trusted. It is a valid intermediate state — a writer produces the file, a
-  signer adds the signatures — and it is what this version's writer emits, since
-  signing is not specified here (§14).
+  signer adds the signatures — and it is what this version's writer emits; signing
+  is specified in §20.3.
 - The signature *verification* keys are not carried in the footer. Bundles are
   authored by a single trusted org (design §2), whose keys the platform holds out of
   band. **Key distribution is not specified in this version** (§14), and a reader
-  MUST NOT infer a distribution scheme from `suite_id`.
+  MUST NOT infer a distribution scheme from `suite_id`. Verification (§20.3) takes
+  the trusted key as an input; it is never read from the file.
 
 ### 8.3 The commitment root
 
@@ -1199,8 +1203,10 @@ any change to the split changes the transcript and fails both signatures. A veri
 of this version MUST NOT accept a transcript bearing the v1 label, and MUST NOT
 locate the slots from the fields alone (§8.1).
 
-Producing and checking the signatures is not specified in this version (§14). A
-reader of this version MUST NOT report a bundle as authentic on any grounds.
+Producing and checking the signatures is specified in §20.3. A reader MUST NOT
+report a bundle as authentic unless both components verify over this transcript with
+a trusted public key (§8.2). An unsigned bundle authenticates nothing and MUST NOT
+be reported as authentic on any grounds.
 
 ## 9. Chunk index
 
@@ -1379,14 +1385,16 @@ MAY NOT, because each depends on values the previous one validated.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
    decode it and apply M1–M18.
 8. Apply M19–M21 against the section table.
-9. **Not implemented in this version:** verify both signatures over the
-   transcript of §8.4.
+9. If the caller supplies a trusted public key and needs authenticity, verify both
+   signatures over the transcript of §8.4 (§20.3). A reader that does not take this
+   step, or that takes it without a trusted key, has established only that the file
+   is intact.
 
 A reader that completes steps 1–8 has established that the file is **intact**. It
-has *not* established that the file is **authentic**, because step 9 does not
-exist yet. A reader MUST NOT represent a bundle as authentic, and MUST NOT
-execute, serve, or otherwise act on section content on the strength of an intact
-parse alone.
+has *not* established that the file is **authentic** unless it also completes step 9
+with a trusted public key. A reader MUST NOT represent a bundle as authentic on any
+other basis, and MUST NOT execute, serve, or otherwise act on section content on the
+strength of an intact parse alone.
 
 Further requirements, all normative:
 
@@ -1547,9 +1555,9 @@ The customary filename extension is `.ctf`. No media type is registered.
 - **Intact is not authentic.** A file whose commitment root matches its own bytes
   has proven internal consistency, nothing more. An attacker who rewrites a
   bundle and recomputes the root produces a perfectly intact file. Only the
-  signatures distinguish the author's bundle from anyone else's, and verifying
-  them is not specified here (§14). Every field in this document is
-  attacker-controlled input until that step exists.
+  signatures distinguish the author's bundle from anyone else's, and verifying them
+  (§20.3) needs a trusted public key the file does not carry. Every field in this
+  document is attacker-controlled input until that step is taken.
 - **Manifest text is attacker-controlled, and displaying it is an output-encoding
   problem.** `name`, `category`, `description`, and every mirror URL are free-form
   text that no schema rule constrains, because a description may legitimately
@@ -1620,16 +1628,16 @@ The customary filename extension is `.ctf`. No media type is registered.
 An implementation MUST NOT invent behaviour for any of the following, and MUST
 NOT claim conformance to a later version by guessing.
 
-- **Signature production and verification.** The footer's slots are located and
-  bounded (§8.1, §8.2) and the transcript is fixed (§8.4), but the algorithms,
-  the encoding of a signature within its slot, and key distribution are not
-  implemented. The suite registry that selects them *is* specified (§19).
-- **The AEAD-STREAM construction**, nonce and AAD derivation, key envelopes, and
-  every rule for `enc = 1`. Consequently a reader of this version cannot read the
-  plaintext of an encrypted section at all, and MUST NOT try.
-- **The entitlement chain's signatures.** The record format, ordering, and genesis
-  binding are specified (§18), but verifying `sig_holder` and `sig_platform`
-  requires the suite registry's signature role, which is not implemented (§19).
+- **Key envelopes.** How a section's `content_key` is wrapped to a named recipient
+  (`storage`, `seal`, `stage:N`) is not specified. §20.1 fixes the KEM combiner the
+  envelopes will use, but not the envelope format.
+- **Flag derivation from `event_secret`.** The derivation of a per-subject flag, and
+  of a stage key from the previous stage's flag, is not specified in this version.
+- **The entitlement chain's signatures (E9).** The record format, ordering, and
+  genesis binding are specified (§18), but verifying `sig_holder` and `sig_platform`
+  is not implemented. The signature primitive itself is specified (§20.3).
+- **Key distribution.** How a verifier obtains the trusted public key of §20.3 is not
+  specified; it is an input, never a bundle field (§8.2).
 - **The live solvability gate's socket contract** (design §3, pillar 5).
 
 ## 15. Extension policy
@@ -1748,6 +1756,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.3.1 | Review-debt release. **No byte-layout change:** `version_minor` stays `3` and every 0.3 file is byte-identical. Corrects false claims (§7.3's `crit`-typo claim, §8.2's F4 citation and key-distribution statement), pins §9.2's merge to BLAKE3 specification revision `20211102173700` with full parent-node pseudocode and a worked example, and states that `cv(i)` is a **non-root** subtree chaining value. Reference implementation: chunk-verification ordering is type-enforced (`VerifiedChunkIndex`), manifest diagnostics carry an entry index/`name_id`, `ctf inspect` prints each section's `root`, `ChunkIndex::parse` requires its exact derived length, and `Manifest::validate_against` is linear. Closes every first-review finding; the post-fix re-review's new findings are recorded as tickets 70–97 and deferred. |
 | 0.4.0 | Closes post-fix tickets 70 and 71. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file is byte-identical; this is a version break only because §15 reserves a change to the signature transcript for one. Adds **C8**: a reader MUST NOT expose a `SEALED` section's chunk index, nor one for a section whose `kind` it does not implement, because an entry is a chaining value of the plaintext (§9.1). Changes the §8.4 transcript from `v1` (59 bytes) to `v2` (67 bytes), adding `u32_le(sig_classical_len) ‖ u32_le(sig_pq_len)` after `suite_id`: F3–F5 left the split between the two signature slots free while §8.1 located the slots from those fields, so neither signature covered the split. A verifier MUST NOT accept a `v1` transcript and MUST NOT locate the slots from the fields alone (§8.1). Producing and checking signatures remains unspecified (§14), so no signed bundle exists for the change to invalidate. |
 | 0.5.0 | Phase 2 groundwork and the authoring surface. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Defines zstd framing and the two decompression caps (§5.4, D1–D2), adds `MAX_DECOMPRESSED_SECTION` and `MAX_DECOMPRESSION_RATIO` to §12, and implements compression in the reference reader and writer. Specifies the five declaration keys `flag`, `generate`, `runtime`, `sealed`, `verify` (§7.6) and the namespaced `platform` overlay (§7.7), and makes strict key rejection normative for the authoring front end (§7.8). Specifies the entitlement record format, ordering, genesis binding, and signature transcript (§18), and the crypto suite registry with its failure timing (§19); only the BLAKE3 hash role is implemented. Nothing here narrows what is legal — each change either defines a structure a previous version left unspecified or widens what a reader accepts — so no feature bit is spent. |
+| 0.6.0 | Phase 2 constructions. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Specifies and implements the hybrid KEM combiner (§20.1), the AEAD-STREAM construction with its nonce, AAD, and per-chunk length framing (§20.2) — including the composition of `comp = 1` with `enc = 1` — and hybrid signature production and verification over the §8.4 transcript (§20.3), for suites 1 and 2; suite 3's SLH-DSA signature role remains unimplemented. Nothing here narrows what is legal: it defines structures 0.5 left unspecified, and the 0.5 writer emits `enc = 0` only, so no feature bit is spent (§15). §14 shrinks accordingly — key envelopes, derived flags, entitlement signatures, key distribution, and the live gate remain unspecified. |
 
 ## 18. Entitlement records
 
@@ -1821,9 +1830,10 @@ following holds.
 | E7 | `prev` of a record does not equal the record id of its predecessor. |
 | E8 | `sig_platform` is absent; or `type` is `transfer` and `sig_holder` is absent. |
 
-Signature verification is **E9** and is not implemented in this version (§14): it
-needs the suite registry's signature role (§19). A reader MUST NOT report a chain
-as authenticated until it is.
+Signature verification is **E9** and is not implemented in this version (§14). The
+signature primitive itself exists (§20.3); E9 is the entitlement transcript's
+verification over it, which is not yet written. A reader MUST NOT report a chain as
+authenticated until it is.
 
 ### 18.5 Offline validation
 
@@ -1870,8 +1880,140 @@ to verify (design §7).
 | S4 | A suite's `hash` MUST produce 32 bytes; `root` and the chunk-index entries are fixed at 32 bytes (§12). |
 | S5 | A suite selects **all** roles; mixing roles across suites MUST be rejected. |
 
-This section specifies the registry and its failure timing. Only the `hash` role is
-implemented in this version — BLAKE3 is the one primitive the container already
-needs — so resolving a `kem`, `kdf`, `aead`, or `signature` role reports that the
-role is not implemented, at the point of use. Implementing those roles is tickets
-10–17 and requires no change to any byte of this document.
+This section specifies the registry and its failure timing. The `hash`, `kdf`,
+`kem`, `aead`, and `signature` roles are implemented for suites 1 and 2 (§20). Suite
+3's signature role includes SLH-DSA, which is not implemented, so resolving it
+reports that the role is not implemented at the point of use — a suite is not
+silently reduced to a subset of its hybrid signature.
+
+## 20. Cryptographic constructions
+
+This section specifies the phase 2 constructions behind the suite roles of §19: the
+hybrid KEM combiner (§20.1), the chunked AEAD (§20.2), and the hybrid signature
+(§20.3). They are normative for `suite_id` 1 and 2. Suite 3's signature is specified
+by §19 as adding SLH-DSA; that role is not implemented in this version (§14).
+
+Every `‖` below joins **fixed-width fields only**, except where `LP` length-prefixes
+a variable-length input:
+
+```text
+LP(x) = u32_le(len(x)) ‖ x
+```
+
+Without the prefix, concatenation is ambiguous — in `a ‖ b` the pairs `("ab","c")`
+and `("a","bc")` are the same bytes — so two different inputs would derive the same
+key. The failure is silent and fails open, which is why the rule is stated before any
+construction that uses it.
+
+### 20.1 Hybrid KEM combiner
+
+Suites 1 and 2 use X25519 + ML-KEM-768 (FIPS 203). The hybrid public key is
+`pk_x25519 ‖ ek_mlkem`, the hybrid secret key is `sk_x25519 ‖ dk_mlkem`, and the
+hybrid ciphertext is `ct_x25519 ‖ ct_mlkem`, where `ct_x25519` is the sender's
+ephemeral X25519 public key.
+
+| Component | Size (bytes) |
+|---|---:|
+| `pk_x25519`, `sk_x25519`, `ct_x25519` | 32 |
+| `ek_mlkem` (ML-KEM-768 encapsulation key) | 1184 |
+| `dk_mlkem` (decapsulation key seed, `d ‖ z`) | 64 |
+| `ct_mlkem` (ML-KEM-768 ciphertext) | 1088 |
+
+The combiner MUST be an HKDF-SHA-256 over **both** shared secrets **and the full
+transcript** — never XOR, never a bare concatenation of the secrets:
+
+```text
+content_key = HKDF-SHA-256(
+    ikm  = ss_x25519 ‖ ss_mlkem,
+    salt = "ctf/kem/v1" ‖ u16_le(suite_id) ‖ u16_le(version_major),
+    info = LP(ct_x25519) ‖ LP(ct_mlkem) ‖ LP(pk_x25519) ‖ LP(pk_mlkem)
+           ‖ LP(context_label) )
+```
+
+`content_key` is 32 bytes. `context_label` is one of `storage`, `seal`, `stage:N`, or
+`holder` (design §7). The salt binds `version_major` only, never `version_minor`
+(§2.3): binding the minor would re-key every bundle on a spec bump that moved no
+field. Binding both ciphertexts and both public keys into `info` is what stops an
+attacker who controls one component's ciphertext from steering the derived key.
+
+A decapsulating recipient reconstructs `pk_x25519` from `sk_x25519` and `pk_mlkem`
+from `dk_mlkem`, so the transcript is identical on both sides.
+
+### 20.2 AEAD-STREAM
+
+A section with `enc = 1` — with or without `comp = 1` — is encrypted with the STREAM
+construction (Hoang–Reyhanitabar–Rogaway–Vizár), not naive per-chunk AEAD. Naive
+per-chunk AEAD is reorderable and truncatable: each chunk is individually authentic
+and nothing binds its position. STREAM binds position and a final flag into the
+nonce, and position and total length into the AAD.
+
+`section_id` is the record's `name_id`, never its index in the section table (§5.1,
+§3). Record order is free, so an index-derived nonce would change on every re-emit.
+
+```text
+nonce_prefix(section_id) = u16_le(section_id) ‖ 0x00 × (nonce_len − 7)
+nonce = nonce_prefix(section_id) ‖ u32_be(chunk_index) ‖ final_flag
+aad   = "ctf/stream/v1" ‖ u16_le(section_id) ‖ u32_le(chunk_index)
+        ‖ u64_le(len_plain) ‖ u16_le(suite_id)
+```
+
+`nonce_len` is the suite's AEAD nonce size: 12 for AES-256-GCM (suite 1) and 24 for
+XChaCha20-Poly1305 (suite 2). `final_flag` is `0x01` on the last chunk and `0x00`
+otherwise. `len_plain` is the record's `len_plain`. The tag length is 16 for both
+suites.
+
+The stored body is a sequence of chunks, each framed as `u32_le(ct_len) ‖ ct`, where
+`ct_len` is that chunk's ciphertext length including its tag and MUST be at least the
+tag length (16). The last chunk in the body carries `final_flag = 0x01` and every
+other `0x00`. A reader walks the prefixes from the start; the chunk whose `ct_len`
+reaches the end of the body is the final one. A body whose last chunk was not sealed
+as final fails its tag, which is what makes truncation detectable.
+
+For `comp = 0`, the AEAD plaintext is the section plaintext, divided into
+`ceil(len_plain / chunk_size)` chunks of at most `chunk_size` bytes in address order.
+Chunk *i* is sealed with `chunk_index = i`, and
+`len_stored = len_plain + count × (16 + 4)`.
+
+For `comp = 1`, the AEAD plaintext is the concatenation of the zstd frames of §5.4,
+and **each frame is one chunk**, so `chunk_index` is the frame index. `len_plain` in
+the AAD remains the record's field — the total *decompressed* length — and frame *i*
+MUST decompress to exactly `min(chunk_size, len_plain − i × chunk_size)` bytes. The
+per-frame compressed lengths are not stored separately: they are the `ct_len`
+prefixes, which is what lets a reader walk the body without knowing the compressed
+length. This is the composition of `comp = 1` with `enc = 1`.
+
+**Every encryption MUST draw a fresh random 32-byte `content_key`.** With a
+per-encryption key, re-encrypting the same section under the same `name_id` is safe,
+because it is a different keystream. Re-encrypting under a reused key is forbidden,
+and no field exists that would make it safe. A rewriter MUST NOT reassign `name_id`
+(§5.1).
+
+A reader MUST reject a body whose framing is malformed, whose last chunk was not
+sealed as final, that has bytes beyond the body, or any chunk whose tag does not
+verify, and MUST NOT return plaintext before every chunk has been authenticated
+(C7).
+
+### 20.3 Hybrid signature
+
+Suites 1 and 2 sign with Ed25519 + ML-DSA-65 (FIPS 204). Both MUST verify over the
+identical §8.4 transcript. The two components occupy the footer's two slots, so no
+in-slot encoding is needed:
+
+| Slot | Primitive | Length (bytes) |
+|---|---|---:|
+| `sig_classical` | Ed25519 signature | 64 |
+| `sig_pq` | ML-DSA-65 signature | 3309 |
+
+The corresponding public keys are 32 and 1952 bytes. They are not carried in the
+bundle (§8.2); a verifier is supplied them out of band.
+
+Verification succeeds only when **both** components verify over the same transcript.
+A failure of either is a failure of the whole: there is no half-authentic result. A
+bundle whose signature slots are empty authenticates nothing and MUST NOT be reported
+as authentic, however intact it is. A verifier MUST NOT locate the slots from the
+length fields alone (§8.1); the lengths are the suite's.
+
+Suite 3 adds SLH-DSA to the signature set (§19). That role is not implemented in this
+version, so a suite-3 file cannot be authenticated; resolving the role reports the
+suite and the role rather than silently reducing the hybrid to two of its three
+components.
