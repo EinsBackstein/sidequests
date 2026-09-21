@@ -505,6 +505,14 @@ dependencies = [
  "ctf-format",
  "ctf-generator",
  "memmap2",
+ "wat",
+]
+
+[[package]]
+name = "ctf-conformance"
+version = "0.11.0"
+dependencies = [
+ "ctf-format",
 ]
 
 [[package]]

@@ -1,0 +1,37 @@
+# Reference fixture for GitHub ticket #69: "Mental Overflow", from
+# `CTF-FlagFrenzy/challenges` (Mental_Overflow/).
+#
+# This is a runtime web challenge WITH a generator. The container carries only
+# the `generate` declaration; `ctf pack` does not embed the wasm. The module
+# itself lives next to this file as `gen.wasm`, built from
+# `sdk/reference/mental-overflow-gen/`, and the CLI regression test runs it
+# through the determinism gate.
+#
+# `gen.wasm` is the deterministic port of the reference `src/script.py`: the
+# `random.sample` brace choices are replaced by seed-derived choices, which is
+# what lets the bundle pass the determinism gate (spec §23, G9/G10).
+#
+# As in the File And Seek fixture, `runtime.image` is a shape-valid placeholder
+# digest and there is no `verify` block: a runtime challenge is `unverified`,
+# never `passed` (spec §25.6).
+spec: 1
+id: mental-overflow
+name: "Mental Overflow"
+category: Reverse Engineering
+description: |
+  Download the generated challenge file and peel back the Base64 and Brainfuck
+  layers to recover the flag.
+flag: derived
+generate:
+  wasm: gen.wasm
+  determinism: strict
+  outputs:
+    - { name: challenge.bin, player_visible: true }
+runtime:
+  image: "ctf-fixture.invalid/mental-overflow@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  ports:
+    - { container: 80, protocol: tcp }
+  resources: { cpu: "0.5", memory: "256Mi", pids: 64 }
+  instancing: per_team
+  ttl: 30m
+  readiness: { tcp: 80, timeout: 30s }

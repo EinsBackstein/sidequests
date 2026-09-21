@@ -1,13 +1,18 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.8.0
+**Version:** 0.3 (major 0, minor 3); document revision 0.12.0
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
 constructions — the hybrid KEM combiner, the AEAD-STREAM construction, and hybrid
 signature production and verification (§20) — the key-envelope construction (§21),
-and derived flags and stage keys (§22). Key distribution and the live gate remain
-unspecified. See §14.
+derived flags and stage keys (§22), the generator interface (§23), the sealed-
+progress payload (§24), the offline solvability gate (§25), the seed/flag injection
+ABI (§26), sealed release (§27), the serving manifest (§28), the platform ingest
+descriptor (§29), the OCI artifact (§30), the base image contract (§31), the live
+gate socket contract (§32), the WTFlag adapter (§33), and the trusted-key interface
+(§34). Nothing in this version is left unspecified; §14 states what is specified but
+not implemented in this repository.
 **Reference implementation:** `crates/ctf-format`.
 **Rationale, threat model, and design history:** `docs/FORMAT-DESIGN.md`. Where
 that document and this one disagree, this one wins.
@@ -312,8 +317,8 @@ Notes, all normative:
 - **`suite_id`.** A reader MUST NOT reject a file during header parsing solely
   because `suite_id` is unrecognized. The value is recorded verbatim and
   validated at the point a cryptographic primitive is actually needed, so an
-  unknown suite fails where the diagnostic is useful. The registry is not yet
-  defined (§14).
+  unknown suite fails where the diagnostic is useful. The registry is defined in
+  §19.
 - **H7 and allocation.** The cap MUST be enforced *before* `section_table_count`
   is used to size any allocation. This is the single most common parser
   vulnerability in binary container formats, and the ordering is the whole
@@ -520,7 +525,7 @@ encrypted (`enc = 1`) to a `stage:N` recipient and is `PLAYER_VISIBLE`, because 
 is served — as ciphertext — to the player who has earned the previous stage. Since
 R5 makes `SEALED` and `PLAYER_VISIBLE` mutually exclusive, marking such a section
 `SEALED` would make it permanently unservable. Which key opens a section is
-manifest data (§14), not a flag.
+manifest data (§21), not a flag.
 
 **`OPTIONAL`** on a kind the reader *does* implement is legal and has no effect.
 This is required rather than tolerated: a kind that is unknown today becomes known
@@ -1166,7 +1171,7 @@ transcript constrain them.** For a reader that implements `suite_id`'s suite, th
 signature sizes are a property of the suite (§8.1's opening paragraph); a declared
 length that disagrees with the suite MUST be rejected rather than used, and a
 verifier MUST derive the slot boundaries from the suite rather than from the
-fields. §20.3 fixes the slot lengths for suites 1 and 2. The §8.4 transcript
+fields. §20.3 fixes the slot lengths for suites 1, 2, and 3. The §8.4 transcript
 additionally covers both declared lengths, so any change
 to the split between the slots is detectable even without a suite registry. The
 fields are therefore a bounded declaration, never the sole authority for where the
@@ -1215,9 +1220,10 @@ Notes, all normative:
   is specified in §20.3.
 - The signature *verification* keys are not carried in the footer. Bundles are
   authored by a single trusted org (design §2), whose keys the platform holds out of
-  band. **Key distribution is not specified in this version** (§14), and a reader
-  MUST NOT infer a distribution scheme from `suite_id`. Verification (§20.3) takes
-  the trusted key as an input; it is never read from the file.
+  band. **Key distribution is an interface, not a container structure:** §34 fixes
+  the shape of the verifier's trust input, and a reader MUST NOT infer a
+  distribution scheme from `suite_id`. Verification (§20.3) takes the trusted key as
+  an input; it is never read from the file.
 
 ### 8.3 The commitment root
 
@@ -1752,17 +1758,29 @@ with media type `application/vnd.ctf.bundle.v1` (§30).
 - **An unsigned bundle authenticates nothing** and MUST NOT be served, executed,
   or trusted, however intact it is.
 
-## 14. What is not here yet
+## 14. What is specified but not implemented here
 
-An implementation MUST NOT invent behaviour for any of the following, and MUST
-NOT claim conformance to a later version by guessing.
+Every structure and procedure this document describes is specified: an
+implementation does not have to guess at any behaviour. Three items are
+**specified but not implemented in this repository**, and an implementation that
+lacks them MUST report that honestly rather than approximate them:
 
-- **Key distribution.** How a verifier obtains the trusted public key of §20.3, or
-  the trusted keys E9 verifies entitlement records under (§18.4), is not specified;
-  they are inputs, never bundle fields (§8.2).
+- **Trusted-key distribution.** §34 fixes the shape of the verifier's trust input
+  and the holder-hash construction, but the reference tooling ships no
+  key-management service: obtaining and provisioning the keys is a deployment
+  concern. Verification takes the trust set as an input; it is never read from the
+  file (§8.2).
+- **Suite 3's SLH-DSA signature role.** §20.3 fixes its parameter set and slot
+  layout, but the reference implementation resolves that role to `NotImplemented`
+  at the point of use rather than silently reducing the hybrid signature to two of
+  its three components.
 - **The live solvability gate's implementation.** Its socket contract is specified
   in §32, but no implementation of it ships in this repository; until one does, a
   `runtime`-bearing bundle is recorded `unverified` (§25.6).
+
+An implementation MUST NOT claim conformance to a later version by guessing at
+behaviour this document does not specify, and MUST NOT report a role it did not
+implement, or a gate that did not run, as if it had succeeded.
 
 ## 15. Extension policy
 
@@ -1894,8 +1912,9 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.7.0 | Key envelopes, derived flags, and the review-debt tickets 72–97. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file this version's writer produces is byte-identical to a 0.6 file's for the same inputs. Specifies the key-envelope construction (§21) and the derived-flag and stage-key derivations (§22), and the production side of the hybrid signature — signing a bundle in place, changing no byte outside the footer (§20.3). Adds **R22** (an `EXTERNAL` record carries no codec) and gates **R20** on `CONTAINER_V1`; both ride the existing bit rather than spending a new one, because the mirror bytes R22 rules out were never well-defined (§5.7, §9.4) and no writer has produced the combination, while R20 on the legacy path protects nothing (§16). Places the C1–C7 chunk-index rules explicitly **on-use** in §10, and states `chunk_size ≠ 0` as a precondition of the §5.5 index-length formula, R19, T6, C1, and C3, with R16 ordered before them (§2.1, §5.6). §14 shrinks to entitlement signatures, key distribution, and the live gate. |
 | 0.8.0 | Encrypted sections end to end, the entitlement chain, and stage gating. **No byte-layout change:** `version_minor` stays `3`, and the header, section table, footer, commitment root, and signature transcript are untouched. Adds **`name_id`** to the key-envelope map (§21.3, EN5), which is what lets one `keys` section deliver the content keys of every encrypted section; no writer has ever emitted a `keys` section, so no existing file carries the old three-key form. The reference writer now emits `enc = 1` — compress, then encrypt, with `comp = 1` framing one zstd frame per STREAM chunk (§5.4, §20.2) — and a reader recovers a section's key from its envelope and decrypts it. A **stage-gated** section's content key is `stage_key(flag(N−1), N)` rather than random (§20.2, §22.4); the derivation is the gate and no envelope carries it. Implements the entitlement chain's E1–E9 (§18): the record format was specified in 0.5.0, and **E9** now verifies `sig_platform` always and a `transfer`'s `sig_holder` given trusted keys, so §14 shrinks to key distribution and the live gate. Adds the optional `flag.stage_gate` declaration (§7.6) and enforces **DF5**: a stage gate on a static flag is rejected, and a static flag is `static`/`none` or any derivation this version does not implement. Closes the review-debt tickets 75, 77, 78, 79, and 82: §15's limit row is split by direction and §12 reconciled with it; §3's padding clause is gated on `CONTAINER_V1`; §16's M7 cell no longer claims to name the key; §4.5 names the test that asserts each header vector, with a dedicated **0.3 header vector test** added; and `ctf` gains argument parsing, shell completions, and CLI integration tests. Every change either defines what a previous version left unspecified or *widens* what a reader accepts, so no feature bit is spent (§15). |
 | 0.9.0 | Review-debt tickets 81, 83, 86–88, 90–92, 95–97. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Adds the optional **`paths`** manifest key and rules M22–M25 (§7.2, §7.5), so a directory tree is representable without widening `names`: a relative POSIX path per `name_id`, checked component-by-component against the name rule so `.`, `..`, an absolute path, and a `\` are unrepresentable rather than filtered; unique across the map; and naming a real section. It is an ordinary manifest key, so no feature bit is spent — a reader that does not implement it carries it byte-for-byte (§7.3). The rest are diagnostic and reference-implementation changes with no format effect: a section root mismatch carries the section's `name_id` and the whole-file verification pass reports every mismatch instead of aborting on the first; `crit` list errors (M6–M8) carry an entry index like the sibling list rules; `ExceedsFile` reports the real file length and names `footer_off` as the bound when that is what fired; a pre-0.3 file is diagnosed as an older format with no container rather than as a feature-negotiation failure; `BadMagic` and `CborUnsupported` no longer echo input bytes; `ctf inspect` prints each section's full name so truncated labels cannot collide; the unused `Bundle::sig_input` is deleted and `Manifest::description` is pinned by a test. The design note's thread-parallel BLAKE3 claim is corrected to state the reference implementation hashes single-threaded. |
-| 0.11.0 | Phase 4 and the platform interfaces. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.10 file's for the same inputs. Adds **§25**, the offline solvability gate: the `solver.wasm` ABI (a core module with no imports exporting `memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len`), the artifact block that deliberately omits the flag, the flag output block, the gate procedure, the tri-state `passed`/`failed`/`unverified` status, and rules S1–S8. Adds **§26** (seed and flag injection: `CTF_SEED`/`/ctf/seed`, `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and the no-guessing rule I1–I5), **§27** (sealed release and its audit record, L1–L4), **§28** (the static artifact serving manifest and its two independent checks, V1–V5), **§29** (the platform ingest descriptor and the digest-pinning and referrer/origin policy checks, P1–P3 and O1–O3), **§30** (the bundle as an OCI image, media type `application/vnd.ctf.bundle.v1`, X1–X3), **§31** (the challenge base image contract, B1–B3), **§32** (the live gate socket contract, N1–N4 — specified, not implemented), and **§33** (the WTFlag adapter, W1–W3). Registers the bundle media type in §12 and removes the live gate from §14's unspecified list. Every addition defines a structure a previous version left unspecified, adds a platform-side policy that is not a container rule, or relaxes nothing; no feature bit is spent (§15). Reference implementation: `ctf-generator`'s solver host and offline gate, the `ctf-generator` container binary, and the `ctf` subcommands `run`, `serving-manifest`, `oci-export`, `oci-import`, and `release`. |
 | 0.10.0 | Phase 3: the deterministic generator, and the progress payload of a handoff. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.9 file's for the same inputs. Adds **§23**, fixing the generator interface (a core WebAssembly module with no imports, exporting `memory`, `ctf_alloc`, `ctf_generate`, and `ctf_output_len`), the canonical output block, the output root, the interface version and WASM profile, the three determinism modes (`strict`, `flag_only`, `none`), and rules G1–G12 — including fuel rather than epochs, forced deterministic relaxed-SIMD, NaN canonicalization, and a cross-engine cross-check, which is how §23.6's settings are validated rather than trusted. Adds **§24**, fixing the sealed-progress payload a `progress` record carries across a handoff (P1–P4): a `holder`-context envelope and an AEAD ciphertext whose AAD binds suite, challenge, and subject. §7.6 gains `generate.interface` and `generate.profile`, makes `wasm` and `outputs` conditional on a non-`flag_only` determinism mode, and states that the container reader carries these declarations without acting on them; the output-to-`names` mapping is enforced by the authoring tool (§7.8), not the reader. Every change either defines a structure a previous version left unspecified or relaxes a rule, so no feature bit is spent (§15). Reference implementation: the `ctf-generator` crate (Wasmtime host with a `wasmi` cross-check and the determinism gate), the Rust and C guest SDKs, `ctf init` archetype scaffolds, the sealed-progress helpers, and `ctf transfer`. |
+| 0.11.0 | Phase 4 and the platform interfaces. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.10 file's for the same inputs. Adds **§25**, the offline solvability gate: the `solver.wasm` ABI (a core module with no imports exporting `memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len`), the artifact block that deliberately omits the flag, the flag output block, the gate procedure, the tri-state `passed`/`failed`/`unverified` status, and rules S1–S8. Adds **§26** (seed and flag injection: `CTF_SEED`/`/ctf/seed`, `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and the no-guessing rule I1–I5), **§27** (sealed release and its audit record, L1–L4), **§28** (the static artifact serving manifest and its two independent checks, V1–V5), **§29** (the platform ingest descriptor and the digest-pinning and referrer/origin policy checks, P1–P3 and O1–O3), **§30** (the bundle as an OCI image, media type `application/vnd.ctf.bundle.v1`, X1–X3), **§31** (the challenge base image contract, B1–B3), **§32** (the live gate socket contract, N1–N4 — specified, not implemented), and **§33** (the WTFlag adapter, W1–W3). Registers the bundle media type in §12 and removes the live gate from §14's unspecified list. Every addition defines a structure a previous version left unspecified, adds a platform-side policy that is not a container rule, or relaxes nothing; no feature bit is spent (§15). Reference implementation: `ctf-generator`'s solver host and offline gate, the `ctf-generator` container binary, and the `ctf` subcommands `run`, `serving-manifest`, `oci-export`, `oci-import`, and `release`. |
+| 0.12.0 | Fills the last specification gaps (ticket 55). **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.11 file's for the same inputs. Adds **§34**, the trusted-key interface: the trust set a verifier is supplied (`root`, `platform`, `holder`), the **holder public-key hash** `BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)` that E9 resolves a `transfer` against, the rule that a key trusted for one role is not accepted for another, and the separation of the §24 progress recipient KEM key from the holder signature key. Completes **§20.3** for suite 3 by fixing its parameter set (`SLH-DSA-SHA2-128s`, FIPS 205) and slot layout (`sig_pq = ML-DSA-65 ‖ SLH-DSA-SHA2-128s`, 11165 bytes), so a suite-3 verifier need not guess. Adds **S9–S10** to §25.7, requiring a gate to name each §25.5 stage it ran (with the §25.6 condition behind a non-passed outcome) and to persist a `ctf/verification/v1` record. Rewrites §14 to state that nothing is left unspecified and to list the three items specified but not implemented here. Every change defines a structure a previous version left unspecified and narrows nothing, so no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -1912,7 +1931,7 @@ manifest; a reader MUST reject any byte after the array.
 | `type` | tstr | ● | `grant`, `transfer`, `revoke`, or `progress` |
 | `challenge` | tstr | ● | Challenge `id` the record is about |
 | `subject` | tstr | ● | Subject the record binds |
-| `holder` | bstr, 32 bytes | ● | Holder public-key hash (design §9) |
+| `holder` | bstr, 32 bytes | ● | Holder public-key hash (§34.1) |
 | `prev` | bstr, 32 bytes | ● | Record id of the previous record; 32 zero bytes at genesis |
 | `root` | bstr, 32 bytes | ● at genesis only | Commitment root (§8.3) of the bundle the genesis grant was issued for |
 | `timestamp` | int (uint or nint) | | Platform-issued; **advisory only** |
@@ -1921,6 +1940,12 @@ manifest; a reader MUST reject any byte after the array.
 | `sig_platform` | map | ● | Platform's hybrid signature |
 
 A signature map has exactly two keys, `classical` and `pq`, each a byte string.
+
+`holder` is the 32-byte **holder public-key hash** of §34.1: `BLAKE3` over a domain
+label and the holder's hybrid signature public key. It names the holder whose
+signature a `transfer` requires (E9); it is not the holder's KEM key, which is a
+separate key used only by the §24 progress envelope and is supplied out of band
+(§34.2).
 
 ### 18.2 Chaining and ordering
 
@@ -1973,11 +1998,11 @@ following holds.
 | E8 | `sig_platform` is absent; or `type` is `transfer` and `sig_holder` is absent; or `type` is not `transfer` and `sig_holder` is present. |
 | E9 | A `sig_platform` signature, or a `transfer`'s `sig_holder` signature, does not verify under a trusted key. |
 
-E9 needs trusted public keys the bundle does not carry — key distribution is out of
-scope (§14) — so it is a separate step from the offline E1–E8 check: the platform's
-public key always, and for a `transfer` the public key of the holder named by the
-previous record. Both components of the suite's hybrid signature MUST verify over
-the §18.3 transcript (§20.3); a failure of either is a failure of the whole.
+E9 needs trusted public keys the bundle does not carry, supplied as the trust set of
+§34: the platform's public key always, and for a `transfer` the public key of the
+holder named by the previous record. Both components of the suite's hybrid
+signature MUST verify over the §18.3 transcript (§20.3); a failure of either is a
+failure of the whole.
 E1–E8 establish structure and the genesis binding, **not** authenticity: a reader
 MUST NOT report a chain as authenticated until E9 has run with trusted keys.
 
@@ -1986,7 +2011,7 @@ MUST NOT report a chain as authenticated until E9 has run with trusted keys.
 Everything except E9 is checkable with no platform reachable: the records are
 inside the bundle, the chain is a hash chain, and the genesis binds the bundle's
 commitment root. E9 needs trusted public keys, but it needs no network either — the
-signature primitive is local and the keys are an input (§14). That is why the chain
+signature primitive is local and the keys are an input (§34). That is why the chain
 lives in the format rather than in a database table — an air-gapped forensics
 workstation on USB media has to validate it, and it has to stay auditable even if
 the platform's database is later found to be wrong (design §9).
@@ -2015,7 +2040,9 @@ example (design §7) — without moving a field or changing a record.
 | 3 (archive) | X25519 + ML-KEM-768 | AES-256-GCM | BLAKE3 | HKDF-SHA-256 | Ed25519 + ML-DSA-65 + SLH-DSA |
 
 Suite 3 is for the long-term archive copy only; its signature is larger and slower
-to verify (design §7).
+to verify (design §7). §20.3 fixes the parameter set (`SLH-DSA-SHA2-128s`) and the
+exact slot lengths for all three suites, so the registry is complete even for the
+suite this version does not implement.
 
 ### 19.2 Rules
 
@@ -2151,9 +2178,9 @@ verify, and MUST NOT return plaintext before every chunk has been authenticated
 
 ### 20.3 Hybrid signature
 
-Suites 1 and 2 sign with Ed25519 + ML-DSA-65 (FIPS 204). Both MUST verify over the
-identical §8.4 transcript. The two components occupy the footer's two slots, so no
-in-slot encoding is needed:
+Suites 1 and 2 sign with Ed25519 + ML-DSA-65 (FIPS 204); suite 3 adds SLH-DSA
+(FIPS 205). Every component MUST verify over the identical §8.4 transcript. The two
+components occupy the footer's two slots, so no in-slot encoding is needed:
 
 | Slot | Primitive | Length (bytes) |
 |---|---|---:|
@@ -2161,7 +2188,7 @@ in-slot encoding is needed:
 | `sig_pq` | ML-DSA-65 signature | 3309 |
 
 The corresponding public keys are 32 and 1952 bytes. They are not carried in the
-bundle (§8.2); a verifier is supplied them out of band.
+bundle (§8.2); a verifier is supplied them out of band (§34).
 
 Verification succeeds only when **both** components verify over the same transcript.
 A failure of either is a failure of the whole: there is no half-authentic result. A
@@ -2169,9 +2196,26 @@ bundle whose signature slots are empty authenticates nothing and MUST NOT be rep
 as authentic, however intact it is. A verifier MUST NOT locate the slots from the
 length fields alone (§8.1); the lengths are the suite's.
 
-Suite 3 adds SLH-DSA to the signature set (§19). That role is not implemented in this
-version, so a suite-3 file cannot be authenticated; resolving the role reports the
-suite and the role rather than silently reducing the hybrid to two of its three
+Suite 3 adds SLH-DSA-SHA2-128s (FIPS 205) as a third component. The footer has two
+slots, so the two post-quantum components share `sig_pq` in a fixed order:
+
+| Suite | `sig_classical` length | `sig_pq` contents | `sig_pq` length |
+|---|---:|---|---:|
+| 1, 2 | 64 | ML-DSA-65 | 3309 |
+| 3 | 64 | ML-DSA-65 ‖ SLH-DSA-SHA2-128s | 3309 + 7856 = 11165 |
+
+The corresponding public keys are Ed25519 32 bytes, ML-DSA-65 1952 bytes, and
+SLH-DSA-SHA2-128s 32 bytes. `SLH-DSA-SHA2-128s` is FIPS 205's small-signature
+parameter set; the archive suite is its only consumer and its signature is already
+the dominant cost of a bundle, which is the whole reason the suite is separate.
+A suite-3 verifier MUST split `sig_pq` at the ML-DSA-65 length and verify all three
+components; a failure of any is a failure of the whole, exactly as for suites 1
+and 2. Section §19.1's suite table assigns the `signature` role; this section fixes
+the bytes that role produces, so a suite-3 verifier need not guess them.
+
+SLH-DSA is not implemented in this version, so a suite-3 file cannot be
+authenticated by the reference implementation; resolving the role reports the suite
+and the role rather than silently reducing the hybrid to two of its three
 components.
 
 ## 21. Key envelopes
@@ -2607,6 +2651,32 @@ declaration is false or absent; or it declares no generator or no solver. An hon
 `unverified` is a usable state; a false `passed` is worse than no gate at all
 (design §3).
 
+A conforming gate MUST name each stage of §25.5 that it ran, and for a `failed` or
+`unverified` outcome MUST name the stage or the condition that produced it, so a
+caller can tell a flag mismatch from a module that could not be sandboxed.
+
+The reference tooling persists the outcome as a **verification record**: a JSON
+object written alongside the bundle it describes, never inside one. It is derived
+data about a run, not a container structure, and it is not covered by the
+commitment root.
+
+```json
+{
+  "schema": "ctf/verification/v1",
+  "challenge": "<manifest id>",
+  "version": 0,
+  "subject": "reference",
+  "status": "passed",
+  "reason": "the solver recovered the derived flag",
+  "generator_root": "<64 lowercase hex, or null>",
+  "cross_engine": true,
+  "runs": 2
+}
+```
+
+`generator_root`, `cross_engine`, and `runs` are `null` when the gate did not run;
+`challenge` and `subject` are JSON strings with `"` and `\` escaped.
+
 ### 25.7 Rules
 
 | # | Rule |
@@ -2619,6 +2689,8 @@ declaration is false or absent; or it declares no generator or no solver. An hon
 | S6 | The input block MUST be the canonical artifact block of §25.3 and MUST NOT carry the flag. |
 | S7 | The output block MUST be canonical per §25.4, and its flag MUST be valid UTF-8. |
 | S8 | A bundle whose gate does not run MUST be reported `unverified` (§25.6), never `passed`. |
+| S9 | A gate MUST name each §25.5 stage it ran, and MUST name the stage or §25.6 condition behind a `failed` or `unverified` outcome. |
+| S10 | A persisted verification record MUST carry the `ctf/verification/v1` schema, the `status`, and the `challenge` it describes. |
 
 ## 26. Seed and flag injection
 
@@ -2925,3 +2997,67 @@ secret to protect.
 | W1 | The adapter's subject id is the team identifier, verbatim. |
 | W2 | Its seed and flag are exactly §22.2 and §22.3 with that mapping. |
 | W3 | `event_secret` is held by a single oracle and is never written into a bundle. |
+
+## 34. Trusted keys (interface)
+
+The container never carries a verification key (§8.2). Verification is therefore an
+operation with two inputs: the file, and a **trust set** the verifier is supplied
+out of band. This section fixes the shape of that input so a verifier does not have
+to invent one, in the same spirit as §32's socket contract. It is an interface, not
+a container structure: nothing here appears in a bundle or inside the commitment
+root.
+
+### 34.1 The holder hash
+
+An entitlement record names its holder by the 32-byte `holder` field (§18.1), not by
+a public key. The field is the holder's **holder public-key hash**:
+
+```text
+holder = BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)
+```
+
+`"ctf/holder-hash/v1"` is the 18 ASCII bytes with no terminator and no length
+prefix. `pk_classical` is the holder's Ed25519 public key (32 bytes) and `pk_pq` is
+the holder's post-quantum signature public key in the slot order of §20.3
+(ML-DSA-65, 1952 bytes; for suite 3, ML-DSA-65 ‖ SLH-DSA-SHA2-128s, §20.3). The
+hash is over the **signature** public key — the one that verifies `sig_holder` — not
+over the KEM key of §24.
+
+A verifier resolves a `holder` by hashing each trusted holder signature key and
+comparing. A `holder` with no matching trusted key is an E9 failure, not a
+structural error: E1–E8 do not depend on key distribution.
+
+### 34.2 The trust set
+
+A trust set binds three key roles. Each public key is a hybrid signature public key
+per §20.3: the classical component and the post-quantum component(s).
+
+| Role | Verifies | Key |
+|---|---|---|
+| `root` | the footer signature (§8.4, §20.3) | the authoring org's hybrid signature public key |
+| `platform` | `sig_platform` on every entitlement record (§18.3, E9) | the platform's hybrid signature public key |
+| `holder` | a `transfer`'s `sig_holder` (§18.3, E9) | the current holder's hybrid signature public key, resolved through §34.1 |
+
+`root` and `platform` may be the same key; the format neither requires nor forbids
+their separation. A verifier MUST NOT treat a key it was not given as trusted; the
+trust set is the whole of its authority, and a key presented by the file is never
+one of them.
+
+The **progress recipient key** of §24 is a fourth, separate input: the new holder's
+hybrid KEM public key. It is not named by the `holder` field (§34.1); a caller that
+constructs a progress envelope resolves it out of band.
+
+### 34.3 Provisioning
+
+How a verifier obtains a trust set, and how keys are rotated or retired, are
+deployment concerns deliberately outside this document, exactly as the live gate's
+implementation is outside it (§32.4). What this document fixes is that such a set
+exists, what each role means, and how a holder is resolved from it.
+
+| # | Rule |
+|---|---|
+| KD1 | A verifier MUST take its trusted public keys as an input, never read them from the file. |
+| KD2 | `holder` MUST be `BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)` over the signature public key, per §34.1. |
+| KD3 | A `transfer`'s `sig_holder` MUST be verified against the key the previous record's `holder` resolves to; an unresolved `holder` fails E9. |
+| KD4 | A key trusted for one role MUST NOT be accepted for another role. |
+| KD5 | The §24 progress recipient KEM key is a separate input, distinct from the `holder` field's signature key. |

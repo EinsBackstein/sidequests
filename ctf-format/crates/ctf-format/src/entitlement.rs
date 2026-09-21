@@ -74,17 +74,15 @@ pub const RECORD_LABEL: &[u8] = b"ctf/entitlement/record/v1";
 /// signature being replayed against an entitlement record (design §9).
 pub const SIG_LABEL: &[u8] = b"ctf/entitlement-sig/v1";
 
-/// Domain label for the reference holder-hash convention.
+/// Domain label for the holder public-key hash (spec §34.1). 18 ASCII bytes.
 pub const HOLDER_HASH_LABEL: &[u8] = b"ctf/holder-hash/v1";
 
-/// The reference implementation's holder public-key hash.
+/// The holder public-key hash (spec §34.1).
 ///
-/// Spec §18.1 fixes the *width* (32 bytes) and the role — a record names a holder
-/// by a hash of its public key — but not the function. Mapping a holder to a key
-/// is key distribution, which §14 leaves out of scope, so an interoperable
-/// deployment must agree on its own. This is a local convention the CLI uses so a
-/// key and the hash recorded for it agree, in the same spirit as the key-file
-/// format: a convenience, not a container format.
+/// `BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)` over the holder's hybrid
+/// **signature** public key. The spec fixes the construction so a verifier can
+/// resolve a record's 32-byte `holder` field to a trusted key; the KEM key a §24
+/// progress envelope uses is a separate input (§34.2).
 pub fn holder_hash(public_key: &HybridPublicKey) -> [u8; ROOT_LEN] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(HOLDER_HASH_LABEL);

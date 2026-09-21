@@ -397,9 +397,14 @@ struct ReleaseArgs {
 ///
 /// Reads the authoring document, resolves the generator and solver modules
 /// relative to it, derives the reference subject's flag from `--secret`, and runs
-/// the generator determinism gate followed by the solver gate. A solver that does
-/// not recover the derived flag exits non-zero, so a bundle that cannot be solved
-/// cannot be published.
+/// the generator determinism gate followed by the solver gate. Each stage of spec
+/// §25.5 is named, and a failure names the stage and reason (ticket 29). A solver
+/// that does not recover the derived flag exits non-zero, so a bundle that cannot
+/// be solved cannot be published.
+///
+/// The tri-state outcome can be persisted as a `ctf/verification/v1` record
+/// (ticket 30): `--status` names the path, or `--bundle` writes
+/// `<bundle>.status.json` alongside the bundle it describes.
 #[derive(Args)]
 struct RunArgs {
     /// The authoring YAML file.
@@ -412,6 +417,17 @@ struct RunArgs {
     /// The reference subject id. Defaults to `reference`.
     #[arg(long, default_value = "reference")]
     subject: String,
+
+    /// Where to write the tri-state verification record (JSON, spec §25.6).
+    #[arg(long)]
+    status: Option<String>,
+
+    /// The bundle this gate result describes.
+    ///
+    /// When given without `--status`, the record is written to
+    /// `<bundle>.status.json`, alongside the bundle.
+    #[arg(long)]
+    bundle: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -836,31 +852,81 @@ fn run_gate(args: &RunArgs) -> ExitCode {
     ) {
         Ok(r) => r,
         Err(e) => {
+            // A hard stage failure (`GateError`) names the stage and the reason.
             eprintln!("ctf: {path}: {e}");
             return ExitCode::FAILURE;
         }
     };
+
+    // Name each stage of spec §25.5 that ran, and the reason for a non-passed
+    // outcome (ticket 29, rule S9).
     println!("gate          {}", report.status);
-    match report.status {
+    if let (Some(runs), Some(cross), Some(count)) = (
+        report.generator_runs,
+        report.cross_engine,
+        report.artifact_count,
+    ) {
+        println!(
+            "  determinism passed  ({runs} runs; second engine {})",
+            if cross {
+                "agreed"
+            } else {
+                "unavailable for this module"
+            }
+        );
+        println!(
+            "  generator   {}  ({count} output{})",
+            report
+                .generator_root
+                .map_or_else(|| "-".to_owned(), |r| hex_encode(&r)),
+            if count == 1 { "" } else { "s" }
+        );
+        println!("  artifact    {count} output(s) handed to the solver, flag omitted");
+        println!("  solver      ran in the same capability-free sandbox");
+    }
+    let code = match report.status {
         ctf_generator::GateStatus::Passed => {
-            println!("              the solver recovered the derived flag");
+            println!("  compare     solver flag == derived flag");
             ExitCode::SUCCESS
         }
         ctf_generator::GateStatus::Failed => {
+            println!("  compare     solver flag != derived flag");
             eprintln!(
-                "ctf: {path}: the solver produced {:?}, not the derived flag — refusing to publish",
+                "ctf: {path}: compare: the solver produced {:?}, not the derived flag — refusing to publish",
                 report.solver_flag.as_deref().unwrap_or("")
             );
             ExitCode::FAILURE
         }
         ctf_generator::GateStatus::Unverified => {
-            println!(
-                "              no offline gate ran (a live instance is required, or no \
-                 generator/solver is declared); this bundle is unverified, never passed"
-            );
+            let reason = report
+                .unverified_reason
+                .map_or_else(|| "the gate did not run".to_owned(), |r| r.to_string());
+            println!("  determinism not run ({reason})");
+            println!("              this bundle is unverified, never passed");
             ExitCode::SUCCESS
         }
+    };
+
+    // Persist the tri-state alongside the bundle (ticket 30). The record is derived
+    // data about this run, not a container structure.
+    let status_path = args
+        .status
+        .clone()
+        .or_else(|| args.bundle.as_ref().map(|b| format!("{b}.status.json")));
+    if let Some(status_path) = status_path {
+        let record = ctf_generator::VerificationRecord::from_report(
+            &doc.id,
+            doc.version,
+            &args.subject,
+            &report,
+        );
+        if let Err(e) = std::fs::write(&status_path, record.to_json()) {
+            eprintln!("ctf: {status_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        println!("{status_path}: verification status ({})", report.status);
     }
+    code
 }
 
 fn run_keygen(args: &KeygenArgs) -> ExitCode {

@@ -7,6 +7,62 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.12.0] — 2026-09-21
+
+Fills the last specification gaps and lands the phase-8 conformance work (tickets
+29, 30, 48, 52, 55, 59, 69). **No byte-layout change:** `version_minor` stays `3`,
+the header, section table, footer, commitment root, and signature transcript are
+untouched, and every `.ctf` file this version's writer produces is byte-identical to
+a 0.11 file's for the same inputs. Every addition defines a structure a previous
+version left unspecified, so no feature bit is spent (§15).
+
+### Spec — the specification has no gaps (ticket 55, spec §34, §20.3, §25.6, §14)
+
+- **§34, trusted keys (interface).** The trust set a verifier is supplied (`root`,
+  `platform`, `holder`), the **holder public-key hash**
+  `BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)` that E9 resolves a
+  `transfer` against, the rule that a role is part of the trust decision, and the
+  separation of the §24 progress recipient KEM key from the holder signature key.
+  Rules KD1–KD5.
+- **§20.3 completed for suite 3.** Its parameter set (`SLH-DSA-SHA2-128s`, FIPS 205)
+  and slot layout (`sig_pq = ML-DSA-65 ‖ SLH-DSA-SHA2-128s`, 11165 bytes) are fixed,
+  so a suite-3 verifier need not guess. The role remains unimplemented here.
+- **§25.6/§25.7 gain S9–S10.** A gate MUST name each §25.5 stage it ran and the
+  §25.6 condition behind a non-passed outcome, and MUST persist a
+  `ctf/verification/v1` record.
+- **§14 rewritten** from "what is not here yet" to "what is specified but not
+  implemented here": key distribution, suite 3's signature role, and the live gate
+  implementation.
+
+### Added — staged `ctf run` and persisted tri-state (tickets 29, 30, spec §25)
+
+`ctf run` names each stage of §25.5 (determinism, generator, artifact, solver,
+compare) and reports the failing stage and reason through a new `GateError`; an
+`unverified` outcome names its condition. `--status` writes the tri-state
+`ctf/verification/v1` JSON record, and `--bundle` writes it to
+`<bundle>.status.json` alongside the bundle. `OfflineGateReport` carries the
+determinism run count, the second-engine result, and the artifact count.
+
+### Added — conformance vector runner (ticket 52)
+
+`crates/ctf-conformance` runs committed golden bundles and named hostile mutations
+against `ctf-format`, printing `PASS`/`FAIL <vector>` with the observed error and
+exiting non-zero on a mismatch.
+
+### Added — the two reference challenges pack (ticket 69)
+
+`File_And_Seek` and `Mental_Overflow` from `CTF-FlagFrenzy/challenges` are vendored
+as authoring fixtures. Both pack and produce their expected ingest descriptors;
+`Mental_Overflow`'s `random.sample` brace choice is replaced by a seed-derived one,
+so its generator passes the determinism gate, pinned by a regression test.
+
+### Docs — hardening audit and key migration (tickets 48, 59)
+
+`docs/HARDENING-AUDIT.md` audits each design §14 checklist item against the code
+with a pass/fail/ticket verdict and files the gaps. `docs/CHALLENGE-KEY-MIGRATION.md`
+is the operator runbook for mapping the platform's per-challenge key to
+`(id, version)` and migrating an event already in progress.
+
 ## [0.11.0] — 2026-09-20
 
 Phase 4 and the platform-facing interfaces. **No byte-layout change:** `version_minor`

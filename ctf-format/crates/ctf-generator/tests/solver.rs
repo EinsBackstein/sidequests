@@ -73,6 +73,12 @@ fn a_correct_solver_passes_the_offline_gate() {
     assert_eq!(report.status.to_string(), "passed");
     assert_eq!(report.solver_flag.as_deref(), Some("abc"));
     assert!(report.generator_root.is_some());
+    // Stage detail the CLI reports (tickets 29/30): determinism runs, the second
+    // engine, and how many artifacts crossed to the solver.
+    assert_eq!(report.generator_runs, Some(2));
+    assert!(report.cross_engine.is_some());
+    assert_eq!(report.artifact_count, Some(1));
+    assert!(report.unverified_reason.is_none());
 }
 
 #[test]
@@ -108,6 +114,10 @@ fn a_runtime_bearing_bundle_is_unverified_never_passed() {
     .unwrap();
     assert_eq!(report.status.to_string(), "unverified");
     assert!(report.generator_root.is_none());
+    assert_eq!(
+        report.unverified_reason,
+        Some(ctf_generator::UnverifiedReason::RuntimeDeclared)
+    );
 }
 
 #[test]

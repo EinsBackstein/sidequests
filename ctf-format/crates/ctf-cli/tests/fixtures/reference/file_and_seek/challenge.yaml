@@ -1,0 +1,28 @@
+# Reference fixture for GitHub ticket #69: "File And Seek", from
+# `CTF-FlagFrenzy/challenges` (File_And_Seek/).
+#
+# This is a runtime web challenge: it carries no generator, so `flag: derived`
+# is the whole flag story and the live gate is what checks solvability. There is
+# deliberately no `verify` block — a runtime challenge is `unverified`, never
+# `passed` (spec §25.6).
+#
+# The `runtime.image` digest is a shape-valid PLACEHOLDER, not a real image
+# digest. The policy only checks the `name@sha256:<64 lowercase hex>` shape
+# (spec §7.6, ticket 61), so the fixture uses the reserved `.invalid` TLD (RFC
+# 2606) and an all-`1` digest to make that unmistakable. See ../README.md.
+spec: 1
+id: file-and-seek
+name: "File And Seek"
+category: Web-challenge
+description: |
+  Enumerate the web application to find a hidden file whose product IDs carry
+  the flag in pieces.
+flag: derived
+runtime:
+  image: "ctf-fixture.invalid/file-and-seek@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  ports:
+    - { container: 80, protocol: tcp }
+  resources: { cpu: "0.5", memory: "256Mi", pids: 64 }
+  instancing: per_team
+  ttl: 30m
+  readiness: { tcp: 80, timeout: 30s }

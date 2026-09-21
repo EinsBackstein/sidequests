@@ -13,11 +13,14 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-20, at format version 0.3 / release 0.11.0. Phases 1–3
-complete; **phase 4's offline solvability gate landed** (spec §25, `ctf run`), and
-the platform-facing interfaces are specified and implemented: the ingest descriptor,
-digest pinning, seed/flag injection, the serving manifest, sealed release, the OCI
-artifact, the base image, and the WTFlag adapter (spec §26–§33). The live gate is
+**Last updated:** 2026-09-21, at format version 0.3 / release 0.12.0. Phases 1–4
+complete; **the offline solvability gate is staged and persisted** (spec §25.6,
+tickets 29/30), and the phase-8 surface has started: the **hardening audit** (ticket
+48, `docs/HARDENING-AUDIT.md`), the **conformance vector runner** (ticket 52,
+`crates/ctf-conformance`), the **two reference challenges packing** (ticket 69), and
+the **challenge-key migration runbook** (ticket 59). **Spec §34 now specifies
+trusted-key distribution**, suite 3's SLH-DSA parameters, and the gate's
+verification record, so the specification has no gaps (ticket 55). The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, 0 clippy warnings.
 
@@ -63,16 +66,24 @@ ctf-format/
                         wasmi cross-check, the determinism gate, the offline
                         solver host (spec §25), seed injection (spec §26), and
                         the `ctf-generator` container binary
+  crates/ctf-conformance/ the phase-8 vector runner (ticket 52): executes the
+                        golden `.ctf` fixtures and named hostile mutations under
+                        `spec/vectors/conformance/` against the library
   crates/ctf-cli/       the `ctf` binary — inspect, validate, pack, keygen, sign,
                         keys, seal, unseal, init, transfer, serving-manifest,
                         oci-export, oci-import, release, run, completions (clap)
   sdk/rust/             Rust guest SDK + sample generator (built to wasm)
   sdk/c/                C guest SDK (header + example)
+  sdk/reference/        detached guest generators for the ticket-69 fixtures
   fuzz/                 cargo-fuzz targets + committed seed corpus
   spec/SPEC.md          normative byte-level spec — wins over the design doc
   spec/generator.wit    the generator interface's source of truth
+  spec/vectors/         primitive vectors (ticket 17) + `conformance/` bundles
   docs/FORMAT-DESIGN.md design rationale and threat model
   docs/ROADMAP.md       phased plan, checkboxes reflect reality
+  docs/HARDENING-AUDIT.md         design §14 checklist, audited (ticket 48)
+  docs/CHALLENGE-KEY-MIGRATION.md challenge-key -> (id, version) runbook (ticket 59)
+  docs/WTFLAG-ADAPTER.md the flag-oracle adapter (spec §33)
   CHANGELOG.md
   HANDOFF.md            this file
 ```
@@ -163,7 +174,7 @@ Confirmed against current docs, not from memory. Re-verify before changing:
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 331 tests, 0 clippy warnings, `unsafe_code =
+parses them back before returning. 444 tests, 0 clippy warnings, `unsafe_code =
 "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
@@ -270,17 +281,23 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**0.11.0 landed phase 4's offline gate** (tickets 28, 31, spec §25/§32), the
-platform interfaces (tickets 58, 60–63, 65–68, spec §26–§33), and the review-debt
-tickets 80 and 84. What remains, in order:
+**0.12.0 closed the specification** (§34 trusted keys, suite-3 SLH-DSA, the gate
+verification record; ticket 55) and landed the first phase-8 work: the hardening
+audit (48), the conformance runner (52), the reference-challenge packing (69), and
+the key-migration runbook (59). What remains, in order:
 
 1. **The platform ingest path** (phase 5): the Postgres schema, the ingest pipeline,
    and the admin TUI — the first point the system is operable end to end. It now has
    everything it needs: `Bundle::parse`, `offline_gate`, `PlatformDescriptor`,
-   `ServingManifest`, and `release_at_event_end`.
+   `ServingManifest`, `release_at_event_end`, and the `ctf/verification/v1` record
+   `ctf run` persists.
 2. **The live solvability gate** (spec §32): the orchestrator project implements the
    socket contract; until then a `runtime`-bearing bundle is `unverified`.
-3. **`ctf pack` emits the optional `paths` tree** (ticket 88) and, with it, the
+3. **The rest of phase 8**: fuzzing in CI, the per-§14-bullet hostile corpus and
+   synthetic future-file vectors, the entitlement fuzz target (#107), and the Go
+   second implementation (#53) reproducing every conformance vector from
+   `spec/SPEC.md` alone.
+4. **`ctf pack` emits the optional `paths` tree** (ticket 88) and, with it, the
    authoring surface for `external` payloads, which `forensics` scaffolding
    currently has to describe in prose because `ChallengeDoc` has no `external` key.
 
@@ -379,7 +396,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 331 tests
+cargo test                    # 444 tests
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 
