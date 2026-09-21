@@ -20,18 +20,23 @@
 //! neither sealed nor player-visible. A hexdump tool that would happily dump a
 //! sealed writeup on request is a decryption oracle with a friendly interface.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use memmap2::Mmap;
 
 use ctf_format::authoring::ChallengeDoc;
 use ctf_format::cbor::Value;
+use ctf_format::derive;
+use ctf_format::oci;
 use ctf_format::pack::{self, PackError};
 use ctf_format::{
     Bundle, Compression, Encryption, EntitlementChain, HEADER_LEN, HolderKeys, HybridPublicKey,
     HybridSigningKey, KemKeyPair, MAGIC, Payload, Recipient, SECTION_RECORD_LEN, SectionFlags,
-    SectionKind, SectionSpec, Signing, Timestamp, VERSION_MAJOR, holder_hash, seal_progress,
+    SectionKind, SectionSpec, ServingManifest, Signing, Timestamp, VERSION_MAJOR, holder_hash,
+    release_at_event_end, seal_progress,
 };
 
 /// `ctf` — the command-line tool for `.ctf` challenge bundles.
@@ -79,6 +84,16 @@ enum Commands {
     Init(InitArgs),
     /// Append a signed handoff to an entitlement chain.
     Transfer(TransferArgs),
+    /// Emit the static artifact serving manifest for a bundle (ticket 65).
+    ServingManifest(ServingManifestArgs),
+    /// Export a bundle as an OCI image layout (ticket 63).
+    OciExport(OciExportArgs),
+    /// Import a bundle from an OCI image layout (ticket 63).
+    OciImport(OciImportArgs),
+    /// Release a bundle's sealed sections with the offline seal key (ticket 66).
+    Release(ReleaseArgs),
+    /// Run the local ingest gate: determinism and offline solvability (ticket 28).
+    Run(RunArgs),
     /// Generate a shell completion script to stdout.
     Completions(CompletionsArgs),
 }
@@ -89,7 +104,7 @@ struct InspectArgs {
     #[arg(long)]
     hex: bool,
 
-    /// Re-hash every inline section against its root (reads the whole file).
+    /// Re-hash every inline section against its root.
     ///
     /// Exits non-zero if any section's bytes are present but unreadable by this
     /// build. External payloads are reported, not counted as failures: their
@@ -126,6 +141,13 @@ struct PackArgs {
     /// Crypto suite id.
     #[arg(long, default_value_t = pack::DEFAULT_SUITE_ID)]
     suite: u16,
+
+    /// Where to write the platform ingest descriptor JSON.
+    ///
+    /// Defaults to `<out>.descriptor.json`. The descriptor is projected from the
+    /// bundle's committed manifest, so it can never disagree with it.
+    #[arg(long)]
+    descriptor: Option<String>,
 }
 
 #[derive(Args)]
@@ -319,6 +341,79 @@ struct TransferArgs {
     suite: u16,
 }
 
+/// `ctf serving-manifest`: write the canonical-CBOR serving manifest for a bundle.
+#[derive(Args)]
+struct ServingManifestArgs {
+    /// The `.ctf` bundle to project.
+    bundle: String,
+
+    /// Where to write the canonical-CBOR serving manifest. Prints a summary if omitted.
+    #[arg(long)]
+    out: Option<String>,
+}
+
+/// `ctf oci-export`: write an OCI image layout containing the bundle.
+#[derive(Args)]
+struct OciExportArgs {
+    /// The `.ctf` bundle to export.
+    bundle: String,
+
+    /// The layout directory to create.
+    #[arg(long)]
+    out: String,
+}
+
+/// `ctf oci-import`: read the bundle back out of an OCI image layout.
+#[derive(Args)]
+struct OciImportArgs {
+    /// The OCI image layout directory.
+    layout: String,
+
+    /// Where to write the recovered `.ctf` bundle.
+    #[arg(long)]
+    out: String,
+}
+
+/// `ctf release`: decrypt a bundle's sealed sections with the offline seal key.
+#[derive(Args)]
+struct ReleaseArgs {
+    /// The `.ctf` bundle whose sealed sections are released.
+    bundle: String,
+
+    /// The `seal` recipient's hybrid KEM secret key file.
+    #[arg(long)]
+    key: String,
+
+    /// Directory to write the released members into.
+    #[arg(long)]
+    out: String,
+
+    /// Where to write the JSON audit report.
+    #[arg(long)]
+    report: Option<String>,
+}
+
+/// `ctf run`: run the platform's full offline ingest gate locally (ticket 28).
+///
+/// Reads the authoring document, resolves the generator and solver modules
+/// relative to it, derives the reference subject's flag from `--secret`, and runs
+/// the generator determinism gate followed by the solver gate. A solver that does
+/// not recover the derived flag exits non-zero, so a bundle that cannot be solved
+/// cannot be published.
+#[derive(Args)]
+struct RunArgs {
+    /// The authoring YAML file.
+    challenge: String,
+
+    /// The event secret, 64 lowercase hex digits (spec §22.2). Never written anywhere.
+    #[arg(long)]
+    secret: String,
+
+    /// The reference subject id. Defaults to `reference`.
+    #[arg(long, default_value = "reference")]
+    subject: String,
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => run(cli),
@@ -350,6 +445,11 @@ fn run(cli: Cli) -> ExitCode {
         Commands::Unseal(args) => run_unseal(&args),
         Commands::Init(args) => run_init(&args),
         Commands::Transfer(args) => run_transfer(&args),
+        Commands::ServingManifest(args) => run_serving_manifest(&args),
+        Commands::OciExport(args) => run_oci_export(&args),
+        Commands::OciImport(args) => run_oci_import(&args),
+        Commands::Release(args) => run_release(&args),
+        Commands::Run(args) => run_gate(&args),
         Commands::Completions(args) => run_completions(&args),
     }
 }
@@ -389,14 +489,18 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
         }
     };
     let issues = doc.validate();
-    if issues.is_empty() {
+    let errors = issues.iter().filter(|i| i.is_error()).count();
+    for issue in issues.iter().filter(|i| !i.is_error()) {
+        eprintln!("ctf: {path}: warning: {issue}");
+    }
+    if errors == 0 {
         println!("{path}: ok");
         return ExitCode::SUCCESS;
     }
-    for issue in &issues {
+    for issue in issues.iter().filter(|i| i.is_error()) {
         eprintln!("ctf: {path}: {issue}");
     }
-    eprintln!("ctf: {path}: {} problem(s) found", issues.len());
+    eprintln!("ctf: {path}: {errors} problem(s) found");
     ExitCode::FAILURE
 }
 
@@ -424,9 +528,20 @@ fn run_pack(args: &PackArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let file = match pack::pack_with_suite(&doc, suite) {
+    // Warnings do not block packing (spec §7.8); report them before the bundle so
+    // an author sees them even on success.
+    for issue in doc.warnings() {
+        eprintln!("ctf: {path}: warning: {issue}");
+    }
+    let (file, descriptor) = match pack::pack_with_descriptor(&doc, suite) {
         Ok(f) => f,
         Err(PackError::Invalid(issues)) => {
+            for issue in &issues {
+                eprintln!("ctf: {path}: {issue}");
+            }
+            return ExitCode::FAILURE;
+        }
+        Err(PackError::Policy(issues)) => {
             for issue in &issues {
                 eprintln!("ctf: {path}: {issue}");
             }
@@ -441,15 +556,313 @@ fn run_pack(args: &PackArgs) -> ExitCode {
         eprintln!("ctf: {out}: {e}");
         return ExitCode::FAILURE;
     }
+    let descriptor_path = args
+        .descriptor
+        .clone()
+        .unwrap_or_else(|| format!("{out}.descriptor.json"));
+    let descriptor_json = match descriptor.to_json() {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("ctf: {descriptor_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&descriptor_path, descriptor_json) {
+        eprintln!("ctf: {descriptor_path}: {e}");
+        return ExitCode::FAILURE;
+    }
     println!(
         "{out}: {} bytes, manifest {}, suite {suite} (unsigned)",
         file.len(),
         doc.id
     );
+    println!("{descriptor_path}: platform ingest descriptor");
     ExitCode::SUCCESS
 }
 
 /// `ctf keygen`: write a fresh hybrid keypair as two hex key files.
+/// `ctf serving-manifest`: write the canonical-CBOR serving manifest.
+fn run_serving_manifest(args: &ServingManifestArgs) -> ExitCode {
+    let path = &args.bundle;
+    let file = match open_mapped(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let bundle = match Bundle::parse(&file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let manifest = ServingManifest::from_bundle(&bundle);
+    let bytes = match manifest.to_bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match &args.out {
+        Some(out) => {
+            if let Err(e) = std::fs::write(out, &bytes) {
+                eprintln!("ctf: {out}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "{out}: {} servable artifact(s), {} bytes of canonical CBOR",
+                manifest.artifacts.len(),
+                bytes.len()
+            );
+        }
+        None => {
+            println!(
+                "{}: {} servable artifact(s)",
+                manifest.challenge_id,
+                manifest.artifacts.len()
+            );
+            for a in &manifest.artifacts {
+                println!(
+                    "  {:<5} {:<24} {:>12}  {}{}",
+                    a.name_id,
+                    truncate(&a.name, 24),
+                    a.size,
+                    hexstr(&a.root),
+                    if a.external { "  (external)" } else { "" }
+                );
+                for m in &a.mirrors {
+                    println!("        mirror  {m:?}");
+                }
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `ctf oci-export`: write an OCI image layout containing the bundle.
+fn run_oci_export(args: &OciExportArgs) -> ExitCode {
+    let path = &args.bundle;
+    let file = match open_mapped(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match oci::export(&file, Path::new(&args.out)) {
+        Ok(layout) => {
+            println!(
+                "{}: OCI image layout, bundle digest {}",
+                layout.root.display(),
+                layout.bundle_digest
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `ctf oci-import`: read the bundle back out of an OCI image layout.
+fn run_oci_import(args: &OciImportArgs) -> ExitCode {
+    let layout = &args.layout;
+    match oci::import(Path::new(layout)) {
+        Ok(bytes) => {
+            if let Err(e) = std::fs::write(&args.out, &bytes) {
+                eprintln!("ctf: {}: {e}", args.out);
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "{}: {} bytes recovered from {layout}",
+                args.out,
+                bytes.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("ctf: {layout}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `ctf release`: decrypt a bundle's sealed sections with the offline seal key.
+fn run_release(args: &ReleaseArgs) -> ExitCode {
+    let path = &args.bundle;
+    let file = match open_mapped(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let bundle = match Bundle::parse(&file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let key = match read_hex_key_file(&args.key) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("ctf: {}: {e}", args.key);
+            return ExitCode::FAILURE;
+        }
+    };
+    let release = match release_at_event_end(&bundle, &key) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&args.out) {
+        eprintln!("ctf: {}: {e}", args.out);
+        return ExitCode::FAILURE;
+    }
+    for asset in &release.assets {
+        let dest = Path::new(&args.out).join(&asset.member.name);
+        if let Err(e) = std::fs::write(&dest, &asset.bytes) {
+            eprintln!("ctf: {}: {e}", dest.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    let report_path = args
+        .report
+        .clone()
+        .unwrap_or_else(|| format!("{}/release.json", args.out));
+    let report = match release.report.to_json() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ctf: {report_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::write(&report_path, report) {
+        eprintln!("ctf: {report_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{}: released {} member(s), report {report_path}",
+        args.out,
+        release.assets.len()
+    );
+    ExitCode::SUCCESS
+}
+
+/// `ctf run`: the platform's full offline ingest gate, run locally.
+fn run_gate(args: &RunArgs) -> ExitCode {
+    let path = &args.challenge;
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let doc = match ChallengeDoc::from_yaml(&text) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let errors = doc.errors();
+    if !errors.is_empty() {
+        for issue in &errors {
+            eprintln!("ctf: {path}: {issue}");
+        }
+        return ExitCode::FAILURE;
+    }
+    let dir = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
+
+    // Resolve the modules the document names, relative to the document.
+    let read_module = |key: &str, name: &str| -> Result<Vec<u8>, String> {
+        std::fs::read(dir.join(name)).map_err(|e| format!("`{key}`: {name}: {e}"))
+    };
+    let generator = match doc.generate.as_ref().and_then(|g| g.wasm.as_deref()) {
+        Some(name) => match read_module("generate.wasm", name) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("ctf: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+    let solver = match doc.verify.as_ref().map(|v| v.solver.as_str()) {
+        Some(name) => match read_module("verify.solver", name) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("ctf: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    let secret = match hex_decode(&args.secret) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ctf: --secret: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let seed = match derive::subject_seed(&secret, &doc.id, doc.version, &args.subject) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ctf: --secret: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let expected = derive::flag(&seed);
+
+    let report = match ctf_generator::offline_gate(
+        ctf_generator::OfflineGate {
+            generator: generator.as_deref(),
+            solver: solver.as_deref(),
+            seed: &seed,
+            expected_flag: &expected,
+            runtime_declared: doc.runtime.is_some(),
+            offline_declared: doc.verify.as_ref().is_some_and(|v| v.offline),
+        },
+        &ctf_generator::Limits::default(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("gate          {}", report.status);
+    match report.status {
+        ctf_generator::GateStatus::Passed => {
+            println!("              the solver recovered the derived flag");
+            ExitCode::SUCCESS
+        }
+        ctf_generator::GateStatus::Failed => {
+            eprintln!(
+                "ctf: {path}: the solver produced {:?}, not the derived flag — refusing to publish",
+                report.solver_flag.as_deref().unwrap_or("")
+            );
+            ExitCode::FAILURE
+        }
+        ctf_generator::GateStatus::Unverified => {
+            println!(
+                "              no offline gate ran (a live instance is required, or no \
+                 generator/solver is declared); this bundle is unverified, never passed"
+            );
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn run_keygen(args: &KeygenArgs) -> ExitCode {
     let key_path = &args.out_key;
     let pub_path = &args.out_pub;
@@ -1245,13 +1658,32 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
     }
 }
 
+/// Map `path` read-only, so `ctf inspect` never allocates the whole file.
+///
+/// `mmap` cannot map zero bytes, and a `.ctf` is never empty, so an empty file is
+/// reported as a clean error rather than as an OS `EINVAL`. The 4096-byte payload
+/// alignment the format already requires (spec §12, `PAYLOAD_ALIGN`) is what makes
+/// the mapped region usable directly, with no copy to align it.
+#[allow(unsafe_code)]
+fn open_mapped(path: &str) -> Result<Mmap, Box<dyn std::error::Error>> {
+    let f = std::fs::File::open(path)?;
+    if f.metadata()?.len() == 0 {
+        return Err(format!("{path}: file is empty").into());
+    }
+    // SAFETY: the mapping is read-only and shared. `Bundle` treats the bytes as a
+    // hostile input stream and never writes through them, and the returned `Mmap`
+    // outlives every borrow `inspect` takes from it.
+    let map = unsafe { Mmap::map(&f)? };
+    Ok(map)
+}
+
 fn inspect(
     path: &str,
     hex: bool,
     verify: bool,
     allow_unsigned: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let file = std::fs::read(path)?;
+    let file = open_mapped(path)?;
     let b = Bundle::parse(&file)?;
 
     println!("file          {path}");

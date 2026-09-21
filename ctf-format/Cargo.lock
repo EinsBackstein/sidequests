@@ -498,16 +498,18 @@ dependencies = [
 
 [[package]]
 name = "ctf-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "clap",
  "clap_complete",
  "ctf-format",
+ "ctf-generator",
+ "memmap2",
 ]
 
 [[package]]
 name = "ctf-format"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aws-lc-rs",
  "blake3",
@@ -515,13 +517,14 @@ dependencies = [
  "ml-dsa",
  "ml-kem",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "zstd",
 ]
 
 [[package]]
 name = "ctf-generator"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "ctf-format",
@@ -811,6 +814,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ml-dsa"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1054,6 +1066,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.151"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -1703,6 +1728,12 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"

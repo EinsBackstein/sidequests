@@ -1,6 +1,6 @@
 [package]
 name = "ctf-cli"
-version = "0.10.0"
+version = "0.11.0"
 description = "The `ctf` command-line tool for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,15 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 ctf-format = { path = "../ctf-format" }
+# `ctf run` (ticket 28, design §10) runs the offline solvability gate, which needs
+# the deterministic WASM host. The container library stays free of Wasmtime; only
+# the CLI and the future orchestrator link it.
+ctf-generator = { path = "../ctf-generator" }
+# `ctf inspect` maps the bundle instead of reading it into a `Vec` (ticket 80),
+# so a multi-GB inline bundle is inspected without a whole-file allocation. This
+# is the one crate that opts out of the workspace's `unsafe_code` denial, at a
+# single call site in `open_mapped`.
+memmap2 = "0.9"
 
 [lints]
 workspace = true

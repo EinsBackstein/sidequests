@@ -30,6 +30,11 @@ pub struct Limits {
     pub max_output_bytes: usize,
     /// Ceiling on the seed the host will write into guest memory.
     pub max_seed_bytes: usize,
+    /// Ceiling on the input block the host writes for a solver (spec §25.3).
+    ///
+    /// Larger than [`Limits::max_seed_bytes`] because a solver receives the
+    /// generated artifacts, not a 32-byte seed.
+    pub max_input_bytes: usize,
 }
 
 impl Default for Limits {
@@ -41,6 +46,7 @@ impl Default for Limits {
             max_memory_bytes: 256 * 1024 * 1024,
             max_output_bytes: 256 * 1024 * 1024,
             max_seed_bytes: 1024 * 1024,
+            max_input_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -138,8 +144,8 @@ impl From<AbiError> for GeneratorError {
 }
 
 /// Store state: only the resource limiter, so the guest can reach nothing else.
-struct HostState {
-    limits: StoreLimits,
+pub(crate) struct HostState {
+    pub(crate) limits: StoreLimits,
 }
 
 /// The profile-1 Wasmtime configuration (spec §23.6).
@@ -147,7 +153,7 @@ struct HostState {
 /// This is the only configuration a generator runs under. It is deliberately not
 /// parameterised: profile 1 *is* the setting, and a caller that wants a different
 /// feature set needs a new profile number, not a looser host.
-fn pinned_config() -> Config {
+pub(crate) fn pinned_config() -> Config {
     let mut config = Config::new();
     // Threads off: no shared state, no scheduling.
     config.wasm_threads(false);
@@ -246,7 +252,7 @@ impl Generator {
 }
 
 /// Map a Wasmtime trap to a static generator error.
-fn classify(e: wasmtime::Error) -> GeneratorError {
+pub(crate) fn classify(e: wasmtime::Error) -> GeneratorError {
     if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
         return match trap {
             wasmtime::Trap::OutOfFuel => GeneratorError::OutOfFuel,
@@ -307,7 +313,7 @@ fn call_generate(
     GeneratorOutput::decode(&block, limits.max_output_bytes).map_err(GeneratorError::Abi)
 }
 
-fn write_guest(
+pub(crate) fn write_guest(
     memory: &Memory,
     store: &mut Store<HostState>,
     at: u32,
@@ -328,7 +334,7 @@ fn write_guest(
     Ok(())
 }
 
-fn read_guest(
+pub(crate) fn read_guest(
     memory: &Memory,
     store: &mut Store<HostState>,
     at: u32,

@@ -25,8 +25,19 @@ pub mod abi;
 pub mod gate;
 pub mod host;
 pub mod second;
+pub mod seed_source;
+pub mod solver;
 
-pub use abi::{AbiError, GeneratorOutput, INTERFACE_VERSION, OUTPUT_LABEL, Output, WASM_PROFILE};
-pub use gate::{GateReport, determinism_gate};
+pub use abi::{
+    AbiError, ArtifactBlock, GeneratorOutput, INTERFACE_VERSION, OUTPUT_LABEL, Output, WASM_PROFILE,
+};
+pub use gate::{
+    GateReport, GateStatus, OfflineGate, OfflineGateReport, determinism_gate, offline_gate,
+};
 pub use host::{EngineKind, Generator, GeneratorError, Limits};
 pub use second::second_engine_supported;
+pub use seed_source::{
+    DATA_PATH, FLAG_ENV, FLAG_PATH, SEED_ENV, SEED_PATH, SeedError, check_flag, parse_seed,
+    resolve_flag, resolve_seed, seed_from_env, seed_from_file,
+};
+pub use solver::Solver;

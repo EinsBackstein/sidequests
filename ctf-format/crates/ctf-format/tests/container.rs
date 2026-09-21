@@ -347,6 +347,26 @@ fn header_check_file_len_rejects_short_file() {
     ));
 }
 
+/// H13 alone. The section table still fits inside the file (so H12 does not fire)
+/// and `footer_off` is still past the table end (so H11 does not fire); only
+/// `footer_off > file_len` is violated, which makes the diagnostic exact (spec
+/// §2.1). The sibling test above reaches H12 instead, because there the table is
+/// what runs past the end.
+#[test]
+fn header_check_file_len_rejects_footer_past_file_end() {
+    let mut h = good_header();
+    h.footer_off = FILE_LEN + 1;
+    assert!(h.footer_off >= TABLE_OFF + SECTION_RECORD_LEN as u64);
+    assert!(matches!(
+        h.check_file_len(FILE_LEN),
+        Err(Error::ExceedsFile {
+            at: "footer",
+            end,
+            file_len,
+        }) if end == FILE_LEN + 1 && file_len == FILE_LEN
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Section records
 // ---------------------------------------------------------------------------

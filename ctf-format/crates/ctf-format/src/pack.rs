@@ -32,7 +32,9 @@ use core::fmt;
 use crate::Error;
 use crate::authoring::{ChallengeDoc, ValidationIssue};
 use crate::bundle::{SectionSpec, write_bundle};
+use crate::descriptor::PlatformDescriptor;
 use crate::manifest::{Manifest, check_name};
+use crate::policy::PolicyIssue;
 use crate::section::{SectionFlags, SectionKind};
 
 /// The suite a packed bundle declares when the caller does not choose one.
@@ -47,6 +49,9 @@ pub const DEFAULT_SUITE_ID: u16 = 1;
 pub enum PackError {
     /// The document failed schema or policy validation. The issues name the keys.
     Invalid(Vec<ValidationIssue>),
+    /// The document packed, but the platform policy pass rejected the descriptor.
+    /// These name the manifest keys the platform reads.
+    Policy(Vec<PolicyIssue>),
     /// The document validated but could not be compiled into a bundle.
     Format(Error),
 }
@@ -56,6 +61,13 @@ impl fmt::Display for PackError {
         match self {
             Self::Invalid(issues) => {
                 write!(f, "authoring document is invalid:")?;
+                for issue in issues {
+                    write!(f, "\n  {issue}")?;
+                }
+                Ok(())
+            }
+            Self::Policy(issues) => {
+                write!(f, "the bundle fails the platform policy check:")?;
                 for issue in issues {
                     write!(f, "\n  {issue}")?;
                 }
@@ -167,7 +179,8 @@ pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackEr
 /// byte is packed, and refuses a name that violates the manifest's shape rules,
 /// naming the authoring key it came from. The writer parses its own output before
 /// returning, so a bundle this function produces is one a conforming reader
-/// accepts.
+/// accepts. A warning-severity issue (a third-party origin in the description) does
+/// not block packing; [`ChallengeDoc::warnings`] reports it separately.
 pub fn pack(doc: &ChallengeDoc) -> core::result::Result<Vec<u8>, PackError> {
     pack_with_suite(doc, DEFAULT_SUITE_ID)
 }
@@ -177,12 +190,46 @@ pub fn pack_with_suite(
     doc: &ChallengeDoc,
     suite_id: u16,
 ) -> core::result::Result<Vec<u8>, PackError> {
-    let issues = doc.validate();
-    if !issues.is_empty() {
-        return Err(PackError::Invalid(issues));
+    pack_with_descriptor(doc, suite_id).map(|(bytes, _)| bytes)
+}
+
+/// [`pack`] returning the platform ingest descriptor alongside the bundle (ticket 60).
+///
+/// The descriptor is projected from the manifest that was just packed, so it cannot
+/// disagree with the bundle's committed bytes. It is validated against the
+/// platform's constraints before the bundle is returned, so a descriptor the
+/// platform would reject fails the pack rather than surfacing at ingest.
+pub fn pack_with_descriptor(
+    doc: &ChallengeDoc,
+    suite_id: u16,
+) -> core::result::Result<(Vec<u8>, PlatformDescriptor), PackError> {
+    let errors = doc.errors();
+    if !errors.is_empty() {
+        return Err(PackError::Invalid(errors));
     }
     let manifest = manifest_for(doc)?;
+    let descriptor = PlatformDescriptor::from_manifest(&manifest, doc.platform_namespace());
+    let issues = descriptor.validate();
+    if !issues.is_empty() {
+        return Err(PackError::Policy(issues));
+    }
     let bytes = manifest.encode().map_err(PackError::Format)?;
     let section = SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &bytes);
-    write_bundle(suite_id, &[section]).map_err(PackError::Format)
+    let file = write_bundle(suite_id, &[section]).map_err(PackError::Format)?;
+    Ok((file, descriptor))
+}
+
+/// The platform ingest descriptor for a document, without packing it (ticket 60).
+pub fn descriptor_for(doc: &ChallengeDoc) -> core::result::Result<PlatformDescriptor, PackError> {
+    let errors = doc.errors();
+    if !errors.is_empty() {
+        return Err(PackError::Invalid(errors));
+    }
+    let manifest = manifest_for(doc)?;
+    let descriptor = PlatformDescriptor::from_manifest(&manifest, doc.platform_namespace());
+    let issues = descriptor.validate();
+    if !issues.is_empty() {
+        return Err(PackError::Policy(issues));
+    }
+    Ok(descriptor)
 }

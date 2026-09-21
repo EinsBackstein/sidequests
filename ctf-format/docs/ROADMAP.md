@@ -234,20 +234,61 @@ into a bundle-level `ctf run` is phase 4.
 
 ---
 
-## Phase 4 — Offline solvability gate
+## Phase 4 — Offline solvability gate ▸ *landed in 0.11.0*
 
 Pillar 5's implementable half.
 
-- [ ] Run `solver.wasm` against generated artifacts, no network, same sandbox
-- [ ] Assert solver output equals the derived flag
-- [ ] Live-gate interface specified in `spec/SPEC.md` — the socket contract the
-      orchestrator project must satisfy
-- [ ] Verification status is tri-state: `passed` / `unverified` / `failed`.
-      `runtime`-bearing bundles land on `unverified`, never `passed`
-- [ ] `ctf run` — the full local ingest gate, identical to the platform's
+- [x] Run `solver.wasm` against generated artifacts, no network, same sandbox
+      — **landed in 0.11.0** (spec §25, `crates/ctf-generator/src/solver.rs`). The
+      solver is a core module with no imports, run under the generator's pinned
+      profile; it receives the artifact block (the output block *without* the flag,
+      so it cannot echo it) and returns a flag block.
+- [x] Assert solver output equals the derived flag — `gate::offline_gate` runs the
+      generator under the determinism gate, feeds the artifacts to the solver, and
+      compares its flag to the reference subject's derived flag (§22.3).
+- [x] Live-gate interface specified in `spec/SPEC.md` — **specified in 0.11.0** as
+      §32, the socket contract the orchestrator project must satisfy. Not
+      implemented here, by the scope boundary of design §2.
+- [x] Verification status is tri-state: `passed` / `unverified` / `failed`.
+      `runtime`-bearing bundles land on `unverified`, never `passed` — `GateStatus`,
+      and a bundle whose `verify.offline` is false or absent is `unverified` too.
+- [x] `ctf run` — the full local ingest gate, identical to the platform's. Reads the
+      authoring document, resolves `gen.wasm`/`solver.wasm` relative to it, derives
+      the reference flag from `--secret`, and exits non-zero on `failed`.
 
 **Done when** `ctf run` passing locally guarantees ingest cannot surprise the
 author. This is the highest-leverage item in the roadmap for R6.
+
+## Platform integration (tickets 58–68)
+
+The platform-facing interfaces and policy checks that were blocked on phase 2 and
+the authoring surface. All landed in 0.11.0; the format declares each interface and
+the orchestrator project consumes it (design §2).
+
+- [x] **58** WTFlag adapter — §33, `wtflag.rs`, `docs/WTFLAG-ADAPTER.md`; team maps
+      to subject and the derivation is exactly §22.
+- [x] **60** Platform ingest descriptor — §29, `descriptor.rs`; `ctf pack` emits
+      `<out>.descriptor.json`.
+- [x] **61** Digest-pinned images — §29.2, `policy::check_image_ref`; enforced at
+      authoring time and available as a read-time policy pass.
+- [x] **62** Seed and flag injection — §26, `seed_source.rs`; `CTF_SEED`/`/ctf/seed`,
+      `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and a container with no seed fails.
+- [x] **63** Bundle as an OCI artifact — §30, `oci.rs`; media type
+      `application/vnd.ctf.bundle.v1`, `ctf oci-export`/`oci-import` round-trip
+      byte-for-byte.
+- [x] **65** Static artifact serving manifest — §28, `serving.rs`,
+      `ctf serving-manifest`; sealed sections never appear.
+- [x] **66** Sealed release interop — §27, `release.rs`, `ctf release`; the offline
+      seal key releases `event_end` members with an auditable JSON report.
+- [x] **67** Challenge base image contract — §31, `docker/`, and the
+      `ctf-generator` container binary.
+- [x] **68** Third-party origins and no-referrer — §29.3, `policy.rs`; pack warns
+      about an absolute origin in `description` and defaults to `no-referrer`.
+
+**Done when** the platform can ingest a bundle's descriptor and serve its
+player-visible artifacts without re-deriving the commitment. The interfaces are
+specified and the reference tooling emits them; consuming them is the orchestrator
+project's work.
 
 ---
 
