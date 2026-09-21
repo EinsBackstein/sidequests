@@ -7,6 +7,106 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.11.0] — 2026-09-20
+
+Phase 4 and the platform-facing interfaces. **No byte-layout change:** `version_minor`
+stays `3`, the header, section table, footer, commitment root, and signature
+transcript are untouched, and every `.ctf` file this version's writer produces is
+byte-identical to a 0.10 file's for the same inputs. Every addition defines a
+structure a previous version left unspecified or adds a platform-side policy that is
+not a container rule; nothing narrows what is legal, so no feature bit is spent
+(§15). The container reader still carries `runtime` and the other declaration keys
+without acting on them — the policy checks are a separate pass.
+
+### Added — the offline solvability gate (ticket 28, spec §25)
+
+A `solver` section carries `solver.wasm`, a core WebAssembly module with **no
+imports**, run in the same capability-free sandbox as the generator. It exports
+`memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len`; it receives the **artifact
+block** — the generator output block without the flag, so it cannot echo the answer
+— and returns a flag block. `ctf-generator`'s `offline_gate` runs the generator under
+the determinism gate, feeds the artifacts to the solver, and compares its flag to the
+reference subject's derived flag. The status is tri-state: `passed`, `failed`,
+`unverified`. A `runtime`-bearing bundle, or one whose `verify.offline` is false or
+absent, is `unverified` — never `passed`. Rules S1–S8.
+
+### Added — the live gate contract (ticket 31, spec §32)
+
+The socket contract the orchestrator project must satisfy for a `runtime`-bearing
+bundle: one connected TCP socket to the readiness port and no other network
+capability, the §25.4 flag block as the result, and the tri-state of §25.6. It is
+specified normatively and deliberately **not** implemented here (design §2).
+
+### Added — seed and flag injection (ticket 62, spec §26)
+
+`CTF_SEED` / `/ctf/seed` (32 bytes, 64 hex digits) and `CTF_FLAG` / `/ctf/flag`, with
+generated artifacts under `/ctf/data`. A container with no injected seed fails rather
+than guessing, and a generator whose computed flag disagrees with the injected flag
+fails at start. Rules I1–I5. The `ctf-generator` container binary implements the
+entrypoint.
+
+### Added — the challenge base image contract (ticket 67, spec §31)
+
+`docker/Dockerfile` and `docker/README.md`: a minimal non-root image carrying the
+generator host, the fixed mounts, and a read-only root filesystem. The binary is
+tested end to end against the sample generator.
+
+### Added — the platform ingest descriptor (tickets 60, 61, 68, spec §29)
+
+`ctf pack` now emits `<out>.descriptor.json`, projected from the packed manifest
+(slug, name, category, level, image, port, resources, storage size, read-only flag,
+TTL, readiness, and a `no-referrer` policy). The `platform` overlay key gains an
+authoring surface (`platform.level`, `platform.storage_size`, `platform.read_only`,
+`platform.namespace`). Two policy checks join it: **digest-pinned images** — a tag
+is rejected at authoring time and by a read-time pass — and a warning for an
+absolute third-party origin in `description`.
+
+### Added — the static artifact serving manifest (ticket 65, spec §28)
+
+`ServingManifest::from_bundle` projects each `PLAYER_VISIBLE`, non-`SEALED` section's
+`name_id`, name, size, and root, plus its `path` and, for an external payload, its
+mirrors. `serve` returns inline bytes only through the root-verifying serving
+boundary. `ctf serving-manifest` emits it as canonical CBOR.
+
+### Added — sealed release interop (ticket 66, spec §27)
+
+`release_at_event_end` decrypts a bundle's `event_end` sealed members with the
+offline `seal` key, verifies each plaintext against its root, and emits a JSON audit
+record that contains no plaintext. A non-`event_end` declaration is refused.
+`ctf release` writes the members and the report.
+
+### Added — the bundle as an OCI artifact (ticket 63, spec §30)
+
+`oci::export`/`oci::import` write and read an OCI image layout with the bundle as its
+single layer, media type `application/vnd.ctf.bundle.v1`. The round trip is
+byte-for-byte and the content address is `sha256` of the bundle. `ctf oci-export`
+and `ctf oci-import`.
+
+### Added — the WTFlag adapter (ticket 58, spec §33)
+
+`wtflag.rs` documents and implements the mapping from the platform's per-challenge
+key and team onto §22's `(chal_id, chal_version, subject_id)`: team is the subject,
+one oracle holds `event_secret`, and the derivation is exactly §22.2/§22.3.
+`docs/WTFLAG-ADAPTER.md` carries the migration note.
+
+### Changed
+
+- `ctf inspect` memory-maps the bundle instead of reading it into a `Vec` (ticket
+  80), so a large inline bundle is inspected without a whole-file allocation. The
+  workspace lint is `unsafe_code = "deny"` rather than `forbid`, so the one
+  `memmap2` call site can opt in explicitly; every other crate still denies it.
+- `ctf pack` prints authoring **warnings** (a third-party origin) without failing;
+  errors still block. `ctf validate` reports the two separately.
+- Added parse-side tests for footer F2–F4 and header H13 (ticket 84), so each rule
+  has a fixture on the reader path and not only the writer path.
+
+### Dependencies
+
+- `serde_json` for the JSON platform surfaces (descriptor, OCI layout).
+- `memmap2` in `ctf-cli` for the mapped inspector.
+- `ctf-cli` now depends on `ctf-generator` for `ctf run`; the container library
+  still does not.
+
 ## [0.10.0] — 2026-09-20
 
 Phase 3, the deterministic generator, and the sealed-progress payload a handoff

@@ -625,6 +625,76 @@ fn rejects_an_oversized_signature() {
     assert!(matches!(f.to_bytes(), Err(Error::SignatureTooLong { .. })));
 }
 
+/// F3 on the **parse** side, not only through `Footer::to_bytes`.
+///
+/// `to_bytes` refuses to emit an oversized slot, so the writer path can never reach
+/// F3's read; a reader handed a hostile file can. The fixture is a footer at offset
+/// 64 whose declared classical length exceeds `MAX_SIG_LEN`; F3 is evaluated before
+/// F5, so the rest of the footer need not be self-consistent for the rule to fire.
+#[test]
+fn rejects_an_oversized_signature_on_parse() {
+    let mut footer = Vec::new();
+    footer.extend_from_slice(&[0u8; 32]);
+    footer.extend_from_slice(&(MAX_SIG_LEN + 1).to_le_bytes());
+    footer.extend_from_slice(&1u32.to_le_bytes());
+    // F1 (`footer_len >= 56`) is evaluated first, so the fixture needs the trailer
+    // even though F3 does not read it.
+    footer.extend_from_slice(&0u64.to_le_bytes());
+    footer.extend_from_slice(&MAGIC);
+    let mut file = vec![0u8; 64];
+    file.extend_from_slice(&footer);
+    assert!(matches!(
+        Footer::parse(&file, 64),
+        Err(Error::SignatureTooLong {
+            max: MAX_SIG_LEN,
+            ..
+        })
+    ));
+}
+
+/// F4 on the **parse** side: a footer carrying one signature of a hybrid pair is a
+/// downgrade, and the reader rejects it rather than reading it as "classically
+/// signed". `to_bytes` refuses the same shape, so only a hand-built file reaches
+/// this path.
+#[test]
+fn rejects_half_a_hybrid_signature_on_parse() {
+    let mut footer = Vec::new();
+    footer.extend_from_slice(&[0u8; 32]);
+    footer.extend_from_slice(&64u32.to_le_bytes()); // classical present
+    footer.extend_from_slice(&0u32.to_le_bytes()); // pq absent
+    footer.extend_from_slice(&[0u8; 64]);
+    footer.extend_from_slice(&(64u64 + footer.len() as u64 + 16).to_le_bytes());
+    footer.extend_from_slice(&MAGIC);
+    let mut file = vec![0u8; 64];
+    file.extend_from_slice(&footer);
+    assert!(matches!(
+        Footer::parse(&file, 64),
+        Err(Error::Inconsistent { .. })
+    ));
+}
+
+/// F2 on the **parse** side. `footer_off` is anchored at the header, so a value
+/// below the header length is a structural error before any length rule applies;
+/// the `Bundle` path never reaches `Footer::parse` with such a value because H11
+/// rejects it first, which is exactly why the rule needs its own fixture here.
+#[test]
+fn rejects_a_footer_inside_the_header_on_parse() {
+    let file = minimal_bundle();
+    assert!(matches!(
+        Footer::parse(&file, 63),
+        Err(Error::BadOffset {
+            at: "header.footer_off",
+            ..
+        })
+    ));
+    // The other half of F2: a `footer_off` past the end of the file.
+    let past = file.len() as u64 + 1;
+    assert!(matches!(
+        Footer::parse(&file, past),
+        Err(Error::ExceedsFile { at: "footer", .. })
+    ));
+}
+
 #[test]
 fn footer_round_trips_with_signatures() {
     let f = Footer {

@@ -46,17 +46,23 @@ pub mod chunk;
 pub mod compress;
 pub mod crypto;
 pub mod derive;
+pub mod descriptor;
 pub mod entitlement;
 pub mod envelope;
 pub mod error;
 pub mod footer;
 pub mod header;
 pub mod manifest;
+pub mod oci;
 pub mod pack;
+pub mod policy;
 pub mod progress;
+pub mod release;
 pub mod scaffold;
 pub mod section;
+pub mod serving;
 pub mod suite;
+pub mod wtflag;
 
 pub use bundle::{
     Bundle, EncryptionSpec, Payload, Recipient, SectionSpec, VerifyReport, sign_bundle,
@@ -64,6 +70,7 @@ pub use bundle::{
 };
 pub use chunk::ChainingValue;
 pub use crypto::sign::{Authentication, verify_footer};
+pub use descriptor::{DEFAULT_PLATFORM_NAMESPACE, PlatformDescriptor, Readiness, Resources};
 pub use entitlement::{
     EntitlementChain, EntitlementRecord, HOLDER_HASH_LABEL, HolderKeys, RECORD_LABEL, RecordType,
     SIG_LABEL, Timestamp, holder_hash, sig_input,
@@ -72,10 +79,17 @@ pub use error::{Error, Result};
 pub use footer::{Footer, Signing};
 pub use header::Header;
 pub use manifest::Manifest;
+pub use oci::{BUNDLE_MEDIA_TYPE, OciError, OciLayout, digest_sha256};
+pub use policy::{
+    DEFAULT_REFERRER_POLICY, ImageRefError, PolicyIssue, check_image_ref, check_manifest,
+    third_party_origins,
+};
 pub use progress::{open_progress, seal_progress};
+pub use release::{Release, ReleaseReport, ReleasedAsset, ReleasedMember, release_at_event_end};
 pub use section::{
     Compression, Encryption, FutureKind, RuleSet, SectionFlags, SectionKind, SectionRecord,
 };
+pub use serving::{ServedArtifact, ServingManifest, serve};
 pub use suite::{
     AeadId, HashId, HybridPublicKey, HybridSignature, HybridSigningKey, KdfId, KemContext, KemId,
     KemKeyPair, Role, SignatureId, Suite, SuiteError, suite,

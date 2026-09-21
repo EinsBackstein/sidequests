@@ -98,6 +98,91 @@ pub struct GeneratorOutput {
     pub flag: String,
 }
 
+/// The artifact-only block a solver receives (spec §25.3).
+///
+/// It is the generator output block (§23.3) **without the flag**: the solver must
+/// recover the flag from the artifacts, so handing it the generator's flag would
+/// make the offline gate vacuous. Encoding it is exactly the output block's
+/// `count × { name, data }` prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactBlock {
+    /// Named artifact byte streams, in the order the generator emitted them.
+    pub outputs: Vec<Output>,
+}
+
+impl ArtifactBlock {
+    /// Project a generator run's outputs into the solver's input.
+    pub fn from_generator(output: &GeneratorOutput) -> Self {
+        Self {
+            outputs: output.outputs.clone(),
+        }
+    }
+
+    /// The canonical encoding: `u32_le count` then `count × { name, data }`.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(self.outputs.len() as u32).to_le_bytes());
+        for o in &self.outputs {
+            out.extend_from_slice(&(o.name.len() as u32).to_le_bytes());
+            out.extend_from_slice(o.name.as_bytes());
+            out.extend_from_slice(&(o.bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(&o.bytes);
+        }
+        out
+    }
+
+    /// Decode an artifact block, rejecting anything not canonical for its value.
+    pub fn decode(b: &[u8], max_output_bytes: usize) -> Result<Self, AbiError> {
+        let mut at = 0usize;
+        let count = u32_at(b, at).ok_or(AbiError::Truncated)? as usize;
+        at += 4;
+        if count > MAX_OUTPUTS {
+            return Err(AbiError::TooManyOutputs);
+        }
+        let mut outputs = Vec::with_capacity(count);
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        let mut total = 0usize;
+        for _ in 0..count {
+            let name_len = u32_at(b, at).ok_or(AbiError::Truncated)? as usize;
+            at += 4;
+            if name_len == 0 || name_len > MAX_OUTPUT_NAME_LEN {
+                return Err(AbiError::BadNameLength);
+            }
+            let name_end = at.checked_add(name_len).ok_or(AbiError::Truncated)?;
+            let name_bytes = b.get(at..name_end).ok_or(AbiError::Truncated)?;
+            let name = core::str::from_utf8(name_bytes).map_err(|_| AbiError::NameNotUtf8)?;
+            if !names.insert(name) {
+                return Err(AbiError::DuplicateName);
+            }
+            at = name_end;
+            let data_len = u32_at(b, at).ok_or(AbiError::Truncated)? as usize;
+            at += 4;
+            total = total
+                .checked_add(data_len)
+                .ok_or(AbiError::OutputTooLarge)?;
+            if total > max_output_bytes {
+                return Err(AbiError::OutputTooLarge);
+            }
+            let data_end = at.checked_add(data_len).ok_or(AbiError::Truncated)?;
+            let data = b.get(at..data_end).ok_or(AbiError::Truncated)?.to_vec();
+            at = data_end;
+            outputs.push(Output {
+                name: name.to_owned(),
+                bytes: data,
+            });
+        }
+        if at != b.len() {
+            return Err(AbiError::TrailingBytes);
+        }
+        Ok(Self { outputs })
+    }
+
+    /// The output with `name`, if the generator produced one.
+    pub fn output(&self, name: &str) -> Option<&Output> {
+        self.outputs.iter().find(|o| o.name == name)
+    }
+}
+
 /// A little-endian `u32` at `at`, or `None` when the block ends before it.
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
@@ -199,6 +284,28 @@ impl GeneratorOutput {
     pub fn output(&self, name: &str) -> Option<&Output> {
         self.outputs.iter().find(|o| o.name == name)
     }
+}
+
+/// Decode a solver output block: `u32_le flag_len ‖ flag bytes` (spec §25.4).
+///
+/// The solver's whole result is a flag, so the block is one length-prefixed string
+/// and nothing else. Trailing bytes are rejected, matching the generator block's
+/// canonicity rule.
+pub fn decode_solver_flag(b: &[u8], max_flag_len: usize) -> Result<String, AbiError> {
+    let mut at = 0usize;
+    let flag_len = u32_at(b, at).ok_or(AbiError::Truncated)? as usize;
+    at += 4;
+    if flag_len > max_flag_len {
+        return Err(AbiError::FlagTooLong);
+    }
+    let end = at.checked_add(flag_len).ok_or(AbiError::Truncated)?;
+    let bytes = b.get(at..end).ok_or(AbiError::Truncated)?;
+    let flag = core::str::from_utf8(bytes).map_err(|_| AbiError::FlagNotUtf8)?;
+    at = end;
+    if at != b.len() {
+        return Err(AbiError::TrailingBytes);
+    }
+    Ok(flag.to_owned())
 }
 
 /// Reject an interface version this host does not implement (rule G6).

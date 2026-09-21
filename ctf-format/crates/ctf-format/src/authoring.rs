@@ -108,6 +108,9 @@ pub struct ChallengeDoc {
     /// Solvability-gate declaration.
     #[serde(default)]
     pub verify: Option<VerifySpec>,
+    /// Platform overlay: fields the format does not own (spec §7.7).
+    #[serde(default)]
+    pub platform: Option<PlatformSpec>,
 }
 
 impl ChallengeDoc {
@@ -163,7 +166,21 @@ impl ChallengeDoc {
         if let Some(v) = &self.verify {
             out.push((text("verify"), v.to_cbor()));
         }
+        if let Some(p) = &self.platform {
+            out.push((text("platform"), p.to_cbor()));
+        }
         out
+    }
+
+    /// The platform overlay namespace this document targets.
+    ///
+    /// The author may name their own namespace (spec §7.7); absent, the reference
+    /// platform's namespace is used, which is what `ctf pack`'s descriptor reads.
+    pub fn platform_namespace(&self) -> &str {
+        self.platform
+            .as_ref()
+            .and_then(|p| p.namespace.as_deref())
+            .unwrap_or(crate::descriptor::DEFAULT_PLATFORM_NAMESPACE)
     }
 }
 
@@ -177,16 +194,42 @@ impl ChallengeDoc {
 pub struct ValidationIssue {
     key: String,
     message: String,
+    severity: Severity,
+}
+
+/// Whether an issue blocks packing or is advice.
+///
+/// A misspelled key, a missing required value, or a digest-less image is an
+/// [`Severity::Error`]: packing would produce a bundle the platform rejects or, worse,
+/// one it accepts wrongly. A third-party origin in a description is a
+/// [`Severity::Warning`]: it is a real risk, but it is the author's call and a
+/// challenge with a legitimate hyperlink must still pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Packing must fail until the issue is fixed.
+    Error,
+    /// Packing proceeds; the issue is reported.
+    Warning,
 }
 
 impl ValidationIssue {
-    /// Build an issue for `key`. `pub(crate)` so the packer can report a
+    /// Build an error issue for `key`. `pub(crate)` so the packer can report a
     /// synthesized name that violates the manifest's shape rules under the
     /// authoring key it came from (spec §7.8).
     pub(crate) fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             message: message.into(),
+            severity: Severity::Error,
+        }
+    }
+
+    /// Build a warning issue for `key`.
+    pub(crate) fn warning(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            message: message.into(),
+            severity: Severity::Warning,
         }
     }
 
@@ -198,6 +241,16 @@ impl ValidationIssue {
     /// What is wrong with it.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Whether this issue blocks packing.
+    pub fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    /// Whether this issue blocks packing.
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
     }
 }
 
@@ -361,6 +414,14 @@ impl ChallengeDoc {
                 &["shared", "per_team"],
             );
             non_empty(&mut issues, "runtime.image", &r.image);
+            // Ticket 61: the image is a digest, never a tag. Checked here at
+            // authoring time, and again by the policy pass an ingest pipeline runs,
+            // so the two cannot drift.
+            if !r.image.is_empty()
+                && let Err(e) = crate::policy::check_image_ref(&r.image)
+            {
+                issues.push(ValidationIssue::new("runtime.image", e.to_string()));
+            }
             non_empty(&mut issues, "runtime.ttl", &r.ttl);
             non_empty(&mut issues, "runtime.resources.cpu", &r.resources.cpu);
             non_empty(&mut issues, "runtime.resources.memory", &r.resources.memory);
@@ -416,7 +477,54 @@ impl ChallengeDoc {
             }
         }
 
+        // Ticket 68. A description that references an absolute third-party URL can
+        // leak the capability URL in the Referer header of a challenge frontend. The
+        // format cannot rewrite a frontend, so the policy warns here and the packer
+        // records a `no-referrer` default in the descriptor. A challenge that vendors
+        // its assets references them relatively and produces no warning.
+        if let Some(d) = &self.description {
+            for origin in crate::policy::third_party_origins(d) {
+                issues.push(ValidationIssue::warning(
+                    "description",
+                    format!(
+                        "references the third-party origin `{origin}`; vendor the asset or use a \
+                         relative reference so the capability URL cannot leak in a Referer header"
+                    ),
+                ));
+            }
+        }
+
+        if let Some(p) = &self.platform {
+            if let Some(ns) = &p.namespace {
+                non_empty(&mut issues, "platform.namespace", ns);
+            }
+            if let Some(level) = p.level
+                && level < 0
+            {
+                issues.push(ValidationIssue::new(
+                    "platform.level",
+                    "must not be negative",
+                ));
+            }
+        }
+
         issues
+    }
+
+    /// The blocking issues only. [`ChallengeDoc::validate`] returns warnings too.
+    pub fn errors(&self) -> Vec<ValidationIssue> {
+        self.validate()
+            .into_iter()
+            .filter(|i| i.is_error())
+            .collect()
+    }
+
+    /// The non-blocking issues only — advice, not a reason to refuse packing.
+    pub fn warnings(&self) -> Vec<ValidationIssue> {
+        self.validate()
+            .into_iter()
+            .filter(|i| !i.is_error())
+            .collect()
     }
 }
 
@@ -771,5 +879,59 @@ pub struct LiveSpec {
 impl LiveSpec {
     fn to_cbor(&self) -> Value {
         map(vec![("interval", text(&self.interval))])
+    }
+}
+
+/// `platform:` — the namespaced overlay for fields the format does not own
+/// (spec §7.7, ticket 57).
+///
+/// The format owns the container and the manifest schema; a track level, a storage
+/// quota, or a read-only root filesystem is the platform's business. Those fields
+/// travel inside one namespace so the format never absorbs a concept it does not
+/// own, and a reader that does not know the namespace carries the whole map
+/// byte-for-byte.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformSpec {
+    /// The owning platform's namespace, a reversed domain such as `org.flagfrenzy`.
+    /// Absent means [`crate::descriptor::DEFAULT_PLATFORM_NAMESPACE`].
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Track level or difficulty, an integer the platform interprets.
+    #[serde(default)]
+    pub level: Option<i64>,
+    /// Forensics-scale storage quota in bytes.
+    #[serde(default)]
+    pub storage_size: Option<u64>,
+    /// Whether the instance's root filesystem is read-only.
+    #[serde(default)]
+    pub read_only: Option<bool>,
+}
+
+impl PlatformSpec {
+    fn to_cbor(&self) -> Value {
+        let namespace = self
+            .namespace
+            .clone()
+            .unwrap_or_else(|| crate::descriptor::DEFAULT_PLATFORM_NAMESPACE.to_owned());
+        let mut fields = Vec::new();
+        if let Some(level) = self.level {
+            fields.push((
+                text("level"),
+                if level < 0 {
+                    // CBOR major type 1 encodes `-1 - n`.
+                    Value::Nint(level.unsigned_abs() - 1)
+                } else {
+                    Value::Uint(level as u64)
+                },
+            ));
+        }
+        if let Some(size) = self.storage_size {
+            fields.push((text("storage_size"), Value::Uint(size)));
+        }
+        if let Some(read_only) = self.read_only {
+            fields.push((text("read_only"), Value::Bool(read_only)));
+        }
+        Value::Map(vec![(Value::Text(namespace), Value::Map(fields))])
     }
 }

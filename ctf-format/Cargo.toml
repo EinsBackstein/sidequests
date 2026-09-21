@@ -11,7 +11,11 @@ edition = "2024"
 rust-version = "1.97"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny`, not `forbid`: the core crates never write `unsafe`, but `ctf inspect`
+# memory-maps the bundle (ticket 80) and `memmap2`'s only entry point is an
+# `unsafe fn`. `deny` keeps every accidental `unsafe` an error while letting the
+# CLI opt in at one audited call site; `forbid` could not be overridden at all.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 indexing_slicing = "warn"

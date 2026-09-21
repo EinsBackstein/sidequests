@@ -1670,7 +1670,8 @@ suite MUST use a 32-byte digest.** A suite with a different digest size requires
 a new major version, not a new `suite_id`. The chunk index inherits the same
 constraint, since its entries are chaining values of the same hash.
 
-The customary filename extension is `.ctf`. No media type is registered.
+The customary filename extension is `.ctf`. A bundle is distributed as an OCI image
+with media type `application/vnd.ctf.bundle.v1` (§30).
 
 ## 13. Security considerations
 
@@ -1759,7 +1760,9 @@ NOT claim conformance to a later version by guessing.
 - **Key distribution.** How a verifier obtains the trusted public key of §20.3, or
   the trusted keys E9 verifies entitlement records under (§18.4), is not specified;
   they are inputs, never bundle fields (§8.2).
-- **The live solvability gate's socket contract** (design §3, pillar 5).
+- **The live solvability gate's implementation.** Its socket contract is specified
+  in §32, but no implementation of it ships in this repository; until one does, a
+  `runtime`-bearing bundle is recorded `unverified` (§25.6).
 
 ## 15. Extension policy
 
@@ -1891,6 +1894,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.7.0 | Key envelopes, derived flags, and the review-debt tickets 72–97. **No byte-layout change:** `version_minor` stays `3` and every `.ctf` file this version's writer produces is byte-identical to a 0.6 file's for the same inputs. Specifies the key-envelope construction (§21) and the derived-flag and stage-key derivations (§22), and the production side of the hybrid signature — signing a bundle in place, changing no byte outside the footer (§20.3). Adds **R22** (an `EXTERNAL` record carries no codec) and gates **R20** on `CONTAINER_V1`; both ride the existing bit rather than spending a new one, because the mirror bytes R22 rules out were never well-defined (§5.7, §9.4) and no writer has produced the combination, while R20 on the legacy path protects nothing (§16). Places the C1–C7 chunk-index rules explicitly **on-use** in §10, and states `chunk_size ≠ 0` as a precondition of the §5.5 index-length formula, R19, T6, C1, and C3, with R16 ordered before them (§2.1, §5.6). §14 shrinks to entitlement signatures, key distribution, and the live gate. |
 | 0.8.0 | Encrypted sections end to end, the entitlement chain, and stage gating. **No byte-layout change:** `version_minor` stays `3`, and the header, section table, footer, commitment root, and signature transcript are untouched. Adds **`name_id`** to the key-envelope map (§21.3, EN5), which is what lets one `keys` section deliver the content keys of every encrypted section; no writer has ever emitted a `keys` section, so no existing file carries the old three-key form. The reference writer now emits `enc = 1` — compress, then encrypt, with `comp = 1` framing one zstd frame per STREAM chunk (§5.4, §20.2) — and a reader recovers a section's key from its envelope and decrypts it. A **stage-gated** section's content key is `stage_key(flag(N−1), N)` rather than random (§20.2, §22.4); the derivation is the gate and no envelope carries it. Implements the entitlement chain's E1–E9 (§18): the record format was specified in 0.5.0, and **E9** now verifies `sig_platform` always and a `transfer`'s `sig_holder` given trusted keys, so §14 shrinks to key distribution and the live gate. Adds the optional `flag.stage_gate` declaration (§7.6) and enforces **DF5**: a stage gate on a static flag is rejected, and a static flag is `static`/`none` or any derivation this version does not implement. Closes the review-debt tickets 75, 77, 78, 79, and 82: §15's limit row is split by direction and §12 reconciled with it; §3's padding clause is gated on `CONTAINER_V1`; §16's M7 cell no longer claims to name the key; §4.5 names the test that asserts each header vector, with a dedicated **0.3 header vector test** added; and `ctf` gains argument parsing, shell completions, and CLI integration tests. Every change either defines what a previous version left unspecified or *widens* what a reader accepts, so no feature bit is spent (§15). |
 | 0.9.0 | Review-debt tickets 81, 83, 86–88, 90–92, 95–97. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Adds the optional **`paths`** manifest key and rules M22–M25 (§7.2, §7.5), so a directory tree is representable without widening `names`: a relative POSIX path per `name_id`, checked component-by-component against the name rule so `.`, `..`, an absolute path, and a `\` are unrepresentable rather than filtered; unique across the map; and naming a real section. It is an ordinary manifest key, so no feature bit is spent — a reader that does not implement it carries it byte-for-byte (§7.3). The rest are diagnostic and reference-implementation changes with no format effect: a section root mismatch carries the section's `name_id` and the whole-file verification pass reports every mismatch instead of aborting on the first; `crit` list errors (M6–M8) carry an entry index like the sibling list rules; `ExceedsFile` reports the real file length and names `footer_off` as the bound when that is what fired; a pre-0.3 file is diagnosed as an older format with no container rather than as a feature-negotiation failure; `BadMagic` and `CborUnsupported` no longer echo input bytes; `ctf inspect` prints each section's full name so truncated labels cannot collide; the unused `Bundle::sig_input` is deleted and `Manifest::description` is pinned by a test. The design note's thread-parallel BLAKE3 claim is corrected to state the reference implementation hashes single-threaded. |
+| 0.11.0 | Phase 4 and the platform interfaces. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.10 file's for the same inputs. Adds **§25**, the offline solvability gate: the `solver.wasm` ABI (a core module with no imports exporting `memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len`), the artifact block that deliberately omits the flag, the flag output block, the gate procedure, the tri-state `passed`/`failed`/`unverified` status, and rules S1–S8. Adds **§26** (seed and flag injection: `CTF_SEED`/`/ctf/seed`, `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and the no-guessing rule I1–I5), **§27** (sealed release and its audit record, L1–L4), **§28** (the static artifact serving manifest and its two independent checks, V1–V5), **§29** (the platform ingest descriptor and the digest-pinning and referrer/origin policy checks, P1–P3 and O1–O3), **§30** (the bundle as an OCI image, media type `application/vnd.ctf.bundle.v1`, X1–X3), **§31** (the challenge base image contract, B1–B3), **§32** (the live gate socket contract, N1–N4 — specified, not implemented), and **§33** (the WTFlag adapter, W1–W3). Registers the bundle media type in §12 and removes the live gate from §14's unspecified list. Every addition defines a structure a previous version left unspecified, adds a platform-side policy that is not a container rule, or relaxes nothing; no feature bit is spent (§15). Reference implementation: `ctf-generator`'s solver host and offline gate, the `ctf-generator` container binary, and the `ctf` subcommands `run`, `serving-manifest`, `oci-export`, `oci-import`, and `release`. |
 | 0.10.0 | Phase 3: the deterministic generator, and the progress payload of a handoff. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.9 file's for the same inputs. Adds **§23**, fixing the generator interface (a core WebAssembly module with no imports, exporting `memory`, `ctf_alloc`, `ctf_generate`, and `ctf_output_len`), the canonical output block, the output root, the interface version and WASM profile, the three determinism modes (`strict`, `flag_only`, `none`), and rules G1–G12 — including fuel rather than epochs, forced deterministic relaxed-SIMD, NaN canonicalization, and a cross-engine cross-check, which is how §23.6's settings are validated rather than trusted. Adds **§24**, fixing the sealed-progress payload a `progress` record carries across a handoff (P1–P4): a `holder`-context envelope and an AEAD ciphertext whose AAD binds suite, challenge, and subject. §7.6 gains `generate.interface` and `generate.profile`, makes `wasm` and `outputs` conditional on a non-`flag_only` determinism mode, and states that the container reader carries these declarations without acting on them; the output-to-`names` mapping is enforced by the authoring tool (§7.8), not the reader. Every change either defines a structure a previous version left unspecified or relaxes a rule, so no feature bit is spent (§15). Reference implementation: the `ctf-generator` crate (Wasmtime host with a `wasmi` cross-check and the determinism gate), the Rust and C guest SDKs, `ctf init` archetype scaffolds, the sealed-progress helpers, and `ctf transfer`. |
 
 ## 18. Entitlement records
@@ -2509,3 +2513,415 @@ A `progress` payload is present in the bundle and is therefore covered by the
 commitment root and the record id; it is not a `SEALED` section, so the container
 does not require it to be encrypted — the chain distinguishes a progress record by
 its `type`, and the payload's confidentiality is the envelope's job.
+
+## 25. Offline solvability gate
+
+Pillar 5's implementable half (design §3): a bundle that cannot be solved cannot be
+published. A `solver` section (kind `4`, §5.2) carries `solver.wasm`, the author's
+proof that the challenge is solvable from the generated artifacts alone. This
+section fixes the solver interface and the gate procedure.
+
+The solver is the author's own program, not a format-defined one: the format fixes
+only the sandbox it runs in, the block it receives, the block it returns, and what
+the gate does with the result.
+
+### 25.1 The sandbox
+
+A solver's plaintext is a **core** WebAssembly module (not a component). Like a
+generator (§23.1) it MUST have no imports: the host provides no WASI, clock,
+network, filesystem, randomness, or any other capability, so a conforming solver
+cannot observe one, and a module that imports anything MUST be rejected before it
+runs. A solver therefore has exactly two inputs: its own bytes and the artifact
+block (§25.3).
+
+### 25.2 Exports — the ABI
+
+The module MUST export `memory` and exactly these three functions, with these
+signatures. A module missing one, or exporting one with a different signature, is
+rejected.
+
+| Export | Signature | Meaning |
+|---|---|---|
+| `memory` | linear memory | The address space for input and output |
+| `ctf_alloc` | `(len: u32) -> u32` | Allocate `len` zeroed bytes; returns the pointer, `0` on failure |
+| `ctf_solve` | `(input_ptr: u32, input_len: u32) -> u32` | Run the solver on the input block; returns a pointer to the output block, `0` on failure |
+| `ctf_output_len` | `() -> u32` | Byte length of the block the last `ctf_solve` produced |
+
+The host writes the artifact block into `ctf_alloc(input_len)` and calls
+`ctf_solve`; it then reads `ctf_output_len()` bytes at the returned pointer. Every
+pointer and length is bounds-checked against the module's current memory before a
+byte is read.
+
+### 25.3 The artifact block (input)
+
+The input block is little-endian, with no padding and no alignment requirement:
+
+```text
+u32_le count
+count × { u32_le name_len; name bytes (UTF-8); u32_le data_len; data bytes }
+```
+
+It is exactly the generator output block of §23.3 **without the trailing flag**. The
+solver MUST NOT receive the flag: handing it the generator's flag would make the
+gate vacuous, because a solver could echo it without solving anything. A block that
+ends early, has trailing bytes, names a duplicate output, or carries invalid UTF-8
+is rejected by the host.
+
+### 25.4 The flag block (output)
+
+The solver's output block is little-endian:
+
+```text
+u32_le flag_len; flag bytes (UTF-8)
+```
+
+`flag_len` is bounded, the bytes MUST be valid UTF-8, and trailing bytes are
+rejected. The block carries nothing else: the solver's entire result is the flag it
+recovered.
+
+### 25.5 The gate procedure
+
+A conforming gate MUST, in order:
+
+1. Run the generator at the reference seed under the determinism gate (§23.8,
+   rules G9 and G10), obtaining the named outputs.
+2. Build the artifact block (§25.3) from those outputs.
+3. Run the solver on the artifact block in the same capability-free sandbox
+   (§25.1).
+4. Compare the solver's flag (§25.4) to the **derived flag** for the reference
+   subject (§22.3).
+
+A solver that does not recover the derived flag blocks publication.
+
+### 25.6 Tri-state status
+
+| Status | Meaning |
+|---|---|
+| `passed` | The solver recovered the derived flag. |
+| `failed` | The solver ran but produced a different flag. |
+| `unverified` | The gate could not be run. |
+
+A bundle is `unverified`, never `passed`, when any of the following holds: it
+declares `runtime` (solving needs a booted instance, §32); its `verify.offline`
+declaration is false or absent; or it declares no generator or no solver. An honest
+`unverified` is a usable state; a false `passed` is worse than no gate at all
+(design §3).
+
+### 25.7 Rules
+
+| # | Rule |
+|---|---|
+| S1 | A `solver` section's plaintext is a core WebAssembly module. |
+| S2 | The module MUST have no imports; a host MUST reject one that does. |
+| S3 | The module MUST export `memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len` with the signatures of §25.2. |
+| S4 | Every pointer and length the host reads MUST be bounds-checked against the module's current memory. |
+| S5 | A resource limit bounds guest execution (fuel) and guest memory; exceeding it rejects the run. |
+| S6 | The input block MUST be the canonical artifact block of §25.3 and MUST NOT carry the flag. |
+| S7 | The output block MUST be canonical per §25.4, and its flag MUST be valid UTF-8. |
+| S8 | A bundle whose gate does not run MUST be reported `unverified` (§25.6), never `passed`. |
+
+## 26. Seed and flag injection
+
+A generator-based challenge starts inside the platform with the **per-subject seed**
+and the **derived flag** injected, so `ctf_generate(seed)` is reproducible and the
+challenge service knows what a player must submit. This section fixes the injection
+mechanism for authors and for the platform.
+
+### 26.1 The mechanism
+
+| Value | Environment | Mount | Encoding |
+|---|---|---|---|
+| seed | `CTF_SEED` | `/ctf/seed` | 64 lowercase hex digits, or 32 raw bytes in the file |
+| flag | `CTF_FLAG` | `/ctf/flag` | the flag text |
+| generated artifacts | — | `/ctf/data` | written by the generator host |
+
+The environment variable wins over the mount, so an orchestrator may inject without
+a volume. The host MUST read the seed through this mechanism and write it into
+guest memory; it MUST NOT read the seed from anywhere else.
+
+### 26.2 Rules
+
+| # | Rule |
+|---|---|
+| I1 | The seed is 32 bytes, injected as 64 lowercase hex digits (`CTF_SEED`) or as a 32-byte file (`/ctf/seed`). |
+| I2 | A container with no injected seed MUST fail to start. It MUST NOT default, derive, or guess a seed. |
+| I3 | The environment variable takes precedence over the mount when both are present. |
+| I4 | When `CTF_FLAG` (or `/ctf/flag`) is injected, the flag the generator computes MUST equal it; a mismatch MUST fail the start. |
+| I5 | Generated artifacts are written under the data mount; a generated name that is path-like MUST be rejected (a name becomes a filename). |
+
+The seed is a secret in the same sense `event_secret` is (§22): it is injected at
+runtime and never written into a bundle.
+
+## 27. Sealed release
+
+A `solver`, `writeup`, or `progress` section is `SEALED` (§5.3): its plaintext needs
+a key the platform does not hold while the event runs (design §4). At event end the
+**offline seal key** is brought back and the sections are released.
+
+### 27.1 The release
+
+A bundle's `sealed` declaration (§7.6) names a `release` mode — `event_end`,
+`manual`, or `stage:<id>` — and the `members` it covers. A release at event end:
+
+1. decrypts each covered `SEALED` section with the `seal` recipient's secret key
+   (the envelope of §21 carries its `content_key` under context `seal`);
+2. verifies each recovered plaintext against its section `root` before writing it;
+3. emits an audit record.
+
+A bundle with no `sealed` declaration releases every `SEALED` section. A declaration
+whose `release` is not `event_end` MUST NOT be released by the event-end operation:
+a `manual` or `stage:<id>` release is a different authorization.
+
+### 27.2 The audit record
+
+The release record carries the bundle's commitment root, the challenge `id` and
+`version`, the release mode, and for each released member its `name_id`, name, size,
+and `root`. It MUST NOT contain any released plaintext, so it can be published or
+archived without leaking a writeup or solver.
+
+### 27.3 What it does not protect against
+
+The scheme protects against storage theft and pre-release leaks only if the seal key
+is **not resident on the platform during the event** (design §4). If the platform
+holds the seal key anyway, release is policy, not cryptography. Sealed sections are
+encrypted to the seal recipient only, never additionally wrapped to the platform's
+storage key.
+
+| # | Rule |
+|---|---|
+| L1 | An event-end release MUST use the `seal` recipient's secret key and MUST NOT proceed without it. |
+| L2 | A recovered plaintext MUST verify against its section `root` before it is written out. |
+| L3 | A release whose declared mode is not `event_end` MUST be refused by the event-end operation. |
+| L4 | The audit record MUST NOT contain released plaintext. |
+
+## 28. Static artifact serving manifest
+
+A platform serving a challenge's player-visible artifacts needs each artifact's
+name, size, and root so it can verify bytes as it hands them out, without
+re-deriving the commitment or trusting a client-supplied list. The serving manifest
+is that projection of a parsed bundle.
+
+### 28.1 Shape
+
+The serving manifest is one canonical CBOR map (§7.1):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `challenge_id` | tstr | The manifest `id` |
+| `version` | uint | The manifest `version` |
+| `artifacts` | array | The servable artifacts |
+
+Each entry of `artifacts` is a map:
+
+| Key | Type | Required | Meaning |
+|---|---|:-:|---|
+| `name_id` | uint | ● | The section's identity (§5.1) |
+| `name` | tstr | ● | The name table entry |
+| `size` | uint | ● | The record's `len_plain` |
+| `root` | bstr, 32 bytes | ● | The record's `root` |
+| `external` | bool | ● | Whether the bytes live outside the bundle |
+| `path` | tstr | | The `paths` entry, when the manifest declares one |
+| `mirrors` | array of tstr | | Present only for an external artifact |
+
+### 28.2 Rules
+
+| # | Rule |
+|---|---|
+| V1 | Only sections carrying `PLAYER_VISIBLE` appear. |
+| V2 | A `SEALED` section MUST NOT appear, whatever its flags (§5.3, design §10). |
+| V3 | Each artifact's `size` and `root` are the record's `len_plain` and `root`. |
+| V4 | Bytes MUST NOT be served before they verify against the artifact's `size` and `root`. Both are checked: BLAKE3 over a prefix is a valid hash of that prefix, so a truncated payload is caught only by the length. |
+| V5 | An external artifact's bytes are fetched and verified against its `root`; they are not in the bundle. |
+
+The two checks of V1 and V2 are independent on purpose (design §10): the container
+makes the pair unrepresentable (R5), but a serving manifest is exactly the artifact
+a leak would flow through, so it re-states the rule rather than assuming it.
+
+## 29. Platform ingest descriptor and policy checks
+
+The platform's challenge and runtime records are not the manifest's shape. Packing a
+bundle produces a JSON **ingest descriptor** projected from the manifest, and two
+policy checks that are the platform's, not the container's.
+
+### 29.1 The descriptor
+
+| Field | Source |
+|---|---|
+| `slug` | manifest `id` |
+| `name` | manifest `name` |
+| `category` | manifest `category`, when present |
+| `version` | manifest `version` |
+| `level` | platform overlay (`platform.<namespace>.level`) |
+| `image` | `runtime.image` |
+| `port` | `runtime.ports[0].container` |
+| `resources` | `runtime.resources` |
+| `storage_size` | platform overlay |
+| `read_only` | platform overlay |
+| `ttl` | `runtime.ttl` |
+| `readiness` | `runtime.readiness` |
+| `referrer_policy` | always `no-referrer` (§29.3) |
+
+An absent field is omitted rather than emitted as `null`. The descriptor is derived
+data: it MUST be projected from the manifest that was packed, so it cannot disagree
+with the bundle's committed bytes.
+
+### 29.2 Digest-pinned images
+
+A `runtime.image` MUST be a digest, never a tag: `name@sha256:` followed by exactly
+64 lowercase hex digits. A tag — including a name that carries one alongside a
+digest — MUST be rejected. The image is an ordinary manifest key and is therefore
+inside the commitment root and the author's signature; this rule is what keeps a
+mutable reference from being committed to at all.
+
+The check MUST run at authoring time (`ctf pack`) and again as a read-time policy
+pass over the parsed manifest. It is **not** a container rule: §7.6 makes the
+container carry `runtime` without acting on it, so a tagged image is a readable
+bundle and a policy failure, not a parse failure.
+
+| # | Rule |
+|---|---|
+| P1 | `runtime.image` MUST end with `@sha256:` and 64 lowercase hex digits. |
+| P2 | A tag on the name portion MUST be rejected. |
+| P3 | The check MUST be applied at authoring time and at read time. |
+
+### 29.3 Third-party origins and the referrer policy
+
+A challenge frontend that loads an external asset sends the challenge's capability
+URL in its `Referer` header, handing a third party access. The format cannot rewrite
+a frontend, so the policy is:
+
+- The descriptor's `referrer_policy` defaults to `no-referrer` and is not an
+  authoring choice in this version.
+- An absolute `http(s)` URL in the manifest `description` MUST be reported at
+  authoring time. It is a warning, not an error: a description may legitimately
+  contain a hyperlink. A challenge that vendors its assets references them relatively
+  and produces no warning.
+
+| # | Rule |
+|---|---|
+| O1 | The descriptor's `referrer_policy` is `no-referrer`. |
+| O2 | An absolute `http(s)` origin in `description` is reported at authoring time. |
+| O3 | Relative references are not reported. |
+
+## 30. Bundle as an OCI artifact
+
+A `.ctf` is distributed as an **OCI image** (OCI Image Spec v1.1) so a registry
+gains digests, immutability, and replication without knowing the format.
+
+### 30.1 Media types
+
+| Media type | Blob |
+|---|---|
+| `application/vnd.ctf.bundle.v1` | the `.ctf` bundle (the layer) |
+| `application/vnd.ctf.bundle.config.v1+json` | an empty image config |
+| `application/vnd.oci.image.manifest.v1+json` | the image manifest |
+| `application/vnd.oci.image.index.v1+json` | the image index |
+
+### 30.2 The layout
+
+An OCI image layout: `oci-layout` (version `1.0.0`), `index.json`, and
+`blobs/sha256/<hex>`. The index references one image manifest; the manifest's single
+layer is the bundle with media type `application/vnd.ctf.bundle.v1`.
+
+### 30.3 Round-trip and digest
+
+The layer blob is the bundle, unmodified: there is no re-serialization step, so a
+push/pull round trip is byte-for-byte. The registry digest is `sha256` of the bundle
+and is independent of the format's BLAKE3 commitment; both are checked, and the OCI
+digest is a transport address, never a substitute for the commitment.
+
+| # | Rule |
+|---|---|
+| X1 | The bundle layer's media type is `application/vnd.ctf.bundle.v1`. |
+| X2 | Export then import MUST reproduce the bundle byte-for-byte. |
+| X3 | The content address MUST be `sha256` of the bundle bytes. |
+
+## 31. Challenge base image contract
+
+A challenge that declares `runtime` runs on the challenge base image. The image
+carries the generator host (§23) and nothing else; the orchestrator boots it.
+
+| Mount | Contents | Direction |
+|---|---|---|
+| `/ctf/data` | generated artifacts | written |
+| `/ctf/seed` | the injected seed (§26) | read-only |
+| `/ctf/flag` | the injected derived flag (§26) | read-only, optional |
+
+The image MUST default to a **non-root** user and the orchestrator MUST run it with
+a **read-only root filesystem**, so only the data mount is writable. The generator
+needs no network.
+
+| # | Rule |
+|---|---|
+| B1 | The image MUST include the generator host and run a declared `gen.wasm`. |
+| B2 | The data mount and the seed/flag mount paths are fixed as in the table. |
+| B3 | The default user is non-root and the root filesystem is read-only. |
+
+## 32. The live solvability gate contract
+
+The offline gate (§25) covers artifact-only challenges. A challenge that declares
+`runtime` is solved against a **booted instance**, which the orchestrator project
+provides (design §2). This section is the socket contract the orchestrator MUST
+satisfy; it is specified here so the platform side does not have to guess.
+
+### 32.1 Connection
+
+1. The orchestrator boots the instance from `runtime.image` and waits for
+   `runtime.readiness` to succeed.
+2. It opens exactly one TCP connection to the instance at `runtime.readiness.tcp`
+   on the orchestrator's side of the network.
+3. It hands the solver that one connection and **no other network capability**.
+
+### 32.2 The solve exchange
+
+The solver speaks its own protocol over the connection; the format does not fix it,
+because only the author knows what the instance speaks. The format fixes the
+transport: one connected socket, no other capability, bounded by the same fuel and
+memory limits as §25.1.
+
+### 32.3 The result
+
+The solver's result is the flag block of §25.4. The gate compares it to the derived
+flag for the subject, exactly as §25.5 step 4, and reports the tri-state of §25.6.
+
+### 32.4 Until it exists
+
+No implementation of this section ships in this repository. Until an orchestrator
+implements it, a `runtime`-bearing bundle MUST be recorded `unverified`, never
+`passed` (§25.6).
+
+| # | Rule |
+|---|---|
+| N1 | The orchestrator provides one connected TCP socket to the readiness port and no other network capability. |
+| N2 | The solver's result is the §25.4 flag block, compared to the derived flag. |
+| N3 | The status is tri-state per §25.6. |
+| N4 | A `runtime`-bearing bundle is `unverified` until an implementation of this section exists. |
+
+## 33. The WTFlag adapter
+
+The platform mints flags from a per-challenge key and a team; the format mints them
+from a challenge `id`/`version` and a subject (§22). This section is the documented
+adapter between the two, so the platform does not have to invent a second derivation
+or protect a second secret.
+
+| Platform concept | Format concept |
+|---|---|
+| challenge key | manifest `id` (`chal_id`) |
+| challenge revision | manifest `version` (`chal_version`) |
+| **team** | **`subject_id`** |
+| the signing pod's secret | `event_secret` |
+
+Team maps to subject one-to-one. With `subject_scope: team` (the default, §7.6)
+every member of a team derives the same flag, and a handoff between teammates is
+free because it is not a subject change (design §9).
+
+`event_secret` lives in exactly one place — the signing pod — and every flag is
+minted by that one holder. The format never carries the secret or a flag (DF1), so
+the bundle a player downloads leaks nothing and the platform does not gain a second
+secret to protect.
+
+| # | Rule |
+|---|---|
+| W1 | The adapter's subject id is the team identifier, verbatim. |
+| W2 | Its seed and flag are exactly §22.2 and §22.3 with that mapping. |
+| W3 | `event_secret` is held by a single oracle and is never written into a bundle. |
