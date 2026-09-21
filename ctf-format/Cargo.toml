@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/ctf-format", "crates/ctf-cli", "crates/ctf-generator"]
+members = ["crates/ctf-format", "crates/ctf-cli", "crates/ctf-generator", "crates/ctf-conformance"]
 # Guest SDKs target `wasm32-unknown-unknown` and export a C ABI, so they are
 # deliberately outside the workspace: their lints, profiles, and target differ
 # from the host crates'. They are built on demand (see `sdk/*/README.md`).
-exclude = ["sdk/rust", "sdk/sample-generator"]
+exclude = ["sdk/rust", "sdk/sample-generator", "sdk/reference/*"]
 resolver = "3"
 
 [workspace.package]

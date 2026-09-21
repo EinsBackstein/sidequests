@@ -1,0 +1,5 @@
+# Guest build output. The built `gen.wasm` is copied into the CLI tests'
+# fixtures by hand (see `crates/ctf-cli/tests/fixtures/reference/`), so the
+# target directory and lockfile are not committed.
+/target
+/Cargo.lock

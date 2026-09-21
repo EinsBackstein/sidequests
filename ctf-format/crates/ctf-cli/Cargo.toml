@@ -27,5 +27,10 @@ ctf-generator = { path = "../ctf-generator" }
 # single call site in `open_mapped`.
 memmap2 = "0.9"
 
+[dev-dependencies]
+# Builds the tiny generator/solver modules the gate tests run, in the same way
+# `ctf-generator`'s tests do.
+wat = "1"
+
 [lints]
 workspace = true

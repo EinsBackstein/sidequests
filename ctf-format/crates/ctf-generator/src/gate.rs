@@ -126,6 +126,92 @@ pub struct OfflineGateReport {
     pub solver_flag: Option<String>,
     /// The flag the solver was expected to produce.
     pub expected_flag: Option<String>,
+    /// How many in-process generator runs agreed, when the generator ran (§23.8).
+    pub generator_runs: Option<usize>,
+    /// Whether the second engine agreed, when the generator ran (rule G10).
+    pub cross_engine: Option<bool>,
+    /// How many named outputs the generator produced, when it ran.
+    pub artifact_count: Option<usize>,
+    /// Why the gate did not run, when the status is `unverified`.
+    pub unverified_reason: Option<UnverifiedReason>,
+}
+
+/// Why a gate could not run (spec §25.6).
+///
+/// Each variant names one of §25.6's conditions for `unverified`, so a caller can
+/// report the reason rather than only the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiedReason {
+    /// The challenge declares `runtime`, so solving needs a live instance (§32).
+    RuntimeDeclared,
+    /// `verify.offline` is false or absent, so the bundle did not ask to be gated.
+    OfflineNotDeclared,
+    /// The challenge declares no generator.
+    NoGenerator,
+    /// The challenge declares no solver.
+    NoSolver,
+}
+
+impl core::fmt::Display for UnverifiedReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::RuntimeDeclared => {
+                "the challenge declares a runtime, which needs a live instance (spec §32)"
+            }
+            Self::OfflineNotDeclared => {
+                "the challenge does not declare `verify.offline`, so it did not ask to be gated"
+            }
+            Self::NoGenerator => "the challenge declares no generator",
+            Self::NoSolver => "the challenge declares no solver",
+        })
+    }
+}
+
+/// The stage of the §25.5 procedure at which a hard failure occurred.
+///
+/// Only the two stages that can fail outright are represented. Building the
+/// artifact block (step 2) cannot fail, and the flag comparison (step 4) produces
+/// [`GateStatus::Failed`] rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateStage {
+    /// Step 1: the generator determinism gate (§23.8, rules G9 and G10).
+    Determinism,
+    /// Step 3: the solver ran but its sandbox or ABI failed (rules S2–S7).
+    Solver,
+}
+
+impl core::fmt::Display for GateStage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Determinism => "determinism",
+            Self::Solver => "solver",
+        })
+    }
+}
+
+/// A hard gate failure, tagged with the §25.5 stage that produced it.
+///
+/// A flag mismatch is not an error: it is [`GateStatus::Failed`]. This type is only
+/// for a stage that could not complete at all, so a caller can name the stage and
+/// the reason (ticket 29).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateError {
+    /// The stage that failed.
+    pub stage: GateStage,
+    /// The underlying sandbox, ABI, or determinism failure.
+    pub source: GeneratorError,
+}
+
+impl core::fmt::Display for GateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}: {}", self.stage, self.source)
+    }
+}
+
+impl core::error::Error for GateError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 /// Run the offline solvability gate (spec §25, design §3 pillar 5).
@@ -133,40 +219,51 @@ pub struct OfflineGateReport {
 /// Runs the generator at the reference seed under the determinism gate, feeds the
 /// resulting artifact block to the solver in the same sandbox, and compares the
 /// solver's flag to `expected_flag`. A `runtime`-bearing bundle, or one missing
-/// either module, is [`GateStatus::Unverified`] rather than `passed`.
+/// either module, is [`GateStatus::Unverified`] rather than `passed`, with the
+/// reason recorded.
 pub fn offline_gate(
     input: OfflineGate<'_>,
     limits: &Limits,
-) -> Result<OfflineGateReport, GeneratorError> {
+) -> Result<OfflineGateReport, GateError> {
+    let unverified = |reason: UnverifiedReason| OfflineGateReport {
+        status: GateStatus::Unverified,
+        generator_root: None,
+        solver_flag: None,
+        expected_flag: None,
+        generator_runs: None,
+        cross_engine: None,
+        artifact_count: None,
+        unverified_reason: Some(reason),
+    };
     if input.runtime_declared {
-        return Ok(OfflineGateReport {
-            status: GateStatus::Unverified,
-            generator_root: None,
-            solver_flag: None,
-            expected_flag: None,
-        });
+        return Ok(unverified(UnverifiedReason::RuntimeDeclared));
     }
     if !input.offline_declared {
-        return Ok(OfflineGateReport {
-            status: GateStatus::Unverified,
-            generator_root: None,
-            solver_flag: None,
-            expected_flag: None,
-        });
+        return Ok(unverified(UnverifiedReason::OfflineNotDeclared));
     }
-    let (Some(generator_wasm), Some(solver_wasm)) = (input.generator, input.solver) else {
-        return Ok(OfflineGateReport {
-            status: GateStatus::Unverified,
-            generator_root: None,
-            solver_flag: None,
-            expected_flag: None,
-        });
+    let (generator_wasm, solver_wasm) = match (input.generator, input.solver) {
+        (Some(generator), Some(solver)) => (generator, solver),
+        (None, _) => return Ok(unverified(UnverifiedReason::NoGenerator)),
+        (_, None) => return Ok(unverified(UnverifiedReason::NoSolver)),
     };
 
-    let gate = determinism_gate(generator_wasm, input.seed, limits, 2)?;
+    let gate =
+        determinism_gate(generator_wasm, input.seed, limits, 2).map_err(|source| GateError {
+            stage: GateStage::Determinism,
+            source,
+        })?;
+    let artifact_count = gate.outputs.outputs.len();
     let artifacts = ArtifactBlock::from_generator(&gate.outputs);
-    let solver = Solver::new(solver_wasm)?;
-    let flag = solver.run(&artifacts.encode(), limits)?;
+    let solver = Solver::new(solver_wasm).map_err(|source| GateError {
+        stage: GateStage::Solver,
+        source,
+    })?;
+    let flag = solver
+        .run(&artifacts.encode(), limits)
+        .map_err(|source| GateError {
+            stage: GateStage::Solver,
+            source,
+        })?;
     let status = if flag == input.expected_flag {
         GateStatus::Passed
     } else {
@@ -177,5 +274,123 @@ pub fn offline_gate(
         generator_root: Some(gate.output_root),
         solver_flag: Some(flag),
         expected_flag: Some(input.expected_flag.to_owned()),
+        generator_runs: Some(gate.runs),
+        cross_engine: Some(gate.cross_engine),
+        artifact_count: Some(artifact_count),
+        unverified_reason: None,
     })
+}
+
+/// A persisted gate outcome for one bundle (ticket 30, spec §25.6).
+///
+/// The record the reference tooling writes alongside a bundle, so a platform can
+/// store the tri-state without re-running the gate. It is **derived data** about a
+/// run, not a container structure: it is never inside a bundle and is never covered
+/// by the commitment root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerificationRecord {
+    /// The manifest `id` the gate ran for.
+    pub challenge: String,
+    /// The manifest `version` the gate ran for.
+    pub version: u64,
+    /// The reference subject the expected flag was derived for.
+    pub subject: String,
+    /// The tri-state outcome.
+    pub status: GateStatus,
+    /// A human-readable reason for a non-`passed` outcome, or the pass sentence.
+    pub reason: String,
+    /// The generator output root, when the generator ran.
+    pub generator_root: Option<[u8; 32]>,
+    /// Whether the second engine agreed, when the generator ran. `None` when the
+    /// gate did not run.
+    pub cross_engine: Option<bool>,
+    /// How many in-process generator runs agreed, when the generator ran.
+    pub runs: Option<usize>,
+}
+
+impl VerificationRecord {
+    /// Build a record from a gate report.
+    pub fn from_report(
+        challenge: &str,
+        version: u64,
+        subject: &str,
+        report: &OfflineGateReport,
+    ) -> Self {
+        let reason = match report.status {
+            GateStatus::Passed => "the solver recovered the derived flag".to_owned(),
+            GateStatus::Failed => {
+                "the solver produced a different flag than the derived flag".to_owned()
+            }
+            GateStatus::Unverified => report
+                .unverified_reason
+                .map_or_else(|| "the gate did not run".to_owned(), |r| r.to_string()),
+        };
+        Self {
+            challenge: challenge.to_owned(),
+            version,
+            subject: subject.to_owned(),
+            status: report.status,
+            reason,
+            generator_root: report.generator_root,
+            cross_engine: report.cross_engine,
+            runs: report.generator_runs,
+        }
+    }
+
+    /// Serialize as the `ctf/verification/v1` JSON record (spec §25.6).
+    pub fn to_json(&self) -> String {
+        let root = self
+            .generator_root
+            .map_or_else(|| "null".to_owned(), |r| format!("\"{}\"", hex(&r)));
+        let cross = self
+            .cross_engine
+            .map_or_else(|| "null".to_owned(), |b| b.to_string());
+        let runs = self
+            .runs
+            .map_or_else(|| "null".to_owned(), |n| n.to_string());
+        format!(
+            "{{\n  \"schema\": \"ctf/verification/v1\",\n  \"challenge\": {},\n  \
+             \"version\": {},\n  \"subject\": {},\n  \"status\": \"{}\",\n  \
+             \"reason\": {},\n  \"generator_root\": {},\n  \"cross_engine\": {},\n  \
+             \"runs\": {}\n}}\n",
+            json_string(&self.challenge),
+            self.version,
+            json_string(&self.subject),
+            self.status,
+            json_string(&self.reason),
+            root,
+            cross,
+            runs,
+        )
+    }
+}
+
+/// Lowercase hex, for the JSON record's `generator_root`.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
+    }
+    out
+}
+
+/// A JSON string literal with the two characters that can appear in this record's
+/// free text escaped; the rest are fixed.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

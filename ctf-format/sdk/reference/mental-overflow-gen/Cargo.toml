@@ -1,0 +1,23 @@
+# A detached guest crate: the empty `[workspace]` table makes this its own
+# workspace root, so it is not a member of the repository's root workspace and
+# its build profile and wasm target do not disturb the host crates. This mirrors
+# how `sdk/rust` and `sdk/sample-generator` are kept out of the workspace, except
+# that the root manifest does not list this crate in `exclude`, so it carries the
+# declaration itself.
+[package]
+name = "mental-overflow-gen"
+version = "0.1.0"
+description = "Deterministic reference generator for the Mental Overflow challenge"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ctf-generator-sdk = { path = "../../rust" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+
+[workspace]

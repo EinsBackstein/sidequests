@@ -20,10 +20,12 @@ go/                       independent second implementation — phase 8
 docs/
 ```
 
-`ctf-format`, `ctf-cli`, `ctf-generator`, `sdk/`, and `fuzz/` exist today. The
-generator host is its own crate rather than part of `ctf-format`, so the container
-library stays free of the Wasmtime dependency. Remaining crates get created
-when their phase starts, not before.
+`ctf-format`, `ctf-cli`, `ctf-generator`, `ctf-conformance`, `sdk/`, and `fuzz/`
+exist today. The generator host is its own crate rather than part of `ctf-format`,
+so the container library stays free of the Wasmtime dependency. Remaining crates get
+created when their phase starts, not before. `spec/vectors/conformance/` holds the
+committed golden `.ctf` fixtures the runner executes; `spec/vectors/` already held
+the primitive vectors of ticket 17.
 
 ---
 
@@ -255,6 +257,11 @@ Pillar 5's implementable half.
 - [x] `ctf run` — the full local ingest gate, identical to the platform's. Reads the
       authoring document, resolves `gen.wasm`/`solver.wasm` relative to it, derives
       the reference flag from `--secret`, and exits non-zero on `failed`.
+- [x] **Tickets 29 and 30: staged output and a persisted status.** `ctf run` names
+      each §25.5 stage it ran and the stage/condition behind a non-`passed` outcome
+      (`GateError`, `UnverifiedReason`), and persists the tri-state as a
+      `ctf/verification/v1` record (`--status`, or `<bundle>.status.json` with
+      `--bundle`). Landed in 0.12.0; spec §25.6/§25.7 (S9–S10).
 
 **Done when** `ctf run` passing locally guarantees ingest cannot surprise the
 author. This is the highest-leverage item in the roadmap for R6.
@@ -284,6 +291,13 @@ the orchestrator project consumes it (design §2).
       `ctf-generator` container binary.
 - [x] **68** Third-party origins and no-referrer — §29.3, `policy.rs`; pack warns
       about an absolute origin in `description` and defaults to `no-referrer`.
+- [x] **59** Challenge key mapping and migration — `docs/CHALLENGE-KEY-MIGRATION.md`,
+      the operator runbook on top of §33 and rules W1–W3.
+- [x] **69** The two reference challenges pack — `File_And_Seek` and `Mental_Overflow`
+      vendored as authoring fixtures (`crates/ctf-cli/tests/fixtures/reference/`),
+      with `crates/ctf-cli/tests/reference_challenges.rs` asserting both descriptors,
+      the determinism gate on Mental Overflow's de-randomized generator, and the
+      `unverified` status of a runtime challenge.
 
 **Done when** the platform can ingest a bundle's descriptor and serve its
 player-visible artifacts without re-deriving the commitment. The interfaces are
@@ -356,10 +370,20 @@ deliberately disabled in the test.
 
 ## Phase 8 — Hardening and the second implementation
 
-- [ ] Full §14 hardening checklist audited line by line against the code
+- [x] Full §14 hardening checklist audited line by line against the code —
+      **landed in 0.12.0** (ticket 48, `docs/HARDENING-AUDIT.md`). Every bullet carries
+      a verdict and a `file:line` citation; the two gaps it found are tracked rather
+      than fixed inline — the entitlement-chain fuzz target (#107) and the Go second
+      implementation (#53).
 - [ ] Fuzzing in CI, corpus committed
 - [ ] Hostile-input vector corpus: one fixture per §14 bullet, each with its
-      expected error
+      expected error. The conformance runner below already carries golden bundles and
+      named hostile mutations covering several bullets.
+- [x] **Conformance vector runner** — **landed in 0.12.0** (ticket 52,
+      `crates/ctf-conformance`). It executes the committed golden `.ctf` fixtures and
+      the named hostile mutations of `spec/vectors/conformance/` against the reference
+      implementation and prints `PASS`/`FAIL <vector>` with the observed error,
+      exiting non-zero on a mismatch.
 - [ ] **Synthetic "future file" vectors** — files that set an invented
       `feat_incompat` bit, an invented `feat_ro_compat` bit, and an `OPTIONAL`
       section of an undefined kind. The only way to test forward compatibility
@@ -396,14 +420,13 @@ a `ponytail:` comment at its site in the code.
   on decode. A library that encodes canonically but decodes permissively would
   leave the commitment's injectivity unenforced, which is the property the whole
   of pillar 3 rests on. Revisit if a strict-decoding crate appears.
-- **Encryption in the writer.** `write_bundle` emits `enc = 0` only; AEAD is the
-  rest of phase 2. zstd (`comp = 1`) landed in 0.5.0 with the output and ratio caps
-  spec §5.4 now fixes (D1–D2), and the reader decompresses a `comp = 1` section
-  only after both caps pass. An encrypted section is still parsed and refused, which
-  is the honest state rather than a silent gap.
-- **`ctf` has no argument-parsing dependency.** `clap` is right at the roadmap's
-  eight subcommands with flags and completions; it is not right at one subcommand
-  and two flags. Add it when the second subcommand lands.
+- **Encryption in the writer — closed in 0.8.0.** `write_bundle` now emits `enc = 1`
+  as well as `comp = 1`: compress, seal with a fresh content key under AEAD-STREAM,
+  and wrap that key in a per-recipient envelope (§20.2, §21). The reader decompresses
+  a `comp = 1` section only after the §5.4 caps pass. This entry is kept only to
+  record that the earlier `enc = 0` state was deliberate, not a gap.
+- **`clap` arrived in 0.8.0.** The command set outgrew hand-rolled parsing; the
+  binary now has `clap` with completions and integration tests (ticket 37/83).
 - **The chunk index has no interior tree nodes**, so single-chunk random access
   costs a full index read. See the `bao` note above.
 - **External dependencies are few and deliberate.** `blake3` for the container,
