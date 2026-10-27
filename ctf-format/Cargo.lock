@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "ctf-cli"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "blake3",
  "clap",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "ctf-conformance"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "ctf-format",
  "serde_json",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "ctf-format"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "aws-lc-rs",
  "blake3",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "ctf-generator"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "blake3",
  "ctf-format",

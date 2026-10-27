@@ -2210,10 +2210,10 @@ per-frame compressed lengths are not stored separately: they are the `ct_len`
 prefixes, which is what lets a reader walk the body without knowing the compressed
 length. This is the composition of `comp = 1` with `enc = 1`.
 
-An empty plaintext is one frame and therefore one chunk. A zero-chunk body — the
-form an earlier writer emitted for the same empty plaintext — MUST also be accepted
-and decodes to `len_plain = 0`; a reader accepts exactly those two chunk counts for
-an empty body.
+For `comp = 1`, an empty plaintext is one frame and therefore one chunk. A
+zero-chunk body, which builds before this paragraph emitted for the same empty
+plaintext, MUST also be accepted; both decode to `len_plain = 0`, and no other
+chunk count is accepted for an empty `comp = 1` body.
 
 **Every encryption MUST draw a fresh random 32-byte `content_key`.** With a
 per-encryption key, re-encrypting the same section under the same `name_id` is safe,
