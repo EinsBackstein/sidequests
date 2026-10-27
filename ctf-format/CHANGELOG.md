@@ -17,14 +17,20 @@ header, section, footer, commitment root, or signature transcript moved.
 
 - **A solver-stage failure no longer erases the determinism fields.** §25.6 says
   `generator_root`, `cross_engine`, and `runs` are `null` when the gate did not run
-  or the determinism stage produced nothing. `GateError` now carries the
+  or the determinism stage did not complete. `GateError` now carries the
   determinism summary, and the `failed` record keeps `generator_root`,
   `cross_engine`, and `runs` when the solver could not load or run after a
-  successful determinism check. A determinism-stage failure still records `null`.
-- **`ctf run --bundle` persists a hard stage failure.** A solver or determinism
-  stage error previously exited 1 without writing a record, while a flag mismatch
-  wrote one. It now writes the same `failed` record `ctf verify` produces, with the
-  stage named in the reason (S9, S10).
+  successful determinism check. A determinism-stage failure still records `null`,
+  including two engines that disagreed.
+- **`ctf run` persists a hard stage failure.** A solver or determinism stage error
+  previously exited 1 without writing a record, while a flag mismatch wrote one. It
+  now writes the same §25.6 record `ctf verify` nests under `gate`, with the stage
+  named in the reason, wherever `ctf run` would write a record at all (`--status`,
+  or `--bundle`'s default `<bundle>.status.json`) (S9, S10).
+- **A refused input writes no record.** A run that refuses an input before the gate
+  (a bundle that does not parse, or a document that does not describe the bundle)
+  writes no record and removes no earlier one. §25.6 now says so, and that a
+  consumer must not treat a record as current merely because the file exists.
 - New tests: a solver that fails to load retains `generator_root`, `cross_engine:
   true`, and `runs: 2` in the verify artifact; the same failure through
   `ctf run --bundle` persists a `failed` record with those fields.

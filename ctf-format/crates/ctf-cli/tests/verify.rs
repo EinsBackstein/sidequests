@@ -685,6 +685,18 @@ fn a_bundle_generator_section_wins_over_the_documents_module() {
             .contains("determinism"),
         "the failing stage is named: {artifact}"
     );
+    assert!(
+        artifact["gate"]["generator_root"].is_null(),
+        "a determinism stage that did not complete has no root: {artifact}"
+    );
+    assert!(
+        artifact["gate"]["cross_engine"].is_null(),
+        "a determinism stage that did not complete has no cross-engine result: {artifact}"
+    );
+    assert!(
+        artifact["gate"]["runs"].is_null(),
+        "a determinism stage that did not complete has no run count: {artifact}"
+    );
 }
 
 /// Spec §25.6: the determinism fields are `null` only when that stage produced
@@ -767,6 +779,61 @@ fn a_run_solver_stage_failure_persists_a_failed_record() {
         record.contains("\"runs\": 2"),
         "the run count is retained: {record}"
     );
+    assert!(
+        record.contains("\"challenge\": \"verify-gate\"")
+            && record.contains("\"version\": 0")
+            && record.contains("\"subject\": \"reference\""),
+        "the record describes the bundle, its version, and the subject: {record}"
+    );
+    assert!(
+        !record.contains(&expected) && !record.contains(&secret),
+        "the record carries neither the flag nor the secret: {record}"
+    );
+    assert!(
+        !record.contains("run-solver-stage-solver.wasm"),
+        "the reason is path-free: {record}"
+    );
+
+    // The same persistence applies to an explicit `--status`, with no bundle.
+    let status = dir.path("run-solver-stage.status.json");
+    let (code, _stdout, _stderr) = run(&["run", &source, "--secret", &secret, "--status", &status]);
+    assert_eq!(code, 1, "the stage failure still exits 1");
+    let record = std::fs::read_to_string(&status).expect("--status persists the outcome");
+    assert!(
+        record.contains("\"status\": \"failed\""),
+        "record: {record}"
+    );
+}
+
+/// A run that refuses its inputs before the gate writes no record (§25.6), and
+/// leaves an earlier one untouched rather than replacing it with a guess.
+#[test]
+fn a_refused_run_writes_no_record() {
+    let dir = TempDir::new("refused");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, bundle) = gate_fixture(&dir, "refused", &expected);
+    let other = dir.path("refused-other.yaml");
+    std::fs::write(&other, "spec: 1\nid: other-challenge\nname: Other\n").unwrap();
+
+    let (code, stdout, stderr) = run(&["run", &other, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(
+        code, 1,
+        "a document for another challenge is refused:\n{stdout}{stderr}"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{bundle}.status.json")).exists(),
+        "a refusal before the gate writes no record"
+    );
+
+    // A prior pass is not disturbed by a refusal.
+    let (code, _stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(code, 0, "the matching document passes:\n{stderr}");
+    let before = std::fs::read_to_string(format!("{bundle}.status.json")).unwrap();
+    let (code, _stdout, _stderr) = run(&["run", &other, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(code, 1, "the mismatched document is still refused");
+    let after = std::fs::read_to_string(format!("{bundle}.status.json")).unwrap();
+    assert_eq!(after, before, "the earlier record is left untouched");
 }
 
 /// A gate that cannot run (a challenge with no generator or solver) is

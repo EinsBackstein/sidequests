@@ -34,7 +34,8 @@ the same format version and goldens. Release **0.13.3** then makes the declarati
 identify the section: the gate resolves `generate.wasm`/`verify.solver` through
 `names` and never runs a section of the right kind under another name (§7.6, §25.6).
 Release **0.13.4** keeps the determinism fields in a `failed` record when the solver
-stage fails, and persists `ctf run --bundle`'s hard stage failures (§25.6, S9–S10). The live gate is
+stage fails, and persists `ctf run`'s hard stage failures wherever it writes a record
+(`--status` or `--bundle`) (§25.6, S9–S10). The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 
