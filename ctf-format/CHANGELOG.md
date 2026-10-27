@@ -7,6 +7,28 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.4] — 2026-10-27
+
+Gate-record completeness. **No byte-layout change:** `version_minor` stays `3`,
+both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and no
+header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — a failed stage keeps what the earlier stage produced
+
+- **A solver-stage failure no longer erases the determinism fields.** §25.6 says
+  `generator_root`, `cross_engine`, and `runs` are `null` when the gate did not run
+  or the determinism stage produced nothing. `GateError` now carries the
+  determinism summary, and the `failed` record keeps `generator_root`,
+  `cross_engine`, and `runs` when the solver could not load or run after a
+  successful determinism check. A determinism-stage failure still records `null`.
+- **`ctf run --bundle` persists a hard stage failure.** A solver or determinism
+  stage error previously exited 1 without writing a record, while a flag mismatch
+  wrote one. It now writes the same `failed` record `ctf verify` produces, with the
+  stage named in the reason (S9, S10).
+- New tests: a solver that fails to load retains `generator_root`, `cross_engine:
+  true`, and `runs: 2` in the verify artifact; the same failure through
+  `ctf run --bundle` persists a `failed` record with those fields.
+
 ## [0.13.3] — 2026-10-27
 
 Gate-identity correction. **No byte-layout change:** `version_minor` stays `3`,
