@@ -58,7 +58,7 @@ pub fn check_caps(len_plain: u64, stored: u64) -> Result<()> {
         });
     }
     // `stored == 0` with `len_plain > 0` is an infinite ratio and is rejected by
-    // this branch; `len_plain == 0` is legal and produces nothing.
+    // this branch; `len_plain == 0` is legal and is not rejected by the ratio test.
     if len_plain > stored.saturating_mul(MAX_DECOMPRESSION_RATIO) {
         return Err(Error::CompressionRatioExceeded {
             plain: len_plain,

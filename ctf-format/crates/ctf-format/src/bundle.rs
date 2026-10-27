@@ -367,7 +367,20 @@ impl<'a> Bundle<'a> {
             record.len_plain,
             stored,
         )?;
-        if frames.len() as u64 != chunk::chunk_count(record.len_plain, record.chunk_size)? {
+        // One STREAM chunk per zstd frame, so a compressed section's chunk count
+        // follows its frames, not `len_plain` alone: an empty plaintext is one
+        // empty frame (§5.4) and therefore one chunk, where the plain count is
+        // zero. A zero-chunk empty body is also accepted: it is what this writer
+        // emitted before §5.4 fixed the framing, and both decode to the same
+        // empty plaintext, so refusing it would strand an existing file.
+        let expected_chunks = if record.comp == Compression::Zstd && record.len_plain == 0 {
+            1
+        } else {
+            chunk::chunk_count(record.len_plain, record.chunk_size)?
+        };
+        let empty_zstd_body =
+            record.comp == Compression::Zstd && record.len_plain == 0 && frames.is_empty();
+        if frames.len() as u64 != expected_chunks && !empty_zstd_body {
             return Err(Error::Inconsistent {
                 what: "encrypted body has the wrong number of chunks",
             });

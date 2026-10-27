@@ -2738,3 +2738,54 @@ fn a_compressed_keys_section_round_trips_its_envelope_cbor() {
     assert_eq!(report.verified, 2, "the manifest and the keys section");
     assert_eq!(report.unverifiable, 1, "the encrypted section needs a key");
 }
+
+/// An empty plaintext encrypted with `comp = 1` must round-trip. §5.4 makes the
+/// plaintext one empty zstd frame, and §20.2 seals one frame per chunk, so the
+/// body has one empty chunk even though `ceiling(0 / chunk_size)` is zero. The
+/// zero-chunk shape an earlier writer emitted is still accepted: both decode to
+/// the same empty plaintext and its `root` commits to it.
+#[test]
+fn an_empty_encrypted_compressed_section_round_trips() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "empty-sealed",
+        "Empty Sealed",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let mut secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        b"",
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    secret.comp = Compression::Zstd;
+
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            SectionSpec::envelopes(SectionKind::Keys, 2),
+        ],
+    )
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert_eq!(record.len_plain, 0);
+    assert!(record.len_stored > 0, "the sealed frame is still stored");
+    let key = b
+        .section_content_key(&record, &recipient.secret_key, "seal")
+        .unwrap();
+    assert_eq!(b.decrypt_section_bytes(&record, &key).unwrap(), b"");
+    assert_eq!(b.verify_inline_sections().unwrap().mismatches.len(), 0);
+}
