@@ -102,6 +102,50 @@ fn a_payload_with_an_extra_key_is_rejected() {
 }
 
 #[test]
+fn a_payload_whose_envelope_names_a_section_is_rejected() {
+    let (secret, public) = kem_keypair();
+    let payload = seal_progress(SUITE, VERSION_MAJOR, &public, "bird", "alice", b"secret").unwrap();
+
+    // §24.1: a progress envelope's `name_id` is 0, because it wraps the payload's
+    // own content key rather than a section's. Re-label the same envelope as one
+    // for section 1; the bytes are otherwise honest, so only the check can refuse.
+    let value = Value::decode(&payload).unwrap();
+    let entries = value.as_map().unwrap().to_vec();
+    let retyped: Vec<(Value, Value)> = entries
+        .into_iter()
+        .map(|(key, value)| {
+            if key.as_text() != Some("envelope") {
+                return (key, value);
+            }
+            let inner = value
+                .as_map()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| {
+                    let v = if k.as_text() == Some("name_id") {
+                        Value::Uint(1)
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), v)
+                })
+                .collect();
+            (key, Value::Map(inner))
+        })
+        .collect();
+    let tampered = Value::Map(retyped).encode().unwrap();
+
+    assert!(
+        open_progress(SUITE, VERSION_MAJOR, &secret, "bird", "alice", &payload).is_ok(),
+        "the honest payload still opens"
+    );
+    assert!(
+        open_progress(SUITE, VERSION_MAJOR, &secret, "bird", "alice", &tampered).is_err(),
+        "a non-zero envelope `name_id` is not a progress payload"
+    );
+}
+
+#[test]
 fn a_transfer_appends_a_holder_signed_record_and_carries_sealed_progress() {
     let (platform_sk, platform_pk) = signing_keypair();
     let (holder_a_sk, holder_a_pk) = signing_keypair();

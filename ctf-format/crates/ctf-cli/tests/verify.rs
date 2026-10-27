@@ -721,6 +721,80 @@ fn a_gate_input_error_does_not_leak_its_path() {
     );
 }
 
+/// Spec §23.5 G6: a bundle whose `generate.interface` names a version this build
+/// does not implement cannot run the gate, so the outcome is `unverified` (S8), not
+/// `passed`, and the reason names the version. The document that verifies it is the
+/// original passing one — the version comes from the **bundle**, as `runtime` does.
+#[test]
+fn a_bundle_declaring_an_unimplemented_interface_is_unverified() {
+    let dir = TempDir::new("interface-version");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, _packed) = gate_fixture(&dir, "interface", &expected);
+
+    let packing_text = std::fs::read_to_string(&source).unwrap().replace(
+        "  determinism: strict\n",
+        "  determinism: strict\n  interface: 2\n",
+    );
+    let packing = dir.path("interface-2.yaml");
+    std::fs::write(&packing, packing_text).unwrap();
+    let bundle = dir.path("interface-2.ctf");
+    let (code, stdout, stderr) = run(&["pack", &packing, "--out", &bundle]);
+    assert_eq!(code, 0, "pack failed: {stdout}{stderr}");
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &source,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 2,
+        "an unimplemented interface is never passed:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "unverified");
+    assert_eq!(artifact["intact"], true);
+    assert_eq!(artifact["gate"]["status"], "unverified");
+    let reason = artifact["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("interface") && reason.contains('2'),
+        "the unimplemented version is the reason: {artifact}"
+    );
+}
+
+/// Spec §23.5 G7: `ctf run` refuses a document whose profile this build does not
+/// implement before it reads a module, let alone executes one. The module here is
+/// not valid WASM, so a run that got past the version check would report a load
+/// failure instead.
+#[test]
+fn run_refuses_an_unimplemented_profile_without_running_the_module() {
+    let dir = TempDir::new("profile-version");
+    let wasm = dir.path("not-a-module.wasm");
+    std::fs::write(&wasm, b"not wasm").unwrap();
+    let source = dir.path("profile.yaml");
+    std::fs::write(
+        &source,
+        format!(
+            "spec: 1\nid: {ID}\nname: Profile\nflag: derived\n\
+             generate:\n  wasm: not-a-module.wasm\n  determinism: strict\n  profile: 2\n  \
+             outputs:\n    - {{ name: artifact.bin, player_visible: true }}\n\
+             verify:\n  solver: not-a-module.wasm\n  expect: flag\n  offline: true\n"
+        ),
+    )
+    .unwrap();
+
+    let secret = "00".repeat(32);
+    let (code, _stdout, stderr) = run(&["run", &source, "--secret", &secret]);
+    assert_eq!(code, 1, "an unimplemented profile must fail: {stderr}");
+    assert!(
+        stderr.contains("profile") && stderr.contains('2'),
+        "the unimplemented version is named: {stderr}"
+    );
+}
+
 /// A document describing a different challenge must not be attached to this
 /// bundle as a passing gate: the derived flag would belong to another challenge.
 #[test]

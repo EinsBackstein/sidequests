@@ -11,7 +11,8 @@
 use ctf_format::cbor::Value;
 use ctf_format::suite::{KemKeyPair, suite};
 use ctf_format::{
-    Manifest, Recipient, SectionFlags, SectionKind, SectionSpec, release_at_event_end, write_bundle,
+    Error, Manifest, Recipient, SectionFlags, SectionKind, SectionSpec, release_at_event_end,
+    write_bundle,
 };
 
 const SUITE: u16 = 1;
@@ -102,4 +103,25 @@ fn a_non_event_end_release_is_refused() {
             "release mode {mode} must not be triggered by the event-end command"
         );
     }
+}
+
+/// §4.4/§10: the release is a rewrite, so a header carrying an unimplemented
+/// `feat_ro_compat` bit makes it refuse before any section is touched. The vector
+/// carries no `sealed` declaration, which is the point: the guard is not conditional
+/// on the declaration or on the key.
+#[test]
+fn releasing_a_read_only_bundle_is_refused() {
+    let file = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spec/vectors/conformance/future/ro-compat-bit.ctf"
+    ))
+    .unwrap();
+    let bundle = ctf_format::Bundle::parse(&file).unwrap();
+    assert!(!bundle.header.may_rewrite());
+
+    let key = keypair(SUITE);
+    assert!(matches!(
+        release_at_event_end(&bundle, &key.secret_key),
+        Err(Error::ReadOnlyBundle { .. })
+    ));
 }

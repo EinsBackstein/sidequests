@@ -190,6 +190,8 @@ fn run_names_the_compare_stage_and_persists_a_failure() {
     let secret = "00".repeat(32);
     let source = fixture(&dir, "fail", "not-the-derived-flag");
     let bundle = dir.path("challenge.ctf");
+    let (ok, stdout, stderr) = run(&["pack", &source, "--out", &bundle]);
+    assert!(ok, "pack failed: {stdout}{stderr}");
     let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
     assert!(!ok, "a flag mismatch must exit non-zero");
     assert!(
@@ -237,5 +239,35 @@ fn run_persists_an_unverified_status_distinctly() {
     assert!(
         record.contains("\"generator_root\": null"),
         "an unverified run has no root: {record}"
+    );
+}
+
+/// Spec §25.6/S10: `--bundle` names the bundle the record describes. A document for
+/// another challenge must not have its verdict persisted beside that bundle.
+#[test]
+fn run_refuses_to_attach_the_record_to_another_challenge() {
+    let dir = TempDir::new("attribution");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let source = fixture(&dir, "attribution", &expected);
+
+    let other = dir.path("other.yaml");
+    std::fs::write(&other, "spec: 1\nid: another-chal\nname: Other\n").unwrap();
+    let bundle = dir.path("other.ctf");
+    let (ok, stdout, stderr) = run(&["pack", &other, "--out", &bundle]);
+    assert!(ok, "pack failed: {stdout}{stderr}");
+
+    let (ok, _stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert!(
+        !ok,
+        "a record for another challenge must not be written: {stderr}"
+    );
+    assert!(
+        stderr.contains("another-chal"),
+        "the error names the bundle's id: {stderr}"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{bundle}.status.json")).exists(),
+        "a refused attribution writes no record"
     );
 }

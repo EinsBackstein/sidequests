@@ -37,8 +37,8 @@ use ctf_format::pack::{self, PackError};
 use ctf_format::{
     Bundle, Compression, Encryption, EntitlementChain, HEADER_LEN, HolderKeys, HybridPublicKey,
     HybridSigningKey, KemKeyPair, MAGIC, Payload, Recipient, SECTION_RECORD_LEN, SectionFlags,
-    SectionKind, SectionSpec, ServingManifest, Signing, Timestamp, VERSION_MAJOR, holder_hash,
-    release_at_event_end, seal_progress,
+    SectionKind, SectionRecord, SectionSpec, ServingManifest, Signing, Timestamp, VERSION_MAJOR,
+    holder_hash, release_at_event_end, seal_progress,
 };
 
 use verify::{Artifact, SectionCounts, Status};
@@ -838,6 +838,35 @@ fn run_gate(args: &RunArgs) -> ExitCode {
         }
     };
 
+    // Spec §25.6/S10: the record is written next to a bundle, so it must describe
+    // that bundle. Without this check `ctf run --bundle` could persist a verdict
+    // about this document beside an unrelated file.
+    if let Some(path) = &args.bundle {
+        let bundle_file = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("ctf: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let bundle = match Bundle::parse(&bundle_file) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("ctf: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let (id, version) = (bundle.manifest.id(), bundle.manifest.version());
+        if id != setup.doc_id || version != setup.doc_version {
+            eprintln!(
+                "ctf: {path}: the authoring document describes `{}` version {}, not this \
+                 bundle's `{id}` version {version}",
+                setup.doc_id, setup.doc_version
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+
     let report = match run_setup_gate(&setup) {
         Ok(r) => r,
         Err(e) => {
@@ -932,6 +961,10 @@ struct GateSetup {
     doc_id: String,
     /// The document's `version`, likewise.
     doc_version: u64,
+    /// The generator interface version the document declares; 1 when absent (§7.6).
+    interface: u32,
+    /// The WASM profile the document declares; 1 when absent (§7.6).
+    profile: u32,
     /// The generator module's bytes, when the gate has one.
     generator: Option<Vec<u8>>,
     /// The solver module's bytes, when the gate has one.
@@ -973,6 +1006,31 @@ impl core::fmt::Display for GateSetupError {
     }
 }
 
+/// A `generate.interface`/`generate.profile` from a document, or 1 when absent
+/// (§7.6).
+///
+/// `Err(v)` is a version the build cannot implement: either `implemented` rejects
+/// it, or it does not fit `u32` at all. Both are unsupported rather than malformed,
+/// so the caller reports one diagnostic and the value that caused it.
+fn declared_version(
+    value: Option<u64>,
+    implemented: fn(u32) -> Result<(), u32>,
+) -> Result<u32, u64> {
+    let Some(value) = value else {
+        return Ok(1);
+    };
+    u32::try_from(value)
+        .ok()
+        .filter(|small| implemented(*small).is_ok())
+        .ok_or(value)
+}
+
+/// The diagnostic for a version this build does not implement, naming the value so
+/// an author knows what to change.
+fn unsupported_version(key: &str, value: u64) -> String {
+    format!("`{key}`: {value} is not a version this build implements")
+}
+
 /// Read and resolve the authoring document, the modules it names, the event secret,
 /// and the reference subject's seed. This is every input a gate needs and nothing
 /// more: it does not run the gate.
@@ -988,6 +1046,21 @@ fn load_gate_setup(
         return Err(GateSetupError::Issues(issues));
     }
     let dir = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
+
+    // Rules G6/G7: an interface or profile this build does not implement means the
+    // gate cannot run at all, so it is refused before a module is read — let alone
+    // executed. An integer wider than `u32` is one such version: no build can
+    // implement it, and truncating it would name the wrong one in the diagnostic.
+    let interface = declared_version(
+        doc.generate.as_ref().and_then(|g| g.interface),
+        ctf_generator::abi::ensure_interface,
+    )
+    .map_err(|v| GateSetupError::Message(unsupported_version("generate.interface", v)))?;
+    let profile = declared_version(
+        doc.generate.as_ref().and_then(|g| g.profile),
+        ctf_generator::abi::ensure_profile,
+    )
+    .map_err(|v| GateSetupError::Message(unsupported_version("generate.profile", v)))?;
 
     // Resolve the modules the document names, relative to the document.
     let read_module = |key: &str, name: &str| -> Result<Vec<u8>, String> {
@@ -1011,6 +1084,8 @@ fn load_gate_setup(
     Ok(GateSetup {
         doc_id: doc.id.clone(),
         doc_version: doc.version,
+        interface,
+        profile,
         generator,
         solver,
         seed,
@@ -1025,6 +1100,20 @@ fn load_gate_setup(
 fn run_setup_gate(
     setup: &GateSetup,
 ) -> Result<ctf_generator::OfflineGateReport, ctf_generator::GateError> {
+    // G6/G7 again at the point of use: `ctf verify` replaces these from the bundle
+    // manifest, and an unimplemented version means no stage can start.
+    if let Err(interface) = ctf_generator::abi::ensure_interface(setup.interface) {
+        return Err(ctf_generator::GateError {
+            stage: ctf_generator::GateStage::Determinism,
+            source: ctf_generator::GeneratorError::InterfaceUnsupported(interface),
+        });
+    }
+    if let Err(profile) = ctf_generator::abi::ensure_profile(setup.profile) {
+        return Err(ctf_generator::GateError {
+            stage: ctf_generator::GateStage::Determinism,
+            source: ctf_generator::GeneratorError::ProfileUnsupported(profile),
+        });
+    }
     ctf_generator::offline_gate(
         ctf_generator::OfflineGate {
             generator: setup.generator.as_deref(),
@@ -1104,6 +1193,35 @@ fn gate_record_for_bundle(
         .declaration("verify")
         .and_then(|verify| verify.get("offline"))
         .is_some_and(|offline| matches!(offline, Value::Bool(true)));
+
+    // G6/G7 are about the **bundle** too, for the same reason: a version this build
+    // does not implement means no stage can start, so the outcome is `unverified`
+    // (S8), not `failed`. Absent means 1 (§7.6). The reason is fixed and path-free
+    // (S12), naming only the number the bundle declared.
+    let generate = bundle.manifest.declaration("generate");
+    let bundle_version = |key: &str| generate.and_then(|g| g.get(key)).and_then(Value::as_uint);
+    setup.interface = match declared_version(
+        bundle_version("interface"),
+        ctf_generator::abi::ensure_interface,
+    ) {
+        Ok(interface) => interface,
+        Err(interface) => {
+            return unverified(format!(
+                "the bundle declares generator interface {interface}, which this build does not implement"
+            ));
+        }
+    };
+    setup.profile = match declared_version(
+        bundle_version("profile"),
+        ctf_generator::abi::ensure_profile,
+    ) {
+        Ok(profile) => profile,
+        Err(profile) => {
+            return unverified(format!(
+                "the bundle declares WASM profile {profile}, which this build does not implement"
+            ));
+        }
+    };
 
     // §25.6's "declares no generator or no solver" is a statement about the
     // manifest's `generate.wasm` and `verify.solver` declarations (§7.6), not
@@ -1703,7 +1821,7 @@ fn embed_entitlement(path: &str, chain: &[u8]) -> Result<Vec<u8>, Box<dyn std::e
                     len_plain: r.len_plain,
                     root: r.root,
                 },
-                chunk_index: None,
+                chunk_index: external_chunk_index(&file, r)?,
                 encryption: None,
             });
             continue;
@@ -1797,6 +1915,34 @@ fn check_context(context: &str) -> Result<(), String> {
         return Ok(());
     }
     Err("must be `storage`, `seal`, `holder`, or `stage:<decimal>`".to_owned())
+}
+
+/// An EXTERNAL section's chunk index exactly as the file stores it, for a rewrite to
+/// copy.
+///
+/// Spec §5.2 requires a rewrite to preserve an unknown-kind section byte-for-byte,
+/// and the index is part of what the author wrote. This deliberately does not use
+/// [`Bundle::chunk_index`]: that refuses an unknown kind or a sealed section (C8),
+/// which governs handing an index to a caller, not copying the record's bytes. The
+/// writer validates whatever is copied against the section root, so a bad index
+/// still fails rather than being emitted.
+fn external_chunk_index<'a>(
+    file: &'a [u8],
+    record: &SectionRecord,
+) -> ctf_format::Result<Option<&'a [u8]>> {
+    let Some((start, end)) = record.index_range()? else {
+        return Ok(None);
+    };
+    let (Ok(from), Ok(to)) = (usize::try_from(start), usize::try_from(end)) else {
+        return Err(ctf_format::Error::LengthOverflow { at: "chunk index" });
+    };
+    file.get(from..to)
+        .map(Some)
+        .ok_or(ctf_format::Error::ExceedsFile {
+            at: "chunk index",
+            end,
+            file_len: u64::try_from(file.len()).unwrap_or(u64::MAX),
+        })
 }
 
 /// Rewrite `path` with `section` encrypted to the recipient in `pub_path`.
@@ -1936,7 +2082,7 @@ fn seal_section(
                     len_plain: r.len_plain,
                     root: r.root,
                 },
-                chunk_index: None,
+                chunk_index: external_chunk_index(&file, r)?,
                 encryption: None,
             });
         } else {
