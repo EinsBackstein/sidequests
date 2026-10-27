@@ -482,14 +482,30 @@
     },
     {
       "expectation": {
-        "kind": "rejects"
+        "error": "UnknownDiscriminant",
+        "kind": "error"
       },
       "file": "hostile/unknown-enc-discriminant.ctf",
       "hardening": [],
       "kind": "hostile",
       "matrix_row": null,
       "name": "unknown-enc-discriminant",
-      "proves": "an unassigned enc/comp value is refused even on a skippable section",
+      "proves": "an unassigned enc value is refused on an unknown-kind OPTIONAL section a reader would otherwise skip, so the skip cannot hide R10",
+      "rules": [
+        "R10"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "UnknownDiscriminant",
+        "kind": "error"
+      },
+      "file": "hostile/unknown-comp-discriminant.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "unknown-comp-discriminant",
+      "proves": "an unassigned comp value is refused on the same unknown-kind OPTIONAL section; §5.4 applies to either field",
       "rules": [
         "R10"
       ]

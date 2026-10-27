@@ -400,6 +400,33 @@ func checkAccept(t *testing.T, c conformanceCase, data []byte) {
 		if _, err := b.SectionBytes(*c.NameID); err == nil {
 			t.Fatalf("unknown-kind section was served")
 		}
+		if _, err := b.VerifyChunkIndex(*c.NameID); err == nil {
+			t.Fatalf("chunk index of unknown-kind section %d was exposed", *c.NameID)
+		}
+		// VerifyAll must actually cover a kind it skips for serving, not merely
+		// return no errors. Corrupt one stored byte: the commitment root still
+		// holds, but the section root no longer does, so a VerifyAll that skipped
+		// this section would report nothing.
+		corrupt := append([]byte(nil), data...)
+		if rec.LenStored == 0 || rec.Offset >= uint64(len(corrupt)) {
+			t.Fatalf("unknown-kind section %d has no stored bytes to corrupt", *c.NameID)
+		}
+		corrupt[rec.Offset] ^= 0xff
+		b2, err := cf.Parse(corrupt)
+		if err != nil {
+			t.Fatalf("corrupting a section byte broke the parse: %v", err)
+		}
+		errs := b2.VerifyAll()
+		want := fmt.Sprintf("section %d", *c.NameID)
+		found := false
+		for _, e := range errs {
+			if strings.Contains(e.Error(), want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("VerifyAll did not report the corrupted unknown-kind %s: %v", want, errs)
+		}
 	}
 	if c.Verify {
 		if err := b.Verify(); err != nil {
@@ -504,8 +531,11 @@ func TestNamedRuleIsAssertedOnlyForSingleRuleVectors(t *testing.T) {
 	if got := byName["payload-beyond-footer"].Rule; got != "T3" {
 		t.Errorf("payload-beyond-footer asserts rule %q, want T3", got)
 	}
-	if got := byName["unknown-enc-discriminant"].Rule; got != "" {
-		t.Errorf("unknown-enc-discriminant asserts rule %q, want none (it cites several)", got)
+	if got := byName["unknown-enc-discriminant"].Rule; got != "R10" {
+		t.Errorf("unknown-enc-discriminant asserts rule %q, want R10", got)
+	}
+	if got := byName["unknown-comp-discriminant"].Rule; got != "R10" {
+		t.Errorf("unknown-comp-discriminant asserts rule %q, want R10", got)
 	}
 	if got := byName["truncated-footer"].Rule; got != "" {
 		t.Errorf("truncated-footer asserts rule %q, want none: F1 always implies F5", got)
