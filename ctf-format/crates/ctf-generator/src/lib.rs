@@ -32,8 +32,8 @@ pub use abi::{
     AbiError, ArtifactBlock, GeneratorOutput, INTERFACE_VERSION, OUTPUT_LABEL, Output, WASM_PROFILE,
 };
 pub use gate::{
-    GateError, GateReport, GateStage, GateStatus, OfflineGate, OfflineGateReport, UnverifiedReason,
-    VerificationRecord, determinism_gate, offline_gate,
+    DeterminismSummary, GateError, GateReport, GateStage, GateStatus, OfflineGate,
+    OfflineGateReport, UnverifiedReason, VerificationRecord, determinism_gate, offline_gate,
 };
 pub use host::{EngineKind, Generator, GeneratorError, Limits};
 pub use second::second_engine_supported;

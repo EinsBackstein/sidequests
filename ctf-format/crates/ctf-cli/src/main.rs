@@ -912,6 +912,30 @@ fn run_gate(args: &RunArgs) -> ExitCode {
         Err(e) => {
             // A hard stage failure (`GateError`) names the stage and the reason.
             eprintln!("ctf: {path}: {e}");
+            // It is still a gate outcome, so persist it where a record is expected
+            // (§25.6). Whatever the determinism stage produced stays in the record;
+            // only a determinism-stage failure leaves those fields null.
+            if let Some(status_path) = run_status_path(args) {
+                let determinism = e.determinism;
+                let record = ctf_generator::VerificationRecord {
+                    challenge: setup.doc_id.clone(),
+                    version: setup.doc_version,
+                    subject: args.subject.clone(),
+                    status: ctf_generator::GateStatus::Failed,
+                    reason: format!(
+                        "the offline gate could not complete a §25.5 stage ({})",
+                        e.stage
+                    ),
+                    generator_root: determinism.map(|d| d.output_root),
+                    cross_engine: determinism.map(|d| d.cross_engine),
+                    runs: determinism.map(|d| d.runs),
+                };
+                if let Err(write) = std::fs::write(&status_path, record.to_json()) {
+                    eprintln!("ctf: {status_path}: {write}");
+                } else {
+                    println!("{status_path}: verification status (failed)");
+                }
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -1260,12 +1284,14 @@ fn run_setup_gate(
         return Err(ctf_generator::GateError {
             stage: ctf_generator::GateStage::Determinism,
             source: ctf_generator::GeneratorError::InterfaceUnsupported(interface),
+            determinism: None,
         });
     }
     if let Err(profile) = ctf_generator::abi::ensure_profile(setup.profile) {
         return Err(ctf_generator::GateError {
             stage: ctf_generator::GateStage::Determinism,
             source: ctf_generator::GeneratorError::ProfileUnsupported(profile),
+            determinism: None,
         });
     }
     ctf_generator::offline_gate(
@@ -1348,6 +1374,10 @@ fn gate_record_for_bundle(
             // record carries the fact and the stage only, and the detail is on
             // stderr. S9 is satisfied by naming the stage, not by leaking a path.
             eprintln!("ctf: the offline gate could not complete: {e}");
+            // §25.6: these are `null` only when the determinism stage did not
+            // produce them. A solver-stage failure after a successful determinism
+            // run keeps the root, run count, and cross-engine result.
+            let determinism = e.determinism;
             ctf_generator::VerificationRecord {
                 challenge: id.to_owned(),
                 version,
@@ -1357,9 +1387,9 @@ fn gate_record_for_bundle(
                     "the offline gate could not complete a §25.5 stage ({})",
                     e.stage
                 ),
-                generator_root: None,
-                cross_engine: None,
-                runs: None,
+                generator_root: determinism.map(|d| d.output_root),
+                cross_engine: determinism.map(|d| d.cross_engine),
+                runs: determinism.map(|d| d.runs),
             }
         }
     }

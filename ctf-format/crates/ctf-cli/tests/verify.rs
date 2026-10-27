@@ -687,6 +687,88 @@ fn a_bundle_generator_section_wins_over_the_documents_module() {
     );
 }
 
+/// Spec §25.6: the determinism fields are `null` only when that stage produced
+/// nothing. A solver that fails to load after the generator ran twice must not
+/// erase the root, run count, or cross-engine result.
+#[test]
+fn a_solver_stage_failure_keeps_the_determinism_fields() {
+    let dir = TempDir::new("solver-stage");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, bundle) = gate_fixture(&dir, "solver-stage", &expected);
+    std::fs::write(dir.path("solver-stage-solver.wasm"), b"not a wasm module").unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &source,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(code, 1, "a solver stage failure exits 1:\n{stdout}{stderr}");
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "failed");
+    assert_eq!(artifact["gate"]["status"], "failed");
+    assert!(
+        artifact["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("solver"),
+        "the failing stage is named: {artifact}"
+    );
+    assert!(
+        artifact["gate"]["generator_root"].as_str().is_some(),
+        "the determinism stage produced a root: {artifact}"
+    );
+    assert_eq!(
+        artifact["gate"]["cross_engine"].as_bool(),
+        Some(true),
+        "the cross-engine result is retained: {artifact}"
+    );
+    assert_eq!(
+        artifact["gate"]["runs"].as_u64(),
+        Some(2),
+        "the run count is retained: {artifact}"
+    );
+}
+
+/// The same outcome through `ctf run --bundle`: a hard stage failure persists a
+/// `failed` record beside the bundle, with the determinism fields it produced.
+#[test]
+fn a_run_solver_stage_failure_persists_a_failed_record() {
+    let dir = TempDir::new("run-solver-stage");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, bundle) = gate_fixture(&dir, "run-solver-stage", &expected);
+    std::fs::write(
+        dir.path("run-solver-stage-solver.wasm"),
+        b"not a wasm module",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(code, 1, "a solver stage failure exits 1:\n{stdout}{stderr}");
+    let record = std::fs::read_to_string(format!("{bundle}.status.json"))
+        .expect("a run against a bundle persists its outcome");
+    assert!(
+        record.contains("\"status\": \"failed\""),
+        "record: {record}"
+    );
+    assert!(
+        record.contains("\"generator_root\": \""),
+        "the determinism root is retained: {record}"
+    );
+    assert!(
+        record.contains("\"cross_engine\": true"),
+        "the cross-engine result is retained: {record}"
+    );
+    assert!(
+        record.contains("\"runs\": 2"),
+        "the run count is retained: {record}"
+    );
+}
+
 /// A gate that cannot run (a challenge with no generator or solver) is
 /// `unverified`, never `passed`, and exits 2 even though integrity holds.
 #[test]
