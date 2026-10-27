@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.0
+**Version:** 0.3 (major 0, minor 3); document revision 0.13.1
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2

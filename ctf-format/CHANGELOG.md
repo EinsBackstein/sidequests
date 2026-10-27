@@ -7,6 +7,86 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.1] — 2026-10-27
+
+Post-release audit round: four conformance PRs (#114–#117) closing reader paths
+that still disagreed with the text they implement. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved. Every spec edit either states a rule the text already implied or
+fixes an internal inconsistency, so no feature bit is spent (§15).
+
+### Fixed — unknown kinds, read-only files, and decompression caps
+
+- **An unknown section kind is never acted on.** `verify_inline_sections` no longer
+  decompresses a `comp = 1` section whose kind this build does not implement; it is
+  counted `unverifiable`, while a `comp = 0` section is still hashed against its
+  `root`, which §10 permits. `ServingManifest` omits an unknown kind even when it
+  carries `PLAYER_VISIBLE` (§5.2, §28): the flag confers nothing on a reader that
+  does not implement the kind.
+- **§4.4 read-only refusal is automatic on every rewrite.** `sign_bundle`,
+  `ctf seal`, `ctf transfer`, and `ctf release` refuse a header carrying an
+  unimplemented `feat_ro_compat` bit before touching a section. `ctf release` is
+  included because §4.4 names seal release a rewrite; the refusal lives in
+  `release_at_event_end`, so a caller cannot forget it.
+- **D1/D2 are section-level.** `decrypt_section_bytes` applies the caps once to the
+  declared `len_plain`/`len_stored` before decrypting, instead of per chunk after
+  decompression, so a bomb spread across chunks is refused before any key is used
+  (§5.4, §10). `compress::decompress_exact` carries the per-frame length check.
+- **An EXTERNAL section's chunk index survives a rewrite.** `ctf seal` and
+  `ctf transfer` copy the record's index bytes with `SectionRecord::index_range()`
+  rather than rebuilding the record without one (§5.2). The writer still validates
+  the copied index against the section root.
+
+### Fixed — entitlement trust
+
+- **KD2 holder resolution.** `HolderKeys::get` returns a key only when
+  `holder_hash(key)` equals the queried `holder` as well as the stored label. A
+  mislabelled pair never resolves, so a wrong holder key fails E9 as
+  `InvalidKey { role: Signature }` instead of a bare signature mismatch (§34.1,
+  §34.3). `Error::ReadOnlyBundle` is a new public variant; `HolderKeys`'s signatures
+  are unchanged.
+- `EntitlementChain::validate_against_root` now documents which root it takes: the
+  bundle version the genesis grant was issued for, never the file that currently
+  carries the chain. A chain embedded in a bundle cannot name that bundle's own root,
+  so no in-tree caller may compare against it (§18.2, §18.5).
+
+### Fixed — the offline gate
+
+- **`ctf verify` reads the declarations the bundle makes.** `runtime`,
+  `verify.offline`, `generate.wasm`, and `verify.solver` come from the bundle's
+  manifest, not the authoring document (§25.6). A bundle that carries a
+  `generator`/`solver` section is gated on that section's bytes; otherwise the
+  document's module is used only for a module the bundle declares, so a document can
+  no longer resurrect a declaration the bundle omits. `ctf run` stays document-only.
+- **G6/G7 are enforced.** An unimplemented `generate.interface` or
+  `generate.profile` is refused before a module runs: `ctf verify` reports
+  `unverified` naming the version, `ctf run` fails with it (§23.5, §23.8).
+- **`ctf run --bundle` describes that bundle.** The id and version are cross-checked
+  before a record is written beside a file (§25.6/S10).
+- `offline_gate` names a missing module before a missing `verify.offline` when both
+  hold; §25.6's list is unordered.
+- A progress payload's envelope must carry `name_id = 0`; any other value is
+  malformed (§24.1).
+
+### Spec — clarifications
+
+- **§5.4:** frame alignment is a writer obligation; a whole-section reader may
+  decode the concatenation and rely on `root`.
+- **§7.6:** `generate.wasm` and `verify.solver` name `names` entries, and the
+  matching section's plaintext is the module when the bundle carries it.
+- **§18.4 E2:** a field outside §18.1's list, or a signature-map key other than
+  `classical`/`pq`, is a structural rejection.
+- **§18.5:** the genesis root binds the version the grant was issued for; an
+  embedded chain can never name the containing file.
+- **§23.8 G10:** the second-engine exemption is stated for a module the primary
+  engine accepted and the second cannot load, reported as `cross_engine: false`.
+- **§25.6/§25.6.1:** the gate's declarations are the bundle's; the authoring input
+  supplies seed, flag, and module bytes. `generator_root`, `cross_engine`, and
+  `runs` are `null` when the gate did not run or the determinism stage failed;
+  `cross_engine` is `false` for G10's exemption. A rejected file does not run the
+  gate, and `gate` stays `null`.
+
 ## [0.13.0] — 2026-10-27
 
 Phase 8 complete: the hostile-input and future-file corpora, the independent Go
