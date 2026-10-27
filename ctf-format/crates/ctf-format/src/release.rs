@@ -115,7 +115,20 @@ fn sealed_declaration(bundle: &Bundle<'_>) -> Option<SealedDeclaration> {
 /// released plaintext is verified against its section root before it is returned
 /// ([`Bundle::decrypt_section_bytes`]), so a wrong key fails rather than yielding
 /// garbage.
+///
+/// A bundle whose header carries an unimplemented `feat_ro_compat` bit is refused
+/// with [`Error::ReadOnlyBundle`]: §4.4 names the release as a rewrite, and §10
+/// makes that refusal automatic.
 pub fn release_at_event_end(bundle: &Bundle<'_>, seal_secret_key: &[u8]) -> Result<Release> {
+    // Spec §4.4 names the seal release as a rewrite, and §10 makes the refusal
+    // automatic: re-emitting a header whose `feat_ro_compat` carries a feature this
+    // build does not implement would drop that feature's bytes. Checked before any
+    // section is touched, so no caller can forget it.
+    if !bundle.header.may_rewrite() {
+        return Err(Error::ReadOnlyBundle {
+            what: "releasing a sealed section would rewrite a header carrying an unimplemented feat_ro_compat bit",
+        });
+    }
     let declaration = sealed_declaration(bundle);
     let release = declaration
         .as_ref()

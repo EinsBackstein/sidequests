@@ -412,7 +412,8 @@ impl<'a> Bundle<'a> {
     ///
     /// A compressed section is decompressed and checked here too — the caps of
     /// [`compress::check_caps`] run before the decoder, so verifying untrusted input
-    /// is safe. Only an *encrypted* section is unverifiable by this build.
+    /// is safe. An encrypted section, and an unknown-kind `comp = 1` section, are
+    /// unverifiable by this build.
     ///
     /// An unknown-kind section is hashed but never decompressed (spec §5.2, §10):
     /// hashing is permitted, decompression is not. So `comp = 0` is verified against
@@ -545,8 +546,10 @@ pub struct VerifyReport {
     /// `EXTERNAL` sections, whose bytes are not in this file. Stream them through
     /// [`chunk::verify_stream`].
     pub external: usize,
-    /// Sections whose bytes are in this file and which this build cannot check.
-    /// Non-zero means the file was **not** fully verified.
+    /// Sections whose bytes are in this file and which this build cannot check:
+    /// encrypted ones, which need the content key, and unknown-kind `comp = 1`
+    /// ones, which would need the decompression §10 forbids. Non-zero means the
+    /// file was **not** fully verified.
     pub unverifiable: usize,
     /// Sections carrying a chunk index. C1–C7 are **on-use** rules (spec §9.3,
     /// §10): this pass does not evaluate them — [`Bundle::chunk_index`] does, when

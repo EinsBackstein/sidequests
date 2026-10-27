@@ -130,6 +130,15 @@ pub fn open_progress(
         .ok_or_else(|| malformed("progress payload is missing `ct` or it is not bytes"))?;
     let envelope = Envelope::from_cbor(envelope_value)?;
 
+    // §24.1 fixes the envelope's `name_id` at 0: a progress payload wraps a content
+    // key of its own, not a section's, so any other value names something that does
+    // not exist. Refusing it here keeps the two envelope forms from being conflated.
+    if envelope.name_id != PROGRESS_NAME_ID {
+        return Err(malformed(
+            "progress payload envelope does not carry `name_id` 0",
+        ));
+    }
+
     // `open` checks the context before touching key material, so an envelope bound
     // to another context is refused (rule P2).
     let content_key = envelope.open(holder_secret_key, suite_id, version_major, HOLDER_CONTEXT)?;

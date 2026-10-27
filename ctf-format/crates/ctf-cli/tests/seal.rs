@@ -15,8 +15,10 @@
 
 use std::process::Command;
 
+use ctf_format::chunk::ChunkIndex;
 use ctf_format::{
-    Bundle, Encryption, SectionFlags, SectionKind, SectionSpec, cbor::Value, write_bundle,
+    Bundle, Compression, Encryption, Manifest, Payload, SectionFlags, SectionKind, SectionSpec,
+    cbor::Value, write_bundle,
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_ctf");
@@ -147,6 +149,72 @@ fn pack_challenge(dir: &TempDir, plaintext: &[u8]) -> String {
     .unwrap();
     std::fs::write(&challenge, &file).unwrap();
     challenge
+}
+
+/// A bundle whose `image` section is EXTERNAL and chunked, carrying the index its
+/// author wrote, plus an inline `payload` that `ctf seal` can encrypt.
+fn challenge_with_indexed_external(dir: &TempDir) -> String {
+    let plaintext = vec![0x42u8; 12_288];
+    let index = ChunkIndex::build(&plaintext, 4096).unwrap();
+    let root = ctf_format::chunk::root_from_cvs(index.entries()).unwrap();
+    let manifest = Manifest::build(
+        "chunked-chal",
+        "Chunked Challenge",
+        &["manifest", "image", "payload"],
+        vec![(
+            Value::Text("external".into()),
+            Value::Map(vec![(
+                Value::Uint(1),
+                Value::Map(vec![
+                    (
+                        Value::Text("size".into()),
+                        Value::Uint(plaintext.len() as u64),
+                    ),
+                    (Value::Text("root".into()), Value::Bytes(root.to_vec())),
+                    (
+                        Value::Text("mirrors".into()),
+                        Value::Array(vec![Value::Text("https://example.test/image".into())]),
+                    ),
+                ]),
+            )]),
+        )],
+    )
+    .unwrap();
+    let index_bytes = index.to_bytes();
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &manifest.encode().unwrap(),
+            ),
+            SectionSpec {
+                kind: SectionKind::Artifact,
+                name_id: 1,
+                flags: SectionFlags(SectionFlags::EXTERNAL),
+                chunk_size: 4096,
+                comp: Compression::None,
+                payload: Payload::External {
+                    len_plain: plaintext.len() as u64,
+                    root,
+                },
+                chunk_index: Some(&index_bytes),
+                encryption: None,
+            },
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                2,
+                SectionFlags::empty(),
+                b"payload body",
+            ),
+        ],
+    )
+    .unwrap();
+    let path = dir.path("chunked.ctf");
+    std::fs::write(&path, &file).unwrap();
+    path
 }
 
 /// Generate a seal keypair and seal the challenge's `artifact` section. Returns the
@@ -401,4 +469,56 @@ fn seal_refuses_a_read_only_bundle_and_writes_nothing() {
         !std::path::Path::new(&out).exists(),
         "a refused seal must write no output"
     );
+}
+
+/// Spec §5.2: an unknown-kind section must survive a rewrite byte-for-byte, and an
+/// EXTERNAL section's chunk index is part of what the author wrote. The rewrite
+/// used to rebuild every external record with `chunk_index: None`, silently
+/// dropping it.
+#[test]
+fn seal_preserves_an_external_sections_chunk_index() {
+    let dir = TempDir::new("external-index");
+    let challenge = challenge_with_indexed_external(&dir);
+
+    let key = dir.path("seal.key");
+    let public = dir.path("seal.pub");
+    let (ok, _out, err) = run(&[
+        "keys",
+        "--context",
+        "seal",
+        "--out-key",
+        &key,
+        "--out-pub",
+        &public,
+    ]);
+    assert!(ok, "keys failed: {err}");
+
+    let sealed = dir.path("sealed.ctf");
+    let (ok, _out, err) = run(&[
+        "seal",
+        &challenge,
+        "--pub",
+        &public,
+        "--context",
+        "seal",
+        "--section",
+        "payload",
+        "--out",
+        &sealed,
+    ]);
+    assert!(ok, "seal failed: {err}");
+
+    let bytes = std::fs::read(&sealed).unwrap();
+    let bundle = Bundle::parse(&bytes).unwrap();
+    let external = bundle
+        .sections
+        .iter()
+        .find(|r| r.flags.external())
+        .expect("the external section survives the rewrite");
+    assert_ne!(
+        external.chunk_index_off, 0,
+        "the rewrite dropped the external section's chunk index"
+    );
+    let index = bundle.chunk_index(external).unwrap().unwrap();
+    assert_eq!(index.entries().len(), 3, "all three chunks stay indexed");
 }
