@@ -353,14 +353,14 @@ touching the CLI.
       are represented, signed, and validated (ticket 39)
 - [x] `transfer` requires the current holder's signature — non-repudiable handoff
       (E8 requires it; E9 verifies it against the holder named by the previous record)
-- [ ] `progress` carries earned stage flags sealed to the new holder's key
+- [x] `progress` carries earned stage flags sealed to the new holder's key
       — **landed in 0.10.0** (spec §24, `progress::{seal_progress, open_progress}`,
       ticket 41). A `holder`-context envelope wraps a fresh content key; the
       ciphertext's AAD binds suite, challenge, and subject.
 - [x] Ordering by `seq`; `timestamp` is advisory display only
 - [x] Offline validation: chain verifies with no platform reachable (air-gapped
       forensics workstation on USB media)
-- [ ] `ctf transfer` — **landed in 0.10.0** (ticket 43), with the authoring surface
+- [x] `ctf transfer` — **landed in 0.10.0** (ticket 43), with the authoring surface
       of ticket 44: the updated chain is embedded back into a bundle with
       `--bundle`, or written as chain plaintext.
 
