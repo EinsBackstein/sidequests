@@ -805,7 +805,7 @@ fn a_run_solver_stage_failure_persists_a_failed_record() {
     );
 }
 
-/// A run that refuses its inputs before the gate writes no record (§25.6), and
+/// A `ctf run` that cannot reach a gate outcome writes no record (§25.6), and
 /// leaves an earlier one untouched rather than replacing it with a guess.
 #[test]
 fn a_refused_run_writes_no_record() {
@@ -823,13 +823,21 @@ fn a_refused_run_writes_no_record() {
     );
     assert!(
         !std::path::Path::new(&format!("{bundle}.status.json")).exists(),
-        "a refusal before the gate writes no record"
+        "a run that cannot reach a gate outcome writes no record"
+    );
+    assert!(
+        stderr.contains("not this bundle's") && stderr.contains(&bundle),
+        "the refusal names the mismatch: {stdout}{stderr}"
     );
 
     // A prior pass is not disturbed by a refusal.
     let (code, _stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
     assert_eq!(code, 0, "the matching document passes:\n{stderr}");
     let before = std::fs::read_to_string(format!("{bundle}.status.json")).unwrap();
+    assert!(
+        before.contains("\"status\": \"passed\""),
+        "the first run persists a pass: {before}"
+    );
     let (code, _stdout, _stderr) = run(&["run", &other, "--secret", &secret, "--bundle", &bundle]);
     assert_eq!(code, 1, "the mismatched document is still refused");
     let after = std::fs::read_to_string(format!("{bundle}.status.json")).unwrap();

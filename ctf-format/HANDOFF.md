@@ -13,7 +13,7 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.4. Phases 1–4
+**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.5. Phases 1–4
 complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
 `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
 49/50, 34 fixtures in `spec/vectors/conformance/`), the **independent Go
@@ -35,7 +35,10 @@ identify the section: the gate resolves `generate.wasm`/`verify.solver` through
 `names` and never runs a section of the right kind under another name (§7.6, §25.6).
 Release **0.13.4** keeps the determinism fields in a `failed` record when the solver
 stage fails, and persists `ctf run`'s hard stage failures wherever it writes a record
-(`--status` or `--bundle`) (§25.6, S9–S10). The live gate is
+(`--status` or `--bundle`) (§25.6, S9–S10). Release **0.13.5** narrows the
+record-boundary sentence 0.13.4 added: only a `ctf run --bundle` that cannot match a
+document to its bundle writes no record; a run that can identify the bundle but
+cannot gate it writes `unverified`, as `ctf verify` already did. No code changed. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 
