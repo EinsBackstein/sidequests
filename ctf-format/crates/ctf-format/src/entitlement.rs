@@ -531,11 +531,18 @@ impl HolderKeys {
     }
 
     /// Register a holder's public key under its 32-byte holder hash.
+    ///
+    /// The pair is stored as given and is not checked here; a pair whose label is
+    /// not `holder_hash(key)` is refused at resolution time, so it never resolves
+    /// (KD2, spec §34.1).
     pub fn insert(&mut self, holder: [u8; ROOT_LEN], key: HybridPublicKey) {
         self.entries.push((holder, key));
     }
 
     /// Build a resolver from `(holder_hash, public_key)` pairs.
+    ///
+    /// As with [`HolderKeys::insert`], a pair whose label is not `holder_hash(key)`
+    /// is refused at resolution time rather than rejected here.
     pub fn from_pairs(pairs: impl IntoIterator<Item = ([u8; ROOT_LEN], HybridPublicKey)>) -> Self {
         Self {
             entries: pairs.into_iter().collect(),
@@ -543,10 +550,17 @@ impl HolderKeys {
     }
 
     /// The trusted key for `holder`, or `None` if the verifier does not hold one.
+    ///
+    /// The caller-supplied label is not authoritative: KD2 fixes `holder` as
+    /// `BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)` over the **signature**
+    /// public key (spec §34.1), so a stored pair only resolves when the key itself
+    /// hashes to the label it was registered under. Otherwise a resolver could be
+    /// made to vouch for a key under a hash it does not hash to, which is exactly
+    /// what KD3 relies on not happening.
     pub fn get(&self, holder: &[u8; ROOT_LEN]) -> Option<&HybridPublicKey> {
         self.entries
             .iter()
-            .find(|(h, _)| h == holder)
+            .find(|(h, key)| h == holder && &holder_hash(key) == holder)
             .map(|(_, key)| key)
     }
 }
@@ -761,12 +775,22 @@ impl EntitlementChain {
     }
 
     /// Validate, and additionally require the genesis grant's `root` to equal the
-    /// bundle's commitment root (§8.3).
+    /// commitment root of the bundle **version the grant was issued for** (§8.3,
+    /// §18.2).
     ///
     /// [`EntitlementChain::validate`] can only check that `root` is *present*,
     /// because a chain does not carry the bundle's commitment root. This is the
     /// check that closes the replay window §18.2 describes: a grant issued for one
     /// bundle version must not validate against another.
+    ///
+    /// `commitment_root` is the version root, not the root of whatever file happens
+    /// to carry the chain now. For a chain later embedded in a bundle, that version
+    /// is the file **before its `entitlement` section existed**: the commitment root
+    /// commits to the section table, which commits to the entitlement section's
+    /// root, which commits to this chain's plaintext, which carries the genesis
+    /// `root`. A chain therefore cannot name the root of the file that contains it,
+    /// and a caller MUST NOT compare against the containing file's root — doing so
+    /// would demand a hash fixed point and can never pass.
     pub fn validate_against_root(&self, commitment_root: &[u8; ROOT_LEN]) -> Result<()> {
         self.validate()?;
         let genesis = self
