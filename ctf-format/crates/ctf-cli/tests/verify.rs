@@ -178,6 +178,40 @@ fn a_byte_flipped_bundle_is_rejected_and_exits_one() {
     );
 }
 
+/// A requested gate is not run when the bundle is rejected: `gate` stays `null` and
+/// the rejection is carried by `status`, because the gate would be evaluating bytes
+/// the footer does not commit to (spec §25.6.1).
+#[test]
+fn a_requested_gate_is_not_run_on_a_rejected_bundle() {
+    let dir = TempDir::new("rejected-gate");
+    let mut bytes = minimal_bundle();
+    let off = {
+        let b = Bundle::parse(&bytes).unwrap();
+        b.section(1).unwrap().offset as usize
+    };
+    bytes[off] ^= 1;
+    let path = dir.path("flipped.ctf");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let secret = "00".repeat(32);
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &path,
+        "--challenge",
+        "unused.yaml",
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(code, 1, "a rejected bundle must exit 1:\n{stdout}{stderr}");
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "rejected");
+    assert_eq!(artifact["intact"], false);
+    assert!(
+        artifact["gate"].is_null(),
+        "the gate must not run on a rejected bundle: {artifact}"
+    );
+}
+
 /// A block of garbage is rejected at parse: the artifact still names the digest and
 /// the size, but it does not guess a commitment root or a signing state.
 #[test]

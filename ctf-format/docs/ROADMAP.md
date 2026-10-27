@@ -9,7 +9,8 @@ phase must end with something runnable — no phase exists purely to enable the 
 Cargo.toml                workspace root
 rust-toolchain.toml       pinned toolchain — determinism starts here
 crates/
-  ctf-format/             core library: container, crypto, wasm host
+  ctf-format/             core library: container, crypto
+  ctf-generator/          generator host: wasmtime, wasmi, seed source
   ctf-cli/                `ctf` binary (clap)
   ctf-tui/                admin TUI (ratatui) — phase 5
   ctf-conformance/        vector runner + cross-engine checks — phase 8
@@ -42,9 +43,10 @@ Byte layout is cheapest to change before any code depends on it.
       `tests/container.rs::header_golden_vector`
 - [x] Golden vector for a section record: exact 128 bytes asserted in
       `tests/container.rs::record_golden_vector`
-- [x] `spec/SPEC.md` — normative, RFC-style: numbered rules H1–H14, R1–R18,
-      T1–T5, golden vectors, reader conformance procedure, security
-      considerations, and an explicit list of what is *not* yet specified
+- [x] `spec/SPEC.md` — normative, RFC-style: numbered rules by family (H1–H14,
+      R1–R22, T1–T8, M1–M25, F1–F10, C1–C8, and the S/W/E/G families), golden
+      vectors, reader conformance procedure, security considerations; since 0.12.0
+      §14 states that nothing is left unspecified
 - [x] **Compatibility model frozen at 0.2** — `feat_incompat` / `feat_ro_compat`
       words in the header, `OPTIONAL` section flag, extension policy binding
       future editors, and a compatibility matrix. No field moved, so the 0.1
@@ -476,10 +478,13 @@ this section; the earlier `ponytail:` inline comments were folded into it.
 - **The chunk index has no interior tree nodes**, so single-chunk random access
   costs a full index read. See the `bao` note above.
 - **External dependencies are few and deliberate.** `blake3` for the container,
-  `zstd` for `comp = 1`, and `serde`/`serde_yaml_ng` for the authoring surface
-  (0.5.0). Header, section table, CBOR, manifest, footer, and chunk index are still
-  pure `std`. A YAML parser is not hand-written the way CBOR is: the reason for
-  hand-writing CBOR was that no crate enforces canonical decoding, and no
+  `zstd` for `comp = 1`, `serde`/`serde_yaml_ng`/`serde_json` for the authoring and
+  platform-facing surfaces, and the phase-2 crypto providers: `aws-lc-rs` for
+  AES-256-GCM, X25519, Ed25519, and HKDF-SHA-256; `ml-kem`/`ml-dsa` for the
+  pure-Rust FIPS 203/204 components; and `chacha20poly1305` for suite 2's
+  XChaCha20-Poly1305. Header, section table, CBOR, manifest, footer, and chunk index
+  are still pure `std`. A YAML parser is not hand-written the way CBOR is: the
+  reason for hand-writing CBOR was that no crate enforces canonical decoding, and no
   equivalent property is at stake for authoring input. The generator host
   (`ctf-generator`, 0.10.0) adds `wasmtime` and `wasmi`, and it is a separate crate
   precisely so those never enter the container library's dependency graph.
