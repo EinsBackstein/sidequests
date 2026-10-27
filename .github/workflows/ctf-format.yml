@@ -4,9 +4,11 @@ on:
   push:
     paths:
       - "ctf-format/**"
+      - ".github/workflows/ctf-format.yml"
   pull_request:
     paths:
       - "ctf-format/**"
+      - ".github/workflows/ctf-format.yml"
 
 defaults:
   run:
@@ -34,6 +36,36 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Issues #49/#50: the committed corpus is not just data on disk. Running the
+      # runner makes every golden, hostile, and future-file vector an explicit,
+      # separately named failure instead of a file nobody executes. The crate's own
+      # tests already assert the corpus index is in sync; this prints the per-vector
+      # PASS/FAIL lines CI logs are read for.
+      - name: Conformance corpus (golden, hostile, future)
+        run: cargo run -p ctf-conformance
+      # Issue #51: the fuzz oracle runs on the pinned stable toolchain, through the
+      # mirror in `tests/fuzzmirror.rs` plus the mutation sweep. `cargo test
+      # --workspace` already includes both; this step makes the fuzz lane an
+      # explicit, separately named failure so a regression cannot hide inside the
+      # workspace result. The committed corpus under `fuzz/corpus/` is the seed set
+      # the mirror actually executes.
+      - name: Fuzz oracle (pinned toolchain)
+        run: cargo test -p ctf-format --test fuzzmirror --test mutation
+      # The mirror keeps each target body compiling, but it cannot catch a target
+      # that no longer *builds* as a crate (a stale signature, a workspace entry).
+      # Checking the real manifests on stable is what keeps the crate buildable
+      # between interactive nightly runs; `fuzz/` is deliberately excluded from the
+      # root workspace, so a stale target does not fail `cargo test --workspace`.
+      - name: Fuzz targets build as committed
+        run: cargo check --manifest-path fuzz/Cargo.toml
+      - name: The committed fuzz corpus is present and non-empty
+        run: |
+          set -eu
+          dirs=$(find fuzz/corpus -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+          seeds=$(find fuzz/corpus -type f | wc -l | tr -d ' ')
+          echo "corpus directories: $dirs, seed files: $seeds"
+          test "$dirs" -ge 5
+          test "$seeds" -ge 6
       - name: The Rust guest SDK still builds to wasm
         run: |
           rustup target add wasm32-unknown-unknown

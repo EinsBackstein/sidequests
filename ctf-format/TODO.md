@@ -524,8 +524,8 @@ as written; **no change**. Its other three findings (H4, L4, L5 above) stand.
   **Addressed in 0.9.0 (ticket 88):** the optional `paths` manifest key (spec §7.2,
   M22–M25) maps a `name_id` to a relative POSIX path, checked component-by-component
   so traversal is unrepresentable, unique, and naming a real section. `names` stays
-  flat. `ctf pack` does not yet emit it — that is still phase 3 — but the format now
-  can, and `Manifest::path_of` exposes it.
+  flat. **`ctf pack` emits it as of 0.13.0:** the authoring document's `artifacts`
+  list takes an optional `path`, and `Manifest::path_of` exposes it to readers.
 - **The 4096-byte alignment tax.** A minimal bundle is 4344 bytes of which 4032 is
   zero padding (93%), because R12 forces payloads to a page boundary. Accepted *as a
   size question*: mmap alignment is the stated reason and a 6 KB floor is already

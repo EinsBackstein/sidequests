@@ -1,11 +1,11 @@
 //! `ctf` — the command-line tool for `.ctf` bundles.
 //!
 //! Subcommands: `inspect`, `validate`, `pack`, `keygen`, `keys`, `sign`, `seal`,
-//! `unseal`, and `completions`. The rest of design §10's table arrives with the
-//! phases that give it something to do — `run` needs phase 4's gate, and
-//! `init`/`transfer` need the authoring archetypes and the entitlement and
-//! seal-release management. `completions` is the one §10 CLI item that needs no
-//! runtime behind it, so it lands with the parser.
+//! `unseal`, `run`, `verify`, and `completions`. The rest of design §10's table
+//! arrives with the phases that give it something to do — `init`/`transfer` need
+//! the authoring archetypes and the entitlement and seal-release management.
+//! `completions` is the one §10 CLI item that needs no runtime behind it, so it
+//! lands with the parser.
 //!
 //! The `keys`/`seal`/`unseal` trio is the key-envelope workflow of spec §21: a
 //! recipient's hybrid KEM keypair is generated once, a section's fresh content key
@@ -19,6 +19,8 @@
 //! header, section table, footer — and the manifest, which R7 already requires to be
 //! neither sealed nor player-visible. A hexdump tool that would happily dump a
 //! sealed writeup on request is a decryption oracle with a friendly interface.
+
+mod verify;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -39,6 +41,8 @@ use ctf_format::{
     release_at_event_end, seal_progress,
 };
 
+use verify::{Artifact, SectionCounts, Status};
+
 /// `ctf` — the command-line tool for `.ctf` challenge bundles.
 #[derive(Parser)]
 #[command(
@@ -55,7 +59,8 @@ Whitespace and blank lines are ignored.
 exit codes:
   0  success
   1  usage, parse, or validation failure
-  2  inspect --verify found an intact but unauthentic (unsigned) bundle"
+  2  inspect --verify found an intact but unauthentic (unsigned) bundle, or
+     verify found an intact bundle that is unverified rather than passed"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -94,6 +99,8 @@ enum Commands {
     Release(ReleaseArgs),
     /// Run the local ingest gate: determinism and offline solvability (ticket 28).
     Run(RunArgs),
+    /// Run the ingest checks and emit one stable `ctf/ingest-verification/v1` artifact (ticket 64).
+    Verify(VerifyArgs),
     /// Generate a shell completion script to stdout.
     Completions(CompletionsArgs),
 }
@@ -430,6 +437,40 @@ struct RunArgs {
     bundle: Option<String>,
 }
 
+/// `ctf verify`: run the ingest checks and emit one machine-readable artifact
+/// (ticket 64, spec §25.6.1).
+///
+/// The commitment checks always run: the bundle must parse and every inline
+/// section must hash to its root. `--challenge` with `--secret` additionally runs
+/// the same §25 offline gate as `ctf run`, so the verdict can be `passed` instead
+/// of merely `unverified`. A rejected or failed bundle exits 1; an intact but
+/// unverified one exits 2, never 0.
+///
+/// The artifact is derived data about this run. It is not a container structure,
+/// it is not covered by the commitment root, and it never includes the event
+/// secret or the flag.
+#[derive(Args)]
+struct VerifyArgs {
+    /// The `.ctf` bundle to verify.
+    bundle: String,
+
+    /// The authoring YAML file. Runs the §25 offline gate together with `--secret`.
+    #[arg(long, requires = "secret")]
+    challenge: Option<String>,
+
+    /// The event secret, 64 hex digits (spec §22.2). Never written to the artifact.
+    #[arg(long, requires = "challenge")]
+    secret: Option<String>,
+
+    /// The reference subject id for the gate. Defaults to `reference`.
+    #[arg(long, default_value = "reference")]
+    subject: String,
+
+    /// Where to write the JSON artifact. Prints it to stdout when omitted.
+    #[arg(long)]
+    out: Option<String>,
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => run(cli),
@@ -466,6 +507,7 @@ fn run(cli: Cli) -> ExitCode {
         Commands::OciImport(args) => run_oci_import(&args),
         Commands::Release(args) => run_release(&args),
         Commands::Run(args) => run_gate(&args),
+        Commands::Verify(args) => run_verify(&args),
         Commands::Completions(args) => run_completions(&args),
     }
 }
@@ -549,7 +591,14 @@ fn run_pack(args: &PackArgs) -> ExitCode {
     for issue in doc.warnings() {
         eprintln!("ctf: {path}: warning: {issue}");
     }
-    let (file, descriptor) = match pack::pack_with_descriptor(&doc, suite) {
+    // Artifact `source` paths are relative to the authoring document, not to the
+    // operator's shell (spec §7.8). A bare filename has no parent, so `.` is the
+    // root the author meant.
+    let root = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let (file, descriptor) = match pack::pack_with_descriptor_root(&doc, suite, root) {
         Ok(f) => f,
         Err(PackError::Invalid(issues)) => {
             for issue in &issues {
@@ -775,81 +824,21 @@ fn run_release(args: &ReleaseArgs) -> ExitCode {
 /// `ctf run`: the platform's full offline ingest gate, run locally.
 fn run_gate(args: &RunArgs) -> ExitCode {
     let path = &args.challenge;
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("ctf: {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let doc = match ChallengeDoc::from_yaml(&text) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("ctf: {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let errors = doc.errors();
-    if !errors.is_empty() {
-        for issue in &errors {
-            eprintln!("ctf: {path}: {issue}");
-        }
-        return ExitCode::FAILURE;
-    }
-    let dir = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
-
-    // Resolve the modules the document names, relative to the document.
-    let read_module = |key: &str, name: &str| -> Result<Vec<u8>, String> {
-        std::fs::read(dir.join(name)).map_err(|e| format!("`{key}`: {name}: {e}"))
-    };
-    let generator = match doc.generate.as_ref().and_then(|g| g.wasm.as_deref()) {
-        Some(name) => match read_module("generate.wasm", name) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                eprintln!("ctf: {path}: {e}");
-                return ExitCode::FAILURE;
-            }
-        },
-        None => None,
-    };
-    let solver = match doc.verify.as_ref().map(|v| v.solver.as_str()) {
-        Some(name) => match read_module("verify.solver", name) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                eprintln!("ctf: {path}: {e}");
-                return ExitCode::FAILURE;
-            }
-        },
-        None => None,
-    };
-
-    let secret = match hex_decode(&args.secret) {
+    let setup = match load_gate_setup(path, &args.subject, &args.secret) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("ctf: --secret: {e}");
+        Err(GateSetupError::Issues(issues)) => {
+            for issue in &issues {
+                eprintln!("ctf: {path}: {issue}");
+            }
+            return ExitCode::FAILURE;
+        }
+        Err(GateSetupError::Message(message)) => {
+            eprintln!("ctf: {path}: {message}");
             return ExitCode::FAILURE;
         }
     };
-    let seed = match derive::subject_seed(&secret, &doc.id, doc.version, &args.subject) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("ctf: --secret: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let expected = derive::flag(&seed);
 
-    let report = match ctf_generator::offline_gate(
-        ctf_generator::OfflineGate {
-            generator: generator.as_deref(),
-            solver: solver.as_deref(),
-            seed: &seed,
-            expected_flag: &expected,
-            runtime_declared: doc.runtime.is_some(),
-            offline_declared: doc.verify.as_ref().is_some_and(|v| v.offline),
-        },
-        &ctf_generator::Limits::default(),
-    ) {
+    let report = match run_setup_gate(&setup) {
         Ok(r) => r,
         Err(e) => {
             // A hard stage failure (`GateError`) names the stage and the reason.
@@ -915,8 +904,8 @@ fn run_gate(args: &RunArgs) -> ExitCode {
         .or_else(|| args.bundle.as_ref().map(|b| format!("{b}.status.json")));
     if let Some(status_path) = status_path {
         let record = ctf_generator::VerificationRecord::from_report(
-            &doc.id,
-            doc.version,
+            &setup.doc_id,
+            setup.doc_version,
             &args.subject,
             &report,
         );
@@ -927,6 +916,304 @@ fn run_gate(args: &RunArgs) -> ExitCode {
         println!("{status_path}: verification status ({})", report.status);
     }
     code
+}
+
+/// Everything the §25 gate needs, resolved from an authoring document.
+///
+/// Resolving is separated from running so `ctf run` and `ctf verify` cannot
+/// disagree about which document, modules, seed, and declarations a gate uses. The
+/// two commands differ only in what they do with a non-`passed` outcome.
+struct GateSetup {
+    /// The document's `id`, as authored. A gate record describes the bundle whose
+    /// manifest must agree with this.
+    doc_id: String,
+    /// The document's `version`, likewise.
+    doc_version: u64,
+    /// The generator module's bytes, when the document names one.
+    generator: Option<Vec<u8>>,
+    /// The solver module's bytes, when the document names one.
+    solver: Option<Vec<u8>>,
+    /// The reference subject's seed (§22.2).
+    seed: [u8; 32],
+    /// The derived flag the solver must recover (§22.3).
+    expected: String,
+    /// Whether the document declares `runtime`, which needs a live instance.
+    runtime_declared: bool,
+    /// Whether the document declares `verify.offline`.
+    offline_declared: bool,
+}
+
+/// Why a gate could not even be constructed: it did not run.
+enum GateSetupError {
+    /// The authoring document has schema or policy errors.
+    Issues(Vec<ctf_format::authoring::ValidationIssue>),
+    /// A file, a secret, or a derivation failed. The message names which.
+    Message(String),
+}
+
+impl core::fmt::Display for GateSetupError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Issues(issues) => {
+                let mut first = true;
+                for issue in issues {
+                    if !first {
+                        f.write_str("; ")?;
+                    }
+                    first = false;
+                    write!(f, "{issue}")?;
+                }
+                Ok(())
+            }
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+/// Read and resolve the authoring document, the modules it names, the event secret,
+/// and the reference subject's seed. This is every input a gate needs and nothing
+/// more: it does not run the gate.
+fn load_gate_setup(
+    path: &str,
+    subject: &str,
+    secret_hex: &str,
+) -> Result<GateSetup, GateSetupError> {
+    let text = std::fs::read_to_string(path).map_err(|e| GateSetupError::Message(e.to_string()))?;
+    let doc = ChallengeDoc::from_yaml(&text).map_err(|e| GateSetupError::Message(e.to_string()))?;
+    let issues = doc.errors();
+    if !issues.is_empty() {
+        return Err(GateSetupError::Issues(issues));
+    }
+    let dir = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
+
+    // Resolve the modules the document names, relative to the document.
+    let read_module = |key: &str, name: &str| -> Result<Vec<u8>, String> {
+        std::fs::read(dir.join(name)).map_err(|e| format!("`{key}`: {name}: {e}"))
+    };
+    let generator = match doc.generate.as_ref().and_then(|g| g.wasm.as_deref()) {
+        Some(name) => Some(read_module("generate.wasm", name).map_err(GateSetupError::Message)?),
+        None => None,
+    };
+    let solver = match doc.verify.as_ref().map(|v| v.solver.as_str()) {
+        Some(name) => Some(read_module("verify.solver", name).map_err(GateSetupError::Message)?),
+        None => None,
+    };
+
+    let secret =
+        hex_decode(secret_hex).map_err(|e| GateSetupError::Message(format!("--secret: {e}")))?;
+    let seed = derive::subject_seed(&secret, &doc.id, doc.version, subject)
+        .map_err(|e| GateSetupError::Message(format!("--secret: {e}")))?;
+    let expected = derive::flag(&seed);
+
+    Ok(GateSetup {
+        doc_id: doc.id.clone(),
+        doc_version: doc.version,
+        generator,
+        solver,
+        seed,
+        expected,
+        runtime_declared: doc.runtime.is_some(),
+        offline_declared: doc.verify.as_ref().is_some_and(|v| v.offline),
+    })
+}
+
+/// Run the §25 gate for a resolved document. Pure with respect to the filesystem:
+/// every input was read by [`load_gate_setup`].
+fn run_setup_gate(
+    setup: &GateSetup,
+) -> Result<ctf_generator::OfflineGateReport, ctf_generator::GateError> {
+    ctf_generator::offline_gate(
+        ctf_generator::OfflineGate {
+            generator: setup.generator.as_deref(),
+            solver: setup.solver.as_deref(),
+            seed: &setup.seed,
+            expected_flag: &setup.expected,
+            runtime_declared: setup.runtime_declared,
+            offline_declared: setup.offline_declared,
+        },
+        &ctf_generator::Limits::default(),
+    )
+}
+
+/// The §25.6 verification record for `bundle`, running the gate if the inputs allow.
+///
+/// A gate that cannot be constructed is `unverified` — the gate did not run, and
+/// rule S8 forbids reporting that as `passed`. A gate that runs but fails a stage
+/// outright is `failed`: the bundle is intact, but it is not publishable.
+fn gate_record_for_bundle(
+    challenge: &str,
+    secret_hex: &str,
+    subject: &str,
+    bundle: &Bundle<'_>,
+) -> ctf_generator::VerificationRecord {
+    let id = bundle.manifest.id();
+    let version = bundle.manifest.version();
+    let unverified = |reason: String| ctf_generator::VerificationRecord {
+        challenge: id.to_owned(),
+        version,
+        subject: subject.to_owned(),
+        status: ctf_generator::GateStatus::Unverified,
+        reason,
+        generator_root: None,
+        cross_engine: None,
+        runs: None,
+    };
+
+    let setup = match load_gate_setup(challenge, subject, secret_hex) {
+        Ok(s) => s,
+        Err(e) => {
+            // The artifact is stable and path-free (spec §25.6.1, S12): the detail
+            // names the authoring file, so it goes to stderr and never into the
+            // record.
+            eprintln!("ctf: the offline gate could not run: {e}");
+            return unverified(
+                "the offline gate could not run: the authoring inputs were rejected".to_owned(),
+            );
+        }
+    };
+    // The gate derives its expected flag from the document's id and version, so a
+    // document for another challenge would produce a verdict about that challenge
+    // while being attached to this bundle. Refuse rather than mislabel the record.
+    if setup.doc_id != id || setup.doc_version != version {
+        return unverified(format!(
+            "the authoring document describes `{}` version {}, not this bundle's `{id}` \
+             version {version}",
+            setup.doc_id, setup.doc_version
+        ));
+    }
+    match run_setup_gate(&setup) {
+        Ok(report) => ctf_generator::VerificationRecord::from_report(id, version, subject, &report),
+        Err(e) => {
+            // Same rule as above: a stage error can name a module path, so the
+            // record carries the fact and the stage only, and the detail is on
+            // stderr. S9 is satisfied by naming the stage, not by leaking a path.
+            eprintln!("ctf: the offline gate could not complete: {e}");
+            ctf_generator::VerificationRecord {
+                challenge: id.to_owned(),
+                version,
+                subject: subject.to_owned(),
+                status: ctf_generator::GateStatus::Failed,
+                reason: format!(
+                    "the offline gate could not complete a §25.5 stage ({})",
+                    e.stage
+                ),
+                generator_root: None,
+                cross_engine: None,
+                runs: None,
+            }
+        }
+    }
+}
+
+/// `ctf verify`: the ingest checks plus, when asked, the offline gate, as one
+/// stable machine-readable artifact. See [`verify`] for the shape and the rules.
+fn run_verify(args: &VerifyArgs) -> ExitCode {
+    let path = &args.bundle;
+    // Read the whole file rather than mapping it: the artifact names the bundle by a
+    // digest of these exact bytes, so there must be one unambiguous buffer behind
+    // both the digest and the parse.
+    let file = match std::fs::read(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("ctf: {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut artifact = Artifact::new(
+        blake3::hash(&file).to_hex().to_string(),
+        u64::try_from(file.len()).unwrap_or(u64::MAX),
+    );
+
+    match Bundle::parse(&file) {
+        Err(e) => artifact.reject(format!("the bundle did not parse: {e}")),
+        Ok(bundle) => {
+            artifact.commitment_root = Some(bundle.footer.root);
+            artifact.signing = Some(bundle.signing());
+            match bundle.verify_inline_sections() {
+                Err(e) => {
+                    artifact.reject(format!("the section pass could not complete: {e}"));
+                }
+                Ok(report) => {
+                    artifact.sections = SectionCounts {
+                        verified: report.verified,
+                        external: report.external,
+                        unverifiable: report.unverifiable,
+                        chunk_indices: report.chunk_indices,
+                        mismatches: report.mismatches,
+                    };
+                    if !artifact.sections.mismatches.is_empty() {
+                        // A mismatch means the bytes are not the bytes the footer
+                        // commits to. `intact` stays false and the file is rejected.
+                        let count = artifact.sections.mismatches.len();
+                        let in_table = artifact.sections.verified + count;
+                        artifact.reject(format!(
+                            "{count} of {in_table} inline section(s) do not hash to their roots"
+                        ));
+                    } else {
+                        // Present-but-unreadable sections are disclosed in
+                        // `sections.unverifiable`, not rejected: their plaintext
+                        // cannot be hashed without a key, and the spec puts that in
+                        // the record rather than treating it as corruption.
+                        artifact.intact = true;
+                        match (&args.challenge, &args.secret) {
+                            (Some(challenge), Some(secret)) => {
+                                let record = gate_record_for_bundle(
+                                    challenge,
+                                    secret,
+                                    &args.subject,
+                                    &bundle,
+                                );
+                                artifact.status = Status::from(record.status);
+                                artifact.reason = match record.status {
+                                    ctf_generator::GateStatus::Passed => {
+                                        "the bundle is intact and the offline gate passed"
+                                            .to_owned()
+                                    }
+                                    ctf_generator::GateStatus::Failed => format!(
+                                        "the bundle is intact but the offline gate failed: {}",
+                                        record.reason
+                                    ),
+                                    ctf_generator::GateStatus::Unverified => format!(
+                                        "the bundle is intact but unverified: {}",
+                                        record.reason
+                                    ),
+                                };
+                                artifact.gate = Some(record);
+                            }
+                            _ => {
+                                artifact.status = Status::Unverified;
+                                artifact.reason = if artifact.sections.unverifiable == 0 {
+                                    "the bundle is intact but no offline gate was requested; \
+                                     this run established integrity only"
+                                        .to_owned()
+                                } else {
+                                    format!(
+                                        "the bundle is intact but no offline gate was requested, \
+                                         and {} inline section(s) could not be read by this build",
+                                        artifact.sections.unverifiable
+                                    )
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let json = artifact.to_json();
+    match &args.out {
+        Some(out) => {
+            if let Err(e) = std::fs::write(out, &json) {
+                eprintln!("ctf: {out}: {e}");
+                return ExitCode::FAILURE;
+            }
+            println!("{out}: ingest verification ({})", artifact.status.as_str());
+        }
+        None => print!("{json}"),
+    }
+    ExitCode::from(artifact.status.exit_code())
 }
 
 fn run_keygen(args: &KeygenArgs) -> ExitCode {

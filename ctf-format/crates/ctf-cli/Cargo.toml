@@ -1,6 +1,6 @@
 [package]
 name = "ctf-cli"
-version = "0.11.0"
+version = "0.13.0"
 description = "The `ctf` command-line tool for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
@@ -26,11 +26,19 @@ ctf-generator = { path = "../ctf-generator" }
 # is the one crate that opts out of the workspace's `unsafe_code` denial, at a
 # single call site in `open_mapped`.
 memmap2 = "0.9"
+# `ctf verify` names the whole bundle file by its BLAKE3 digest (ticket 64), so a
+# job can pin the exact bytes an ingest verdict is about. The container library
+# already links BLAKE3; this makes the digest a first-class CLI input rather than
+# a value reconstructed from a section root.
+blake3 = "1.8"
 
 [dev-dependencies]
 # Builds the tiny generator/solver modules the gate tests run, in the same way
 # `ctf-generator`'s tests do.
 wat = "1"
+# Parses the `ctf/ingest-verification/v1` artifact in tests, so "the JSON parses"
+# is checked by a parser rather than by substring matching.
+serde_json = "1"
 
 [lints]
 workspace = true

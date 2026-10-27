@@ -25,7 +25,7 @@
 //! commitment root — which is precisely the trailing-data ambiguity spec §3 exists
 //! to close, moved eight bytes to the left.
 //!
-//! Normative: `spec/SPEC.md` §8, rules F1–F9.
+//! Normative: `spec/SPEC.md` §8, rules F1–F10.
 //!
 //! # Alignment
 //!

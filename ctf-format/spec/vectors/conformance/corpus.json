@@ -1,0 +1,573 @@
+{
+  "format": "ctf-conformance-corpus/1",
+  "generated_by": "cargo run -p ctf-conformance -- --emit spec/vectors/conformance",
+  "goldens": [
+    "golden/minimal.ctf",
+    "golden/demo.ctf"
+  ],
+  "not_file_shaped": [
+    {
+      "hardening": 10,
+      "reason": "Fuzzing is a property of a test run, not of a byte string: the oracle is no panic, no OOM, and round-trip stability over arbitrary input. All six targets and their committed seed corpora are covered by fuzz/fuzz_targets/*, the stable-toolchain mirror in tests/fuzzmirror.rs, and tests/mutation.rs; no single fixture can assert it. The entitlement-chain target landed in 0.13.0 (#107)."
+    },
+    {
+      "hardening": 11,
+      "reason": "An independent second implementation is source code, not a file: the check is that a reader written from spec/SPEC.md alone round-trips every vector. `go/` is that implementation (0.13.0, #53) and runs this same corpus; the row is kept here because a fixture cannot be the check."
+    }
+  ],
+  "vectors": [
+    {
+      "expectation": {
+        "kind": "parses"
+      },
+      "file": "golden/minimal.ctf",
+      "hardening": [],
+      "kind": "golden",
+      "matrix_row": null,
+      "name": "golden-minimal",
+      "proves": "the minimal bundle of spec §11 is byte-for-byte reproducible through the public writer and parses",
+      "rules": [
+        "§11"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "parses"
+      },
+      "file": "golden/demo.ctf",
+      "hardening": [],
+      "kind": "golden",
+      "matrix_row": null,
+      "name": "golden-demo",
+      "proves": "a multi-section bundle with a chunk index and an external section parses and verifies",
+      "rules": [
+        "§11"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "rejects"
+      },
+      "file": "hostile/section-count-over-cap.ctf",
+      "hardening": [
+        1
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "section-count-over-cap",
+      "proves": "section_table_count above MAX_SECTIONS is refused before the table can size an allocation",
+      "rules": [
+        "H7",
+        "H11",
+        "H12"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "CborTruncated",
+        "kind": "error"
+      },
+      "file": "hostile/manifest-huge-length.ctf",
+      "hardening": [
+        1
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "manifest-huge-length",
+      "proves": "a CBOR array claiming u64::MAX elements is refused as CborTruncated without allocating for the claim",
+      "rules": [
+        "M1i"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "BadOffset",
+        "kind": "error"
+      },
+      "file": "hostile/payload-inside-header.ctf",
+      "hardening": [
+        2
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "payload-inside-header",
+      "proves": "an inline payload offset below HEADER_LEN is refused (R12), not read",
+      "rules": [
+        "R12"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "OverlappingSections",
+        "kind": "error"
+      },
+      "file": "hostile/overlapping-payloads.ctf",
+      "hardening": [
+        2
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "overlapping-payloads",
+      "proves": "two non-empty inline payload ranges that share bytes are refused (T4)",
+      "rules": [
+        "T4"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "Misaligned",
+        "kind": "error"
+      },
+      "file": "hostile/misaligned-payload-offset.ctf",
+      "hardening": [
+        2
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "misaligned-payload-offset",
+      "proves": "an inline payload offset that is not page-aligned is refused (R12)",
+      "rules": [
+        "R12"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "ExceedsFile",
+        "kind": "error"
+      },
+      "file": "hostile/payload-beyond-footer.ctf",
+      "hardening": [
+        2,
+        3
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "payload-beyond-footer",
+      "proves": "an inline payload that runs past footer_off is refused (T3)",
+      "rules": [
+        "T3"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "rejects"
+      },
+      "file": "hostile/trailing-byte-after-footer.ctf",
+      "hardening": [
+        3
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "trailing-byte-after-footer",
+      "proves": "a byte appended after the footer is refused; no structure may follow it",
+      "rules": [
+        "F5",
+        "F7"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "rejects"
+      },
+      "file": "hostile/truncated-footer.ctf",
+      "hardening": [
+        3
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "truncated-footer",
+      "proves": "a footer shorter than MIN_FOOTER_LEN is refused rather than padded. F1 always implies F5 (an unsigned footer must be exactly 56 bytes), so no reader order can make F1 the sole violation; this vector asserts rejection, not a reason",
+      "rules": [
+        "F1",
+        "F5"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "BadTotalLen",
+        "kind": "error"
+      },
+      "file": "hostile/wrong-total-len.ctf",
+      "hardening": [
+        3
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "wrong-total-len",
+      "proves": "footer total_len must equal the real file length (F7)",
+      "rules": [
+        "F7"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "SignatureSlotLength",
+        "kind": "error"
+      },
+      "file": "hostile/signature-slot-length-mismatch.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "signature-slot-length-mismatch",
+      "proves": "a suite-1 footer declaring 1-byte signature slots is refused (F10, §8.1, §20.3): the slot lengths are the suite's, so the file cannot be authenticated as itself",
+      "rules": [
+        "F10"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "rejects"
+      },
+      "file": "hostile/truncated-body.ctf",
+      "hardening": [
+        2,
+        3
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "truncated-body",
+      "proves": "a file shorter than its own table and footer is refused before any of it is read",
+      "rules": [
+        "H12",
+        "H13"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "CborTooDeep",
+        "kind": "error"
+      },
+      "file": "hostile/manifest-cbor-too-deep.ctf",
+      "hardening": [
+        4
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "manifest-cbor-too-deep",
+      "proves": "a manifest nested past cbor::MAX_DEPTH is refused as CborTooDeep",
+      "rules": [
+        "M1h"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "CompressionRatioExceeded",
+        "kind": "serve_error",
+        "name_id": 1
+      },
+      "file": "hostile/compressed-ratio-cap.ctf",
+      "hardening": [
+        5
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "compressed-ratio-cap",
+      "proves": "a declared plaintext above MAX_DECOMPRESSION_RATIO times len_stored is refused before zstd runs (D2)",
+      "rules": [
+        "D2"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "rejects_on_serve",
+        "name_id": 1
+      },
+      "file": "hostile/compressed-output-cap.ctf",
+      "hardening": [
+        5
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "compressed-output-cap",
+      "proves": "a declared plaintext above MAX_DECOMPRESSED_SECTION is refused before zstd runs; a small stored section also exceeds the ratio, so the fixture asserts refusal rather than one name",
+      "rules": [
+        "D1",
+        "D2"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "DuplicateSectionName",
+        "kind": "error"
+      },
+      "file": "hostile/duplicate-name-id.ctf",
+      "hardening": [
+        6
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "duplicate-name-id",
+      "proves": "two records sharing a name_id are refused (T2), because name_id is identity",
+      "rules": [
+        "T2"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "CborDuplicateKey",
+        "kind": "error"
+      },
+      "file": "hostile/duplicate-manifest-key.ctf",
+      "hardening": [
+        6
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "duplicate-manifest-key",
+      "proves": "a manifest map with an adjacent duplicate key is refused, never last-wins resolved",
+      "rules": [
+        "M1g"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "ManifestEntry",
+        "kind": "error"
+      },
+      "file": "hostile/manifest-name-traversal.ctf",
+      "hardening": [
+        7
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "manifest-name-traversal",
+      "proves": "a name table entry containing a path separator is refused, so traversal is unrepresentable",
+      "rules": [
+        "M15"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "ManifestEntry",
+        "kind": "error"
+      },
+      "file": "hostile/manifest-name-bidi-control.ctf",
+      "hardening": [
+        7
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "manifest-name-bidi-control",
+      "proves": "a name table entry containing U+202E is refused after UTF-8 decoding, not byte-masked",
+      "rules": [
+        "M15"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "SectionRootMismatch",
+        "kind": "error"
+      },
+      "file": "hostile/manifest-payload-flip.ctf",
+      "hardening": [
+        8
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "manifest-payload-flip",
+      "proves": "the manifest's record root is verified before CBOR decoding: a flipped map header fails as SectionRootMismatch, not as a manifest error. The signature half of the bullet is caller-gated (§10 step 9) and cannot be exercised without a trusted key the bundle deliberately does not carry",
+      "rules": [
+        "§10 step 7",
+        "§5.1"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "RootMismatch",
+        "kind": "chunk_index_error",
+        "name_id": 1
+      },
+      "file": "hostile/chunk-index-entry-flip.ctf",
+      "hardening": [
+        9
+      ],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "chunk-index-entry-flip",
+      "proves": "a tampered index still parses (C rules are on-use) but Bundle::chunk_index reduces it to the root first and refuses it (C4); no entry or chunk is exposed (C7)",
+      "rules": [
+        "C4",
+        "C7"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "BadMagic",
+        "kind": "error"
+      },
+      "file": "hostile/bad-magic.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "bad-magic",
+      "proves": "the file signature is checked byte-for-byte",
+      "rules": [
+        "H2"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "BadMagic",
+        "kind": "error"
+      },
+      "file": "hostile/bad-footer-magic.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "bad-footer-magic",
+      "proves": "the footer's repeated magic is checked, not used to locate the footer",
+      "rules": [
+        "F6"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "PaddingNotZero",
+        "kind": "error"
+      },
+      "file": "hostile/non-zero-padding.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "non-zero-padding",
+      "proves": "bytes belonging to no structure must be zero, so one signature cannot cover two files (T8)",
+      "rules": [
+        "T8"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "UnknownFlagBits",
+        "kind": "error"
+      },
+      "file": "hostile/unknown-section-flag-bits.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "unknown-section-flag-bits",
+      "proves": "an unassigned section flag bit is refused rather than ignored",
+      "rules": [
+        "R4"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "ReservedNotZero",
+        "kind": "error"
+      },
+      "file": "hostile/reserved-non-zero.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "reserved-non-zero",
+      "proves": "header reserved bytes are required to be zero",
+      "rules": [
+        "H5"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "InvalidSectionKind",
+        "kind": "error"
+      },
+      "file": "hostile/unknown-section-kind.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "unknown-section-kind",
+      "proves": "kind 0 is never valid, even on an ordinary section: it is a rejection (R3), not an unknown optional kind to skip",
+      "rules": [
+        "R3"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "rejects"
+      },
+      "file": "hostile/unknown-enc-discriminant.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "unknown-enc-discriminant",
+      "proves": "an unassigned enc/comp value is refused even on a skippable section",
+      "rules": [
+        "R10"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "PaddingNotZero",
+        "kind": "error"
+      },
+      "file": "hostile/chunk-index-trailing-bytes.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "chunk-index-trailing-bytes",
+      "proves": "the index length is derived from len_plain/chunk_size, and bytes it no longer claims must be zero",
+      "rules": [
+        "T8"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "OverlapsSectionTable",
+        "kind": "error"
+      },
+      "file": "hostile/chunk-index-overlaps-table.ctf",
+      "hardening": [],
+      "kind": "hostile",
+      "matrix_row": null,
+      "name": "chunk-index-overlaps-table",
+      "proves": "a derived chunk-index range is included in overlap detection (T7)",
+      "rules": [
+        "T7"
+      ]
+    },
+    {
+      "expectation": {
+        "error": "UnsupportedFeature",
+        "kind": "error"
+      },
+      "file": "future/incompat-feature.ctf",
+      "hardening": [],
+      "kind": "future",
+      "matrix_row": "0.4+, `feat_incompat` feature in use → 0.3: Rejected, naming the feature (H14)",
+      "name": "future-incompat-feature",
+      "proves": "an invented feat_incompat bit is refused by name before any structural rule",
+      "rules": [
+        "H14"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "parses_read_only"
+      },
+      "file": "future/ro-compat-bit.ctf",
+      "hardening": [],
+      "kind": "future",
+      "matrix_row": "0.3, plus a `ro_compat` bit from a later version → 0.3: Accepted, read-only (§4.4)",
+      "name": "future-ro-compat-bit",
+      "proves": "an invented feat_ro_compat bit parses, and Header::may_rewrite() is false",
+      "rules": [
+        "§4.4"
+      ]
+    },
+    {
+      "expectation": {
+        "kind": "parses_unknown_optional",
+        "name_id": 1
+      },
+      "file": "future/unknown-optional-section.ctf",
+      "hardening": [],
+      "kind": "future",
+      "matrix_row": "0.4+, `OPTIONAL` unknown kind → 0.3: Accepted; the section is carried, never interpreted",
+      "name": "future-unknown-optional-section",
+      "proves": "an OPTIONAL section of an undefined kind parses and is carried, Bundle::section_bytes and Bundle::chunk_index refuse it, and verify_inline_sections still verifies and counts it",
+      "rules": [
+        "§5.2",
+        "C8"
+      ]
+    }
+  ]
+}

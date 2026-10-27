@@ -226,8 +226,13 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
       declarations — **landed in 0.10.0** (spec §7.6, ticket 25): the mapping is
       enforced by the authoring tool, not the container reader, which carries the
       declaration without acting on it.
-- [ ] `ctf pack` emits the optional `paths` tree (ticket 88). The format-level key
-      and its M22–M25 validation landed in **0.9.0** (spec §7.2). Still open.
+- [x] `ctf pack` emits the optional `paths` tree (ticket 88) — **landed in 0.13.0**.
+      The authoring document gains an `artifacts:` list (`name`, `source`, optional
+      `path`); each entry becomes a `names` entry and an inline player-visible
+      `artifact` section, and a non-identity `path` becomes a `paths` entry with
+      `crit: ["paths"]` (spec §7.2, §7.8). A document that declares no paths packs
+      byte-identically to before. The format-level key and its M22–M25 validation
+      landed in **0.9.0**.
 
 **Done when** the same bundle produces byte-identical artifacts on x86-64 and
 aarch64, and a deliberately nondeterministic generator is rejected at ingest. The
@@ -291,6 +296,18 @@ the orchestrator project consumes it (design §2).
       `ctf-generator` container binary.
 - [x] **68** Third-party origins and no-referrer — §29.3, `policy.rs`; pack warns
       about an absolute origin in `description` and defaults to `no-referrer`.
+- [x] **56** Media type registered or explicitly declined — **landed in 0.13.0**.
+      `docs/MEDIA-TYPE.md` records the decision (used unregistered, with the IANA
+      path if that ever changes), the identifier table, the `.ctf` / Compact C Type
+      Format collision, and the rule that `v1` never tracks `version_minor`. The
+      design rationale no longer states rules of its own: §Authority in
+      `docs/FORMAT-DESIGN.md` points at the spec, and the contradictions a line-by-line
+      pass found are corrected against it.
+- [x] **64** Rerunnable ingest verification artifact — **landed in 0.13.0**.
+      `ctf verify` runs the §10 integrity pass and, with `--challenge`/`--secret`,
+      the §25 offline gate, and emits a stable `ctf/ingest-verification/v1` JSON
+      record (`passed`/`failed`/`unverified`/`rejected`, exit 0/1/2). Derived data
+      outside the commitment root; spec §25.6.1 and rules S11–S12.
 - [x] **59** Challenge key mapping and migration — `docs/CHALLENGE-KEY-MIGRATION.md`,
       the operator runbook on top of §33 and rules W1–W3.
 - [x] **69** The two reference challenges pack — `File_And_Seek` and `Mental_Overflow`
@@ -375,31 +392,60 @@ deliberately disabled in the test.
       a verdict and a `file:line` citation; the two gaps it found are tracked rather
       than fixed inline — the entitlement-chain fuzz target (#107) and the Go second
       implementation (#53).
-- [ ] Fuzzing in CI, corpus committed
-- [ ] Hostile-input vector corpus: one fixture per §14 bullet, each with its
-      expected error. The conformance runner below already carries golden bundles and
-      named hostile mutations covering several bullets.
+- [x] Fuzzing in CI, corpus committed — **landed in 0.13.0** (#51, #107). The
+      workflow names a pinned-stable `Fuzz oracle` lane (`tests/fuzzmirror.rs` plus
+      `tests/mutation.rs`), checks that the six committed seed sets build as a fuzz
+      crate on that toolchain, and the mirror walks `fuzz/corpus/*/*` rather than a
+      fixed list — so a crashing input copied out of `fuzz/artifacts/` becomes a
+      regression test with no code change. `fuzz/README.md` documents the path.
+      The entitlement-chain target is the sixth and closes #107.
+- [x] Hostile-input vector corpus: one fixture per §14 bullet — **landed in 0.13.0**
+      (ticket 49). `spec/vectors/conformance/hostile/` carries 29 committed
+      fixtures derived by single-field mutation wherever possible, and
+      `corpus.json` records for each whether it must be rejected outright
+      (`rejects`), rejected at the first rule §10's check order reaches (`error`,
+      with the fixture built so no second rule fails at that step), or accepted at
+      parse and refused on use
+      (`rejects_on_serve`, `chunk_index_error`). `crates/ctf-conformance/tests/`
+      asserts that every §14 audit row is fixture-covered or explicitly listed as
+      not file-shaped, and the corpus runs in the `Conformance corpus` CI step.
 - [x] **Conformance vector runner** — **landed in 0.12.0** (ticket 52,
       `crates/ctf-conformance`). It executes the committed golden `.ctf` fixtures and
       the named hostile mutations of `spec/vectors/conformance/` against the reference
       implementation and prints `PASS`/`FAIL <vector>` with the observed error,
       exiting non-zero on a mismatch.
-- [ ] **Synthetic "future file" vectors** — files that set an invented
-      `feat_incompat` bit, an invented `feat_ro_compat` bit, and an `OPTIONAL`
-      section of an undefined kind. The only way to test forward compatibility
-      before a real extension exists, and the check that spec §12's compatibility
-      matrix is true rather than aspirational
+- [x] **Synthetic "future file" vectors** — **landed in 0.13.0** (ticket 50).
+      `spec/vectors/conformance/future/` sets an invented `feat_incompat` bit (the
+      reader rejects, naming the feature), an invented `feat_ro_compat` bit (the
+      reader parses, `may_rewrite()` is false, and the reference runner asserts it),
+      and an `OPTIONAL` section of an undefined kind (the reader carries it, never
+      serves it, and still verifies the inline hashes). The compatibility matrix is
+      therefore exercised, not asserted, and the Go implementation runs the same
+      three fixtures.
 - [ ] `wasmi` as a second engine in the determinism cross-check — **landed in
       0.10.0** for the generator (rule G10, `second::run_second_engine`). A module
       `wasmi` cannot run (SIMD) reports `cross_engine: false` rather than passing
       silently.
-- [ ] **Go second implementation written from `spec/SPEC.md` alone**, no peeking at
-      the Rust source
-- [ ] Both implementations produce byte-identical output on every vector
+- [x] **Go second implementation written from `spec/SPEC.md` alone**, no peeking at
+      the Rust source — **landed in 0.13.0** (ticket 53). `ctf-format/go/` is an
+      independent module (`crypto/mlkem`, `crypto/mldsa`, `crypto/ed25519`,
+      `lukechampine.com/blake3`) that implements the §10 read path, a byte-identical
+      writer, the chunk index, the primitives, and the §20–§24 constructions it can
+      run without suite 3. `go/AMBIGUITIES.md` records every place the text admitted
+      more than one reading; the one real ambiguity it surfaced (§8.2 F4 versus the
+      unsigned footer) is now stated explicitly in the spec, and the rest are
+      non-normative authoring choices.
+- [x] Both implementations produce byte-identical output on every vector —
+      **landed in 0.13.0** (ticket 54). `go/ctf/golden_test.go` compares raw bytes
+      for both committed goldens, and `go/conformance` executes all 34 corpus
+      fixtures against the Go reader and writer. A mismatch is a specification bug,
+      not a Go bug; `.github/workflows/ctf-go.yml` runs the whole suite, including a
+      coverage check that fails if a fixture on disk is missing from `corpus.json`.
 
 **Done when** the Go implementation round-trips every vector without a single spec
 clarification needed. Any clarification required is a spec bug, and the spec gets
-fixed rather than the Go code.
+fixed rather than the Go code. Both conditions hold: 34/34 fixtures pass in both
+implementations, and the goldens are byte-identical.
 
 ---
 
