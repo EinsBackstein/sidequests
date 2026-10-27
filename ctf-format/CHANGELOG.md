@@ -7,6 +7,35 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.5] — 2026-10-27
+
+Correction to 0.13.4's record-boundary wording. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved.
+
+### Fixed — the "no record" sentence now states the rule, not one example
+
+- **0.13.4 overgeneralised.** Its §25.6 paragraph said a run that refuses an input
+  before the gate writes no record. That is true for `ctf run` when it cannot reach a
+  gate outcome at all — an unreadable or unparseable document or bundle, a document
+  that names another challenge, an invalid authoring document, or an unusable secret.
+  It is not true once the tool identifies the bundle: `ctf verify` emits an
+  `unverified` `gate` record when the authoring document does not describe the
+  bundle, and `ctf run` emits one when a bundle declaration leaves the gate
+  unrunnable (`runtime`, `verify.offline: false`, an unsupported interface or
+  profile, or an unreadable document module), as §25.6's `unverified` state requires.
+- The paragraph now states the rule at the level the code implements: no record when
+  `ctf run` cannot reach a gate outcome, `unverified` when it identifies the bundle but
+  a declaration leaves the gate unrunnable, and no record for a bare document's own
+  unrunnable declarations. The 0.13.4 changelog bullet and §17 row follow the same
+  split.
+- The refusal test now asserts the earlier record is `passed`, not merely that a
+  file exists, so it cannot pass on an `unverified` record.
+
+No runtime code changed: the implementation already had both behaviours. Only the
+text, one test assertion, and the release metadata did.
+
 ## [0.13.4] — 2026-10-27
 
 Gate-record completeness. **No byte-layout change:** `version_minor` stays `3`,
@@ -27,10 +56,11 @@ header, section, footer, commitment root, or signature transcript moved.
   now writes the same §25.6 record `ctf verify` nests under `gate`, with the stage
   named in the reason, wherever `ctf run` would write a record at all (`--status`,
   or `--bundle`'s default `<bundle>.status.json`) (S9, S10).
-- **A refused input writes no record.** A run that refuses an input before the gate
-  (a bundle that does not parse, or a document that does not describe the bundle)
-  writes no record and removes no earlier one. §25.6 now says so, and that a
-  consumer must not treat a record as current merely because the file exists.
+- **`ctf run` writes no record when it cannot reach a gate outcome.** An unreadable
+  or unparseable bundle or document, a document that names another challenge, an
+  invalid authoring document, or an unusable secret leaves any earlier record
+  untouched. §25.6 now says so, and that a consumer must not treat a record as
+  current merely because the file exists.
 - New tests: a solver that fails to load retains `generator_root`, `cross_engine:
   true`, and `runs: 2` in the verify artifact; the same failure through
   `ctf run --bundle` persists a `failed` record with those fields.
