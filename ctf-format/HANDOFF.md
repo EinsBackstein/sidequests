@@ -35,10 +35,12 @@ identify the section: the gate resolves `generate.wasm`/`verify.solver` through
 `names` and never runs a section of the right kind under another name (§7.6, §25.6).
 Release **0.13.4** keeps the determinism fields in a `failed` record when the solver
 stage fails, and persists `ctf run`'s hard stage failures wherever it writes a record
-(`--status` or `--bundle`) (§25.6, S9–S10). Release **0.13.5** narrows the
-record-boundary sentence 0.13.4 added: only a `ctf run --bundle` that cannot match a
-document to its bundle writes no record; a run that can identify the bundle but
-cannot gate it writes `unverified`, as `ctf verify` already did. No code changed. The live gate is
+(`--status` or `--bundle`) (§25.6, S9–S10). Release **0.13.5** states the
+record boundary 0.13.4 overgeneralised: `ctf run` writes no record when it cannot reach
+a gate outcome (unreadable inputs, a mismatched document, an invalid document, an
+unusable secret), writes `unverified` when it identifies the bundle but a declaration
+leaves the gate unrunnable, and refuses a bare document's own unrunnable declarations
+without a record. No runtime code changed. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 

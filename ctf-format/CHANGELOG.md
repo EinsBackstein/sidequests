@@ -14,7 +14,7 @@ Correction to 0.13.4's record-boundary wording. **No byte-layout change:**
 `demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
 transcript moved.
 
-### Fixed — the "no record" sentence now names the one case that has no record
+### Fixed — the "no record" sentence now states the rule, not one example
 
 - **0.13.4 overgeneralised.** Its §25.6 paragraph said a run that refuses an input
   before the gate writes no record. That is true for `ctf run` when it cannot reach a
@@ -25,9 +25,11 @@ transcript moved.
   bundle, and `ctf run` emits one when a bundle declaration leaves the gate
   unrunnable (`runtime`, `verify.offline: false`, an unsupported interface or
   profile, or an unreadable document module), as §25.6's `unverified` state requires.
-- The paragraph now states both halves: no record when the tool cannot reach a gate
-  outcome, `unverified` when it identifies the bundle but the gate cannot run. The
-  0.13.4 changelog bullet and §17 row are narrowed the same way.
+- The paragraph now states the rule at the level the code implements: no record when
+  `ctf run` cannot reach a gate outcome, `unverified` when it identifies the bundle but
+  a declaration leaves the gate unrunnable, and no record for a bare document's own
+  unrunnable declarations. The 0.13.4 changelog bullet and §17 row follow the same
+  split.
 - The refusal test now asserts the earlier record is `passed`, not merely that a
   file exists, so it cannot pass on an `unverified` record.
 
