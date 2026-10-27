@@ -119,8 +119,9 @@ pub struct Artifact {
     pub sections: SectionCounts,
     /// `None` when the bundle did not parse, so this build cannot say.
     pub signing: Option<Signing>,
-    /// The §25.6 verification record, or `None` when the gate did not run: no gate
-    /// was requested, or the bundle was rejected before the gate could run.
+    /// The §25.6 verification record. `None` when no gate was requested, or the
+    /// bundle was rejected before the gate could run. A requested gate that could
+    /// not run on an intact bundle is `Some` with `Unverified` status (§25.6.1).
     pub gate: Option<VerificationRecord>,
     /// The overall verdict.
     pub status: Status,

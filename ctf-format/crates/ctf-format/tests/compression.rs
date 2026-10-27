@@ -133,6 +133,36 @@ fn a_wrong_declared_length_is_rejected() {
     ));
 }
 
+/// An empty plaintext with `comp = 1` and `chunk_size != 0` is one empty zstd
+/// frame, not zero frames: a `comp = 1` section that stores nothing is one no
+/// reader can decode (spec §5.4).
+#[test]
+fn an_empty_compressed_chunked_section_stores_one_frame() {
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest()),
+            SectionSpec::inline(SectionKind::Artifact, 1, SectionFlags::empty(), b"")
+                .chunked(4096)
+                .compressed(),
+        ],
+    )
+    .unwrap();
+    let b = ctf_format::Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert_eq!(record.len_plain, 0);
+    assert!(
+        record.len_stored > 0,
+        "an empty body still needs its one empty zstd frame"
+    );
+    assert_eq!(
+        record.chunk_index_off, 0,
+        "an empty section has no chunk index"
+    );
+    assert_eq!(b.section_bytes(&record).unwrap().as_ref(), b"");
+    assert_eq!(b.verify_inline_sections().unwrap().verified, 2);
+}
+
 /// R20: the manifest is never compressed.
 #[test]
 fn the_manifest_is_never_compressed() {

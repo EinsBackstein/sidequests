@@ -7,6 +7,40 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.7] — 2026-10-27
+
+Writer and record-definition corrections. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved.
+
+### Fixed — the writer no longer emits compressed sections its own reader rejects
+
+- **A compressed `keys` section stored uncompressed bytes.** `write_bundle`
+  placed the raw envelope CBOR for `Payload::Envelopes` while copying the caller's
+  `comp = 1` into the record, so `SectionSpec::envelopes(..).compressed()` produced
+  a bundle whose own `section_bytes` failed with `DecompressionFailed`. The
+  envelope payload is now compressed per §5.4, with `len_plain` and `root` left over
+  the uncompressed bytes, as every other inline section does.
+- **An empty plaintext with `chunk_size != 0` stored zero zstd frames.** With
+  `comp = 1` and a non-zero chunk size, `plain.chunks(..)` yielded nothing for an
+  empty slice, so the record said `len_stored = 0` and no decoder could read it.
+  An empty plaintext is now always one empty zstd frame; §5.4 states the framing.
+  The encrypted path seals that frame as one chunk, which the decryption check now
+  accepts for an empty plaintext; the zero-chunk body earlier builds emitted for
+  the same empty plaintext is still accepted, so an existing file is not stranded.
+
+### Clarified — the `ctf verify` record when a requested gate cannot run
+
+- §25.6.1 said `gate` is `null` "when the gate did not run", while §25.6 records an
+  `unverified` outcome for a gate that could not run. The rule now matches what
+  ships: `gate` is `null` when no gate was requested or the file did not parse or
+  failed an integrity check; when `ctf verify` is given an intact bundle and its
+  inputs or declarations leave the requested gate unrunnable, the record is
+  `unverified` with `generator_root`, `cross_engine`, and `runs` null. §25.6 states
+  the same, and a test pins the missing-document case. `ctf run`'s no-record rule is
+  unchanged.
+
 ## [0.13.6] — 2026-10-27
 
 Independent-implementation and corpus corrections. **No byte-layout change:**

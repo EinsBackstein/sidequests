@@ -1,6 +1,6 @@
 [package]
 name = "ctf-conformance"
-version = "0.13.6"
+version = "0.13.7"
 description = "Conformance vector runner for the .ctf format: golden bundles and hostile inputs"
 edition.workspace = true
 rust-version.workspace = true

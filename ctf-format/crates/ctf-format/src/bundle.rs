@@ -367,7 +367,20 @@ impl<'a> Bundle<'a> {
             record.len_plain,
             stored,
         )?;
-        if frames.len() as u64 != chunk::chunk_count(record.len_plain, record.chunk_size)? {
+        // One STREAM chunk per zstd frame, so a compressed section's chunk count
+        // follows its frames, not `len_plain` alone: an empty plaintext is one
+        // empty frame (§5.4) and therefore one chunk, where the plain count is
+        // zero. A zero-chunk empty body is also accepted: it is what this writer
+        // emitted before §5.4 fixed the framing, and both decode to the same
+        // empty plaintext, so refusing it would strand an existing file.
+        let expected_chunks = if record.comp == Compression::Zstd && record.len_plain == 0 {
+            1
+        } else {
+            chunk::chunk_count(record.len_plain, record.chunk_size)?
+        };
+        let empty_zstd_body =
+            record.comp == Compression::Zstd && record.len_plain == 0 && frames.is_empty();
+        if frames.len() as u64 != expected_chunks && !empty_zstd_body {
             return Err(Error::Inconsistent {
                 what: "encrypted body has the wrong number of chunks",
             });
@@ -872,14 +885,23 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
             }
             Payload::Envelopes => {
                 let bytes = envelope_payload.as_deref().unwrap_or(&[]);
+                // `comp` applies here like any other inline payload: the record
+                // says `comp = 1`, so the stored bytes must be zstd frames of the
+                // envelope CBOR. `len_plain` and `root` still describe the
+                // uncompressed bytes (spec §5.4). This branch never encrypts — the
+                // pre-pass refuses `Payload::Envelopes` with an encryption spec —
+                // so there is no sealed body to copy.
+                let stored: Cow<'_, [u8]> = match s.comp {
+                    Compression::None => Cow::Borrowed(bytes),
+                    Compression::Zstd => Cow::Owned(compress::compress(bytes, s.chunk_size)?),
+                };
                 pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
                 let offset = u64::from(HEADER_LEN) + body.len() as u64;
-                body.extend_from_slice(bytes);
-                let len = bytes.len() as u64;
+                body.extend_from_slice(&stored);
                 (
                     offset,
-                    len,
-                    len,
+                    stored.len() as u64,
+                    bytes.len() as u64,
                     *blake3::hash(bytes).as_bytes(),
                     crate::Encryption::None,
                 )

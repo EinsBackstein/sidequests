@@ -2667,3 +2667,200 @@ fn encrypted_compressed_caps_are_evaluated_on_the_section_totals() {
         .unwrap();
     assert_eq!(b.decrypt_section_bytes(&record, &key).unwrap(), plaintext);
 }
+
+/// A `keys` section written with `comp = 1` must store compressed bytes. The
+/// record's `comp` and the payload have to agree, or the writer emits a file its
+/// own reader refuses (spec §5.4, §10). The envelope CBOR is still the plaintext:
+/// `len_plain` and `root` describe it, and `section_bytes` returns it decoded.
+#[test]
+fn a_compressed_keys_section_round_trips_its_envelope_cbor() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "compressed-keys",
+        "Compressed Keys",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let plaintext = b"a sealed payload";
+    let secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        plaintext,
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    let keys = SectionSpec::envelopes(SectionKind::Keys, 2)
+        .chunked(4096)
+        .compressed();
+
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            keys,
+        ],
+    )
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(2).unwrap();
+    assert_eq!(record.comp, Compression::Zstd);
+    assert_eq!(record.enc, ctf_format::Encryption::None);
+
+    // The payload really is a zstd frame, not raw CBOR behind a `comp = 1` label.
+    let stored = &file[record.offset as usize..(record.offset + record.len_stored) as usize];
+    assert_eq!(
+        &stored[..4],
+        &[0x28, 0xB5, 0x2F, 0xFD],
+        "a comp = 1 section must store a zstd frame"
+    );
+
+    // Reading it back yields the envelope CBOR the writer would have stored
+    // uncompressed: one envelope naming the encrypted section.
+    let envelope_cbor = b.section_bytes(&record).unwrap();
+    let value = Value::decode(&envelope_cbor).unwrap();
+    let entries = value.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let envelope = ctf_format::envelope::Envelope::from_cbor(&entries[0]).unwrap();
+    assert_eq!(envelope.name_id, 1);
+    assert_eq!(envelope.context, "seal");
+    assert_eq!(value.encode().unwrap(), envelope_cbor.as_ref());
+
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 2, "the manifest and the keys section");
+    assert_eq!(report.unverifiable, 1, "the encrypted section needs a key");
+}
+
+/// An empty plaintext encrypted with `comp = 1` must round-trip. §5.4 makes the
+/// plaintext one empty zstd frame, and §20.2 seals one frame per chunk, so the
+/// body has one empty chunk even though `ceiling(0 / chunk_size)` is zero. The
+/// zero-chunk shape an earlier writer emitted is still accepted: both decode to
+/// the same empty plaintext and its `root` commits to it.
+#[test]
+fn an_empty_encrypted_compressed_section_round_trips() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "empty-sealed",
+        "Empty Sealed",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let mut secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        b"",
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    secret.comp = Compression::Zstd;
+
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            SectionSpec::envelopes(SectionKind::Keys, 2),
+        ],
+    )
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert_eq!(record.len_plain, 0);
+    assert!(record.len_stored > 0, "the sealed frame is still stored");
+    let key = b
+        .section_content_key(&record, &recipient.secret_key, "seal")
+        .unwrap();
+    assert_eq!(b.decrypt_section_bytes(&record, &key).unwrap(), b"");
+    assert_eq!(b.verify_inline_sections().unwrap().mismatches.len(), 0);
+}
+
+/// An empty `enc = 1, comp = 1` body with **zero** chunks is the shape builds
+/// before §5.4 fixed the framing emitted. It is not the one-frame form the writer
+/// now produces, but it decodes to the same empty plaintext and its `root` commits
+/// to it, so a reader must keep accepting it or strand an existing file (§20.2).
+#[test]
+fn a_zero_chunk_empty_sealed_body_still_decrypts() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "legacy-empty",
+        "Legacy Empty",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let mut secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        b"",
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    secret.comp = Compression::Zstd;
+    let mut legacy = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            SectionSpec::envelopes(SectionKind::Keys, 2),
+        ],
+    )
+    .unwrap();
+
+    let parsed = Bundle::parse(&legacy).unwrap();
+    let record = *parsed.section(1).unwrap();
+    let off = record.offset as usize;
+    let stored = record.len_stored as usize;
+    assert!(stored > 0, "the writer emits the one-frame body");
+    drop(parsed);
+
+    // Rebuild the earlier shape: no stored bytes, `len_stored = 0`, and T8-zero
+    // padding where the sealed chunk used to sit. The plaintext and its `root` do
+    // not change, so only the table and the commitment need repairing.
+    legacy[off..off + stored].fill(0);
+    let header = Header::parse(&legacy).unwrap();
+    let table = header.section_table_off as usize;
+    let at = table + SECTION_RECORD_LEN;
+    legacy[at + 16..at + 24].copy_from_slice(&0u64.to_le_bytes()); // OFF_LEN_STORED
+    let root = commitment_root(
+        &legacy[..HEADER_LEN as usize],
+        &legacy[table..table + header.section_table_count as usize * SECTION_RECORD_LEN],
+    );
+    let footer = header.footer_off as usize;
+    legacy[footer..footer + 32].copy_from_slice(&root);
+
+    let b = Bundle::parse(&legacy).unwrap();
+    let record = *b.section(1).unwrap();
+    assert_eq!(record.len_stored, 0);
+    assert_eq!(record.len_plain, 0);
+    let key = b
+        .section_content_key(&record, &recipient.secret_key, "seal")
+        .unwrap();
+    assert_eq!(
+        b.decrypt_section_bytes(&record, &key).unwrap(),
+        b"",
+        "a zero-chunk empty body decodes to the empty plaintext"
+    );
+}
