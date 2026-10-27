@@ -451,8 +451,8 @@ implementations, and the goldens are byte-identical.
 
 ## Deliberate simplifications
 
-Tracked here so they do not rot into permanent accidents. Each is also marked with
-a `ponytail:` comment at its site in the code.
+Tracked here so they do not rot into permanent accidents. The reasoning lives in
+this section; the earlier `ponytail:` inline comments were folded into it.
 
 - **Section records parsed with `from_le_bytes`, not a zero-copy cast.** The design
   doc's "castable" requirement is really about fixed width — seeking to record *N*
