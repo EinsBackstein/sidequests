@@ -765,6 +765,146 @@ fn a_bundle_declaring_an_unimplemented_interface_is_unverified() {
     );
 }
 
+/// `ctf run --bundle` describes the bundle it writes beside: a bundle declaring
+/// `runtime` is persisted `unverified` even when the document it is given omits
+/// `runtime` (spec §25.6). `ctf run` accepts `unverified` with exit 0.
+#[test]
+fn run_bundle_persists_unverified_for_a_bundle_that_declares_runtime() {
+    let dir = TempDir::new("run-bundle-runtime");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, _packed) = gate_fixture(&dir, "run-runtime", &expected);
+
+    // Pack from a document that declares `runtime`; the verification document is the
+    // fixture, with the same id/version/modules but no runtime declaration.
+    let text = std::fs::read_to_string(&source).unwrap();
+    let digest = "1".repeat(64);
+    let packing = dir.path("run-runtime-declared.yaml");
+    std::fs::write(
+        &packing,
+        format!(
+            "{text}runtime:\n  image: \"ctf-fixture.invalid/gate@sha256:{digest}\"\n  \
+             ports: [{{ container: 80, protocol: tcp }}]\n  \
+             resources: {{ cpu: \"0.5\", memory: \"256Mi\", pids: 64 }}\n  \
+             instancing: per_team\n  ttl: 30m\n  \
+             readiness: {{ tcp: 80, timeout: 30s }}\n"
+        ),
+    )
+    .unwrap();
+    let bundle = dir.path("run-runtime-declared.ctf");
+    let (code, stdout, stderr) = run(&["pack", &packing, "--out", &bundle]);
+    assert_eq!(code, 0, "pack failed: {stdout}{stderr}");
+
+    let (code, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(
+        code, 0,
+        "an unverified run is not a failure for `ctf run`: {stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("gate          unverified"),
+        "the bundle's runtime makes it unverified: {stdout}"
+    );
+    assert!(
+        stdout.contains("determinism not run"),
+        "the condition is named: {stdout}"
+    );
+
+    let record = std::fs::read_to_string(format!("{bundle}.status.json")).expect("status record");
+    assert!(
+        record.contains("\"status\": \"unverified\""),
+        "record: {record}"
+    );
+    assert!(
+        !record.contains("\"status\": \"passed\""),
+        "a bundle declaring runtime is never passed: {record}"
+    );
+    assert!(
+        record.contains("\"generator_root\": null"),
+        "an unverified run has no root: {record}"
+    );
+}
+
+/// A document must not veto `ctf verify` with a version the bundle does not
+/// declare: a bundle with no `generate.interface` means 1, so the document's
+/// unimplemented 2 cannot force `unverified` (spec §25.6).
+#[test]
+fn a_document_interface_does_not_veto_a_bundle_that_declares_none() {
+    let dir = TempDir::new("document-interface");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, bundle) = gate_fixture(&dir, "doc-interface", &expected);
+
+    // Same id, version, and modules; only the document's interface differs.
+    let text = std::fs::read_to_string(&source).unwrap().replace(
+        "  determinism: strict\n",
+        "  determinism: strict\n  interface: 2\n",
+    );
+    let document = dir.path("document-interface-2.yaml");
+    std::fs::write(&document, text).unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &document,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 0,
+        "the document's version must not veto the bundle: {stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "passed");
+    assert_eq!(artifact["gate"]["status"], "passed");
+}
+
+/// `ctf run --bundle` reads G6 from the bundle too: an interface-2 bundle is
+/// persisted `unverified` naming 2, even when the document declares 1.
+#[test]
+fn run_bundle_persists_unverified_for_an_unimplemented_bundle_interface() {
+    let dir = TempDir::new("run-bundle-interface");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, _packed) = gate_fixture(&dir, "run-interface", &expected);
+
+    let packing_text = std::fs::read_to_string(&source).unwrap().replace(
+        "  determinism: strict\n",
+        "  determinism: strict\n  interface: 2\n",
+    );
+    let packing = dir.path("run-interface-2.yaml");
+    std::fs::write(&packing, packing_text).unwrap();
+    let bundle = dir.path("run-interface-2.ctf");
+    let (code, stdout, stderr) = run(&["pack", &packing, "--out", &bundle]);
+    assert_eq!(code, 0, "pack failed: {stdout}{stderr}");
+
+    // The document declares no interface (1); the bundle declares 2.
+    let (code, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(code, 0, "`ctf run` accepts unverified: {stdout}{stderr}");
+    assert!(
+        stdout.contains("gate          unverified"),
+        "the bundle's interface makes it unverified: {stdout}"
+    );
+    assert!(
+        stdout.contains("determinism not run"),
+        "the condition is named: {stdout}"
+    );
+
+    let record = std::fs::read_to_string(format!("{bundle}.status.json")).expect("status record");
+    assert!(
+        record.contains("\"status\": \"unverified\""),
+        "record: {record}"
+    );
+    assert!(
+        !record.contains("\"status\": \"passed\""),
+        "an unimplemented interface is never passed: {record}"
+    );
+    assert!(
+        record.contains("interface 2"),
+        "the reason names the bundle's version: {record}"
+    );
+}
+
 /// Spec §23.5 G7: `ctf run` refuses a document whose profile this build does not
 /// implement before it reads a module, let alone executes one. The module here is
 /// not valid WASM, so a run that got past the version check would report a load

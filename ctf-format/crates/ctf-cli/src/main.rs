@@ -824,7 +824,15 @@ fn run_release(args: &ReleaseArgs) -> ExitCode {
 /// `ctf run`: the platform's full offline ingest gate, run locally.
 fn run_gate(args: &RunArgs) -> ExitCode {
     let path = &args.challenge;
-    let setup = match load_gate_setup(path, &args.subject, &args.secret) {
+    // Without `--bundle` every declaration is the document's, so an unsupported
+    // interface or profile is refused here as before. With `--bundle`, §25.6 makes
+    // the bundle authoritative and its values are applied below; the document's
+    // versions must not veto a run the bundle permits.
+    let loaded = match args.bundle {
+        Some(_) => load_gate_setup_inner(path, &args.subject, &args.secret, false),
+        None => load_gate_setup(path, &args.subject, &args.secret),
+    };
+    let mut setup = match loaded {
         Ok(s) => s,
         Err(GateSetupError::Issues(issues)) => {
             for issue in &issues {
@@ -864,6 +872,36 @@ fn run_gate(args: &RunArgs) -> ExitCode {
                 setup.doc_id, setup.doc_version
             );
             return ExitCode::FAILURE;
+        }
+
+        // Spec §25.6: the declarations that decide whether the gate may run are the
+        // bundle's, not the document's. Apply them before anything executes, so a
+        // bundle declaring `runtime`, no offline gate, or an interface/profile this
+        // build does not implement is persisted as `unverified`, never `passed`.
+        if let Err(reason) = apply_bundle_declarations(&bundle, &mut setup) {
+            println!("gate          unverified");
+            println!("  determinism not run ({reason})");
+            let status_path = run_status_path(args);
+            if let Some(status_path) = status_path {
+                let record = ctf_generator::VerificationRecord {
+                    challenge: bundle.manifest.id().to_owned(),
+                    version: bundle.manifest.version(),
+                    subject: args.subject.clone(),
+                    status: ctf_generator::GateStatus::Unverified,
+                    reason,
+                    generator_root: None,
+                    cross_engine: None,
+                    runs: None,
+                };
+                if let Err(e) = std::fs::write(&status_path, record.to_json()) {
+                    eprintln!("ctf: {status_path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+                println!("{status_path}: verification status (unverified)");
+            }
+            // `ctf run`'s accepted exit for `unverified`; rule S11's non-zero
+            // contract governs `ctf verify`, which has its own exit code.
+            return ExitCode::SUCCESS;
         }
     }
 
@@ -927,10 +965,7 @@ fn run_gate(args: &RunArgs) -> ExitCode {
 
     // Persist the tri-state alongside the bundle (ticket 30). The record is derived
     // data about this run, not a container structure.
-    let status_path = args
-        .status
-        .clone()
-        .or_else(|| args.bundle.as_ref().map(|b| format!("{b}.status.json")));
+    let status_path = run_status_path(args);
     if let Some(status_path) = status_path {
         let record = ctf_generator::VerificationRecord::from_report(
             &setup.doc_id,
@@ -947,23 +982,33 @@ fn run_gate(args: &RunArgs) -> ExitCode {
     code
 }
 
+/// Where `ctf run` persists its record: `--status` when given, else beside the
+/// bundle it describes (spec §25.6/S10).
+fn run_status_path(args: &RunArgs) -> Option<String> {
+    args.status
+        .clone()
+        .or_else(|| args.bundle.as_ref().map(|b| format!("{b}.status.json")))
+}
+
 /// Everything the §25 gate needs, resolved from an authoring document.
 ///
-/// For `ctf run` every field comes from the document. `ctf verify` replaces the
-/// declarations with the bundle's, prefers the bundle's module sections, and keeps
-/// a document module only when the bundle declares it (see
-/// [`gate_record_for_bundle`]). Resolving is separated from running so the two
-/// commands cannot disagree about the seed, the derived flag, or which stages a
-/// gate names. They differ only in what they do with a non-`passed` outcome.
+/// For `ctf run` without `--bundle` every field comes from the document. `ctf run
+/// --bundle` and `ctf verify` replace the declarations with the bundle's, prefer
+/// the bundle's module sections, and keep a document module only when the bundle
+/// declares it (see [`apply_bundle_declarations`]). Resolving is separated from
+/// running so the commands cannot disagree about the seed, the derived flag, or
+/// which stages a gate names. They differ only in what they do with a non-`passed`
+/// outcome.
 struct GateSetup {
     /// The document's `id`, as authored. A gate record describes the bundle whose
     /// manifest must agree with this.
     doc_id: String,
     /// The document's `version`, likewise.
     doc_version: u64,
-    /// The generator interface version the document declares; 1 when absent (§7.6).
+    /// The `generate.interface` the gate will use: the document's, or the bundle's
+    /// when one is supplied; 1 when absent (§7.6).
     interface: u32,
-    /// The WASM profile the document declares; 1 when absent (§7.6).
+    /// The `generate.profile` the gate will use, likewise; 1 when absent (§7.6).
     profile: u32,
     /// The generator module's bytes, when the gate has one.
     generator: Option<Vec<u8>>,
@@ -1039,6 +1084,23 @@ fn load_gate_setup(
     subject: &str,
     secret_hex: &str,
 ) -> Result<GateSetup, GateSetupError> {
+    load_gate_setup_inner(path, subject, secret_hex, true)
+}
+
+/// [`load_gate_setup`] with control over G6/G7 on the document.
+///
+/// `enforce_versions: false` is for a command where a bundle supplies the
+/// declarations (§25.6). The document's `generate.interface`/`profile` are then not
+/// the versions that run — [`apply_bundle_declarations`] overwrites both from the
+/// bundle, absent meaning 1 (§7.6) — so refusing the document's value would let it
+/// veto a run the bundle permits. The placeholders set in that mode are never
+/// executed.
+fn load_gate_setup_inner(
+    path: &str,
+    subject: &str,
+    secret_hex: &str,
+    enforce_versions: bool,
+) -> Result<GateSetup, GateSetupError> {
     let text = std::fs::read_to_string(path).map_err(|e| GateSetupError::Message(e.to_string()))?;
     let doc = ChallengeDoc::from_yaml(&text).map_err(|e| GateSetupError::Message(e.to_string()))?;
     let issues = doc.errors();
@@ -1051,16 +1113,26 @@ fn load_gate_setup(
     // gate cannot run at all, so it is refused before a module is read — let alone
     // executed. An integer wider than `u32` is one such version: no build can
     // implement it, and truncating it would name the wrong one in the diagnostic.
-    let interface = declared_version(
-        doc.generate.as_ref().and_then(|g| g.interface),
-        ctf_generator::abi::ensure_interface,
-    )
-    .map_err(|v| GateSetupError::Message(unsupported_version("generate.interface", v)))?;
-    let profile = declared_version(
-        doc.generate.as_ref().and_then(|g| g.profile),
-        ctf_generator::abi::ensure_profile,
-    )
-    .map_err(|v| GateSetupError::Message(unsupported_version("generate.profile", v)))?;
+    //
+    // When a bundle supplies the declarations, the check applies to its values
+    // instead (§25.6); leaving the document's unsupported number in the setup would
+    // be wrong even though it is overwritten, so the documented absent value 1
+    // stands in for both.
+    let (interface, profile) = if enforce_versions {
+        let interface = declared_version(
+            doc.generate.as_ref().and_then(|g| g.interface),
+            ctf_generator::abi::ensure_interface,
+        )
+        .map_err(|v| GateSetupError::Message(unsupported_version("generate.interface", v)))?;
+        let profile = declared_version(
+            doc.generate.as_ref().and_then(|g| g.profile),
+            ctf_generator::abi::ensure_profile,
+        )
+        .map_err(|v| GateSetupError::Message(unsupported_version("generate.profile", v)))?;
+        (interface, profile)
+    } else {
+        (1, 1)
+    };
 
     // Resolve the modules the document names, relative to the document.
     let read_module = |key: &str, name: &str| -> Result<Vec<u8>, String> {
@@ -1159,7 +1231,7 @@ fn gate_record_for_bundle(
         runs: None,
     };
 
-    let mut setup = match load_gate_setup(challenge, subject, secret_hex) {
+    let mut setup = match load_gate_setup_inner(challenge, subject, secret_hex, false) {
         Ok(s) => s,
         Err(e) => {
             // The artifact is stable and path-free (spec §25.6.1, S12): the detail
@@ -1182,6 +1254,42 @@ fn gate_record_for_bundle(
         ));
     }
 
+    if let Err(reason) = apply_bundle_declarations(bundle, &mut setup) {
+        return unverified(reason);
+    }
+
+    match run_setup_gate(&setup) {
+        Ok(report) => ctf_generator::VerificationRecord::from_report(id, version, subject, &report),
+        Err(e) => {
+            // Same rule as above: a stage error can name a module path, so the
+            // record carries the fact and the stage only, and the detail is on
+            // stderr. S9 is satisfied by naming the stage, not by leaking a path.
+            eprintln!("ctf: the offline gate could not complete: {e}");
+            ctf_generator::VerificationRecord {
+                challenge: id.to_owned(),
+                version,
+                subject: subject.to_owned(),
+                status: ctf_generator::GateStatus::Failed,
+                reason: format!(
+                    "the offline gate could not complete a §25.5 stage ({})",
+                    e.stage
+                ),
+                generator_root: None,
+                cross_engine: None,
+                runs: None,
+            }
+        }
+    }
+}
+
+/// Replace `setup`'s gate declarations with `bundle`'s (spec §25.6).
+///
+/// `Ok(())` means the bundle's declarations and sections leave the gate runnable;
+/// what the run then reports — including `unverified` for `runtime` or a missing
+/// `verify.offline` — is [`run_setup_gate`]'s. `Err(reason)` means the gate may not
+/// even be constructed, and the sentence is fixed and path-free for the persisted
+/// record (S12).
+fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Result<(), String> {
     // Spec §25.6 decides `unverified` from what the **bundle** declares. Reading
     // these from the verification document would let a bundle that declares
     // `runtime`, or one that never asked for the offline gate, be reported as
@@ -1206,7 +1314,7 @@ fn gate_record_for_bundle(
     ) {
         Ok(interface) => interface,
         Err(interface) => {
-            return unverified(format!(
+            return Err(format!(
                 "the bundle declares generator interface {interface}, which this build does not implement"
             ));
         }
@@ -1217,7 +1325,7 @@ fn gate_record_for_bundle(
     ) {
         Ok(profile) => profile,
         Err(profile) => {
-            return unverified(format!(
+            return Err(format!(
                 "the bundle declares WASM profile {profile}, which this build does not implement"
             ));
         }
@@ -1251,7 +1359,7 @@ fn gate_record_for_bundle(
         Ok(None) => None,
         Err(e) => {
             eprintln!("ctf: the offline gate could not run: {e}");
-            return unverified(
+            return Err(
                 "the offline gate could not run: the bundle's generator section is unreadable"
                     .to_owned(),
             );
@@ -1264,35 +1372,14 @@ fn gate_record_for_bundle(
         Ok(None) => None,
         Err(e) => {
             eprintln!("ctf: the offline gate could not run: {e}");
-            return unverified(
+            return Err(
                 "the offline gate could not run: the bundle's solver section is unreadable"
                     .to_owned(),
             );
         }
     };
 
-    match run_setup_gate(&setup) {
-        Ok(report) => ctf_generator::VerificationRecord::from_report(id, version, subject, &report),
-        Err(e) => {
-            // Same rule as above: a stage error can name a module path, so the
-            // record carries the fact and the stage only, and the detail is on
-            // stderr. S9 is satisfied by naming the stage, not by leaking a path.
-            eprintln!("ctf: the offline gate could not complete: {e}");
-            ctf_generator::VerificationRecord {
-                challenge: id.to_owned(),
-                version,
-                subject: subject.to_owned(),
-                status: ctf_generator::GateStatus::Failed,
-                reason: format!(
-                    "the offline gate could not complete a §25.5 stage ({})",
-                    e.stage
-                ),
-                generator_root: None,
-                cross_engine: None,
-                runs: None,
-            }
-        }
-    }
+    Ok(())
 }
 
 /// The bytes of `bundle`'s first section of `kind`, verified against its root.
@@ -1759,6 +1846,26 @@ fn embed_entitlement(path: &str, chain: &[u8]) -> Result<Vec<u8>, Box<dyn std::e
              would invalidate them"
                 .into(),
         );
+    }
+    // Spec §5.2: an EXTERNAL section's bytes live outside the file, so a rewrite has
+    // no plaintext to re-emit and must preserve the record byte-for-byte or refuse.
+    // An encrypted external record cannot be preserved: its content key is not in
+    // the file and is not an input here, so every rewrite below would rebuild it
+    // with `encryption: None` and silently clear `enc`. R22 bans that combination
+    // only for `CONTAINER_V1` files, so a legacy record can carry it and reach this
+    // path. Refuse before any output is written.
+    if let Some(record) = bundle
+        .sections
+        .iter()
+        .find(|r| r.flags.contains(SectionFlags::EXTERNAL) && r.enc != Encryption::None)
+    {
+        return Err(format!(
+            "refusing to rewrite an encrypted external section (name_id {}): its bytes are \
+             not in the file and its content key is unavailable, so spec §5.2's \
+             preserve-or-refuse rule leaves only a refusal",
+            record.name_id
+        )
+        .into());
     }
     let manifest_record = bundle
         .sections
