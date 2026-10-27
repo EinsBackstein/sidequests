@@ -7,6 +7,38 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.6] — 2026-10-27
+
+Independent-implementation and corpus corrections. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved.
+
+### Fixed — the two readers now agree at the depth boundary
+
+- **Go counted CBOR depth one level too strictly.** `decodeCBOR` started at depth 1
+  and `appendValue` had no cap at all, so the Go reader rejected a manifest the Rust
+  reference accepts at the boundary, and the Go writer could produce bytes its own
+  reader refused. Both now count depth from 0 at the outermost value and enforce
+  `MaxCBORDepth` on the same terms as `ctf_format::cbor`. §7.1 defines the count
+  normatively: depth is 0 at the outermost value, so 17 nested containers are
+  accepted and a scalar inside them is rejected. The boundary is pinned in both
+  languages.
+
+### Fixed — the corpus vector that claimed §5.4's `OPTIONAL` rule did not test it
+
+- `unknown-enc-discriminant` mutated the **manifest** record, so the bytes also
+  violated R20 and a reader that exempted `OPTIONAL` sections from R10 would still
+  pass the corpus. It now derives from the demo and mutates an unknown-kind
+  (kind 9) `OPTIONAL` section, where R10 is the only rule broken and the named
+  reason is assertable. A sibling `unknown-comp-discriminant` covers the other
+  field, since §5.4 applies to either.
+- The Go conformance suite now asserts what `corpus.json` already claimed for the
+  unknown-kind vector: `SectionBytes` and the chunk index both refuse it, and
+  inline verification still covers it — the test corrupts one stored byte and
+  requires `VerifyAll` to name the section, rather than accepting an empty error
+  list. The corpus is now **35 fixtures** (30 hostile, 3 future, 2 golden).
+
 ## [0.13.5] — 2026-10-27
 
 Correction to 0.13.4's record-boundary wording. **No byte-layout change:**

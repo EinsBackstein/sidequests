@@ -63,7 +63,7 @@ goldens.
 ### Conformance vectors — all fixtures
 
 `go test ./conformance/ -v` loads `spec/vectors/conformance/corpus.json` and
-executes **all 34 listed fixtures** (`golden/`, `hostile/`, `future/`). It also
+executes **all 35 listed fixtures** (`golden/`, `hostile/`, `future/`). It also
 fails if any `.ctf` file on disk is not listed in the corpus, so a new fixture
 cannot be silently skipped. Every result is logged, e.g.:
 

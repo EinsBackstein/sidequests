@@ -107,10 +107,10 @@ are checked when the primitive is resolved. This implementation checks F10 in
 ## A7. Error identity and rule tags
 
 §2.1 makes accept/reject normative and error identity non-normative. Several
-fixtures can trigger more than one rule (for example, an unknown `enc`
-discriminant on the manifest is rejected by R20 because the manifest forbids a
-codec, while the fixture cites R10; a byte flip in a payload is reported as a
-root mismatch, while the fixture cites §10 step 7).
+fixtures can trigger more than one rule (for example, zeroing the manifest
+record's kind would violate both R3 and T1, so the unknown-kind vector mutates the
+artifact record instead; a byte flip in a payload is reported as a root mismatch,
+while the fixture cites §10 step 7).
 
 **Chosen reading.** The parser reports the most specific rule it applied, in
 the order §5.6/§4.3 require where an order is normative. A named-error vector is
