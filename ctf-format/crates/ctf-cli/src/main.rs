@@ -22,7 +22,7 @@
 
 mod verify;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -829,7 +829,9 @@ fn run_gate(args: &RunArgs) -> ExitCode {
     // the bundle authoritative and its values are applied below; the document's
     // versions must not veto a run the bundle permits.
     let loaded = match args.bundle {
-        Some(_) => load_gate_setup_inner(path, &args.subject, &args.secret, false),
+        Some(_) => {
+            load_gate_setup_inner(path, &args.subject, &args.secret, DeclarationSource::Bundle)
+        }
         None => load_gate_setup(path, &args.subject, &args.secret),
     };
     let mut setup = match loaded {
@@ -1022,6 +1024,47 @@ struct GateSetup {
     runtime_declared: bool,
     /// Whether the gate's manifest declares `verify.offline`.
     offline_declared: bool,
+    /// The authoring document's modules, deferred. Set only when a bundle supplies
+    /// the declarations: resolving them eagerly would let the document's filesystem
+    /// state fail a bundle that carries its own module sections (§25.6).
+    document_modules: Option<DocumentModules>,
+}
+
+/// Where a gate's module bytes may come from when they were not read up front.
+///
+/// Holds the document's directory and the file names it declares, never the bytes:
+/// a bundle that carries a module section must not touch these paths at all.
+struct DocumentModules {
+    /// The directory the authoring document lives in; its module names are relative
+    /// to it.
+    dir: PathBuf,
+    /// The document's `generate.wasm`, when it names one.
+    generator: Option<String>,
+    /// The document's `verify.solver`, when it names one.
+    solver: Option<String>,
+}
+
+impl DocumentModules {
+    /// Read one deferred module, or `None` when the document named none.
+    ///
+    /// A read failure is a fixed, path-free sentence (rule S12): the artifact names
+    /// the condition, and the detail stays out of it.
+    fn read(&self, name: Option<&str>, what: &str) -> Result<Option<Vec<u8>>, String> {
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        let path = self.dir.join(name);
+        std::fs::read(&path).map(Some).map_err(|e| {
+            eprintln!(
+                "ctf: the offline gate could not run: `{}`: {e}",
+                path.display()
+            );
+            format!(
+                "the offline gate could not run: the authoring document's {what} module could not \
+                 be read"
+            )
+        })
+    }
 }
 
 /// Why a gate could not even be constructed: it did not run.
@@ -1084,22 +1127,36 @@ fn load_gate_setup(
     subject: &str,
     secret_hex: &str,
 ) -> Result<GateSetup, GateSetupError> {
-    load_gate_setup_inner(path, subject, secret_hex, true)
+    load_gate_setup_inner(path, subject, secret_hex, DeclarationSource::Document)
 }
 
-/// [`load_gate_setup`] with control over G6/G7 on the document.
+/// Where the declarations a gate runs come from: the authoring document, or a
+/// bundle whose manifest is authoritative (§25.6).
+#[derive(Clone, Copy)]
+enum DeclarationSource {
+    /// Bare `ctf run`: the document is the only input, so its versions are enforced
+    /// and its modules are read eagerly.
+    Document,
+    /// `ctf run --bundle` and `ctf verify`: the bundle supplies the declarations, so
+    /// the document's versions are not the ones that run and its modules are only
+    /// read if the bundle declares a module without carrying it.
+    Bundle,
+}
+
+/// [`load_gate_setup`] with control over which declarations a gate will run.
 ///
-/// `enforce_versions: false` is for a command where a bundle supplies the
-/// declarations (§25.6). The document's `generate.interface`/`profile` are then not
-/// the versions that run — [`apply_bundle_declarations`] overwrites both from the
-/// bundle, absent meaning 1 (§7.6) — so refusing the document's value would let it
-/// veto a run the bundle permits. The placeholders set in that mode are never
-/// executed.
+/// With [`DeclarationSource::Bundle`] the document's `generate.interface`/`profile`
+/// are not the versions that run — [`apply_bundle_declarations`] overwrites both from
+/// the bundle, absent meaning 1 (§7.6) — so refusing the document's value would let
+/// it veto a run the bundle permits. The placeholders set in that mode are never
+/// executed. Its modules are deferred rather than read, for the same reason: a
+/// bundle that carries a module section must not fail on a missing document file
+/// (§25.6).
 fn load_gate_setup_inner(
     path: &str,
     subject: &str,
     secret_hex: &str,
-    enforce_versions: bool,
+    source: DeclarationSource,
 ) -> Result<GateSetup, GateSetupError> {
     let text = std::fs::read_to_string(path).map_err(|e| GateSetupError::Message(e.to_string()))?;
     let doc = ChallengeDoc::from_yaml(&text).map_err(|e| GateSetupError::Message(e.to_string()))?;
@@ -1118,33 +1175,57 @@ fn load_gate_setup_inner(
     // instead (§25.6); leaving the document's unsupported number in the setup would
     // be wrong even though it is overwritten, so the documented absent value 1
     // stands in for both.
-    let (interface, profile) = if enforce_versions {
-        let interface = declared_version(
-            doc.generate.as_ref().and_then(|g| g.interface),
-            ctf_generator::abi::ensure_interface,
-        )
-        .map_err(|v| GateSetupError::Message(unsupported_version("generate.interface", v)))?;
-        let profile = declared_version(
-            doc.generate.as_ref().and_then(|g| g.profile),
-            ctf_generator::abi::ensure_profile,
-        )
-        .map_err(|v| GateSetupError::Message(unsupported_version("generate.profile", v)))?;
-        (interface, profile)
-    } else {
-        (1, 1)
+    let (interface, profile) = match source {
+        DeclarationSource::Document => {
+            let interface = declared_version(
+                doc.generate.as_ref().and_then(|g| g.interface),
+                ctf_generator::abi::ensure_interface,
+            )
+            .map_err(|v| GateSetupError::Message(unsupported_version("generate.interface", v)))?;
+            let profile = declared_version(
+                doc.generate.as_ref().and_then(|g| g.profile),
+                ctf_generator::abi::ensure_profile,
+            )
+            .map_err(|v| GateSetupError::Message(unsupported_version("generate.profile", v)))?;
+            (interface, profile)
+        }
+        DeclarationSource::Bundle => (1, 1),
     };
 
-    // Resolve the modules the document names, relative to the document.
+    // Resolve the modules the document names, relative to the document. When a
+    // bundle supplies the declarations, this is deferred: the document's filesystem
+    // state must not decide whether a bundle that carries its own module can be
+    // gated (§25.6).
+    let generator_name = doc.generate.as_ref().and_then(|g| g.wasm.clone());
+    let solver_name = doc.verify.as_ref().map(|v| v.solver.clone());
     let read_module = |key: &str, name: &str| -> Result<Vec<u8>, String> {
         std::fs::read(dir.join(name)).map_err(|e| format!("`{key}`: {name}: {e}"))
     };
-    let generator = match doc.generate.as_ref().and_then(|g| g.wasm.as_deref()) {
-        Some(name) => Some(read_module("generate.wasm", name).map_err(GateSetupError::Message)?),
-        None => None,
-    };
-    let solver = match doc.verify.as_ref().map(|v| v.solver.as_str()) {
-        Some(name) => Some(read_module("verify.solver", name).map_err(GateSetupError::Message)?),
-        None => None,
+    let (generator, solver, document_modules) = match source {
+        DeclarationSource::Document => {
+            let generator = match generator_name.as_deref() {
+                Some(name) => {
+                    Some(read_module("generate.wasm", name).map_err(GateSetupError::Message)?)
+                }
+                None => None,
+            };
+            let solver = match solver_name.as_deref() {
+                Some(name) => {
+                    Some(read_module("verify.solver", name).map_err(GateSetupError::Message)?)
+                }
+                None => None,
+            };
+            (generator, solver, None)
+        }
+        DeclarationSource::Bundle => (
+            None,
+            None,
+            Some(DocumentModules {
+                dir: dir.to_path_buf(),
+                generator: generator_name,
+                solver: solver_name,
+            }),
+        ),
     };
 
     let secret =
@@ -1164,6 +1245,7 @@ fn load_gate_setup_inner(
         expected,
         runtime_declared: doc.runtime.is_some(),
         offline_declared: doc.verify.as_ref().is_some_and(|v| v.offline),
+        document_modules,
     })
 }
 
@@ -1231,7 +1313,8 @@ fn gate_record_for_bundle(
         runs: None,
     };
 
-    let mut setup = match load_gate_setup_inner(challenge, subject, secret_hex, false) {
+    let loaded = load_gate_setup_inner(challenge, subject, secret_hex, DeclarationSource::Bundle);
+    let mut setup = match loaded {
         Ok(s) => s,
         Err(e) => {
             // The artifact is stable and path-free (spec §25.6.1, S12): the detail
@@ -1304,30 +1387,44 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
 
     // G6/G7 are about the **bundle** too, for the same reason: a version this build
     // does not implement means no stage can start, so the outcome is `unverified`
-    // (S8), not `failed`. Absent means 1 (§7.6). The reason is fixed and path-free
-    // (S12), naming only the number the bundle declared.
+    // (S8), not `failed`. Absent means 1 (§7.6), but a present value that is not a
+    // non-negative integer is not a version at all: reading it as absent would run
+    // the module at 1 and could report `passed` for a version the bundle never
+    // declared. The reason is fixed and path-free (S12).
     let generate = bundle.manifest.declaration("generate");
-    let bundle_version = |key: &str| generate.and_then(|g| g.get(key)).and_then(Value::as_uint);
-    setup.interface = match declared_version(
-        bundle_version("interface"),
-        ctf_generator::abi::ensure_interface,
-    ) {
-        Ok(interface) => interface,
-        Err(interface) => {
-            return Err(format!(
-                "the bundle declares generator interface {interface}, which this build does not implement"
-            ));
+    let bundle_version = |key: &str| bundle_declared_version(generate, key);
+    setup.interface = match bundle_version("interface") {
+        Ok(version) => match declared_version(version, ctf_generator::abi::ensure_interface) {
+            Ok(interface) => interface,
+            Err(interface) => {
+                return Err(format!(
+                    "the bundle declares generator interface {interface}, which this build does not implement"
+                ));
+            }
+        },
+        Err(()) => {
+            return Err(
+                "the bundle's `generate.interface` is not an integer version, so this build \
+                 cannot run its module"
+                    .to_owned(),
+            );
         }
     };
-    setup.profile = match declared_version(
-        bundle_version("profile"),
-        ctf_generator::abi::ensure_profile,
-    ) {
-        Ok(profile) => profile,
-        Err(profile) => {
-            return Err(format!(
-                "the bundle declares WASM profile {profile}, which this build does not implement"
-            ));
+    setup.profile = match bundle_version("profile") {
+        Ok(version) => match declared_version(version, ctf_generator::abi::ensure_profile) {
+            Ok(profile) => profile,
+            Err(profile) => {
+                return Err(format!(
+                    "the bundle declares WASM profile {profile}, which this build does not implement"
+                ));
+            }
+        },
+        Err(()) => {
+            return Err(
+                "the bundle's `generate.profile` is not an integer version, so this build \
+                 cannot run its module"
+                    .to_owned(),
+            );
         }
     };
 
@@ -1351,11 +1448,20 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
 
     // A bundle that carries the module is stricter than one that merely declares
     // it: its own bytes are the ones §25.5 says to run, and they win over the
-    // document's path. A read error is `unverified` with a path-free reason (S12).
-    let document_generator = setup.generator.take();
+    // document's path — which is never even read in that case (§25.6). Only a
+    // bundle that declares the module without carrying it falls back to the
+    // authoring document, whose name was deferred until now. A read error is
+    // `unverified` with a path-free reason (S12).
+    let modules = setup.document_modules.take();
+    let eager_generator = setup.generator.take();
+    let eager_solver = setup.solver.take();
+
     setup.generator = match bundle_module(bundle, SectionKind::Generator) {
         Ok(Some(bytes)) => Some(bytes),
-        Ok(None) if declares_generator => document_generator,
+        Ok(None) if declares_generator => match &modules {
+            Some(modules) => modules.read(modules.generator.as_deref(), "generator")?,
+            None => eager_generator,
+        },
         Ok(None) => None,
         Err(e) => {
             eprintln!("ctf: the offline gate could not run: {e}");
@@ -1365,10 +1471,12 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
             );
         }
     };
-    let document_solver = setup.solver.take();
     setup.solver = match bundle_module(bundle, SectionKind::Solver) {
         Ok(Some(bytes)) => Some(bytes),
-        Ok(None) if declares_solver => document_solver,
+        Ok(None) if declares_solver => match &modules {
+            Some(modules) => modules.read(modules.solver.as_deref(), "solver")?,
+            None => eager_solver,
+        },
         Ok(None) => None,
         Err(e) => {
             eprintln!("ctf: the offline gate could not run: {e}");
@@ -1380,6 +1488,18 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
     };
 
     Ok(())
+}
+
+/// A bundle's `generate.interface`/`generate.profile` (§7.6).
+///
+/// `Ok(None)` is absent, which means version 1. `Err(())` is present but not a
+/// non-negative integer: no host can implement it, and treating it as absent would
+/// silently run the module at a version the bundle never declared (G6/G7).
+fn bundle_declared_version(generate: Option<&Value>, key: &str) -> Result<Option<u64>, ()> {
+    match generate.and_then(|g| g.get(key)) {
+        None => Ok(None),
+        Some(value) => value.as_uint().map(Some).ok_or(()),
+    }
 }
 
 /// The bytes of `bundle`'s first section of `kind`, verified against its root.
@@ -1846,26 +1966,6 @@ fn embed_entitlement(path: &str, chain: &[u8]) -> Result<Vec<u8>, Box<dyn std::e
              would invalidate them"
                 .into(),
         );
-    }
-    // Spec §5.2: an EXTERNAL section's bytes live outside the file, so a rewrite has
-    // no plaintext to re-emit and must preserve the record byte-for-byte or refuse.
-    // An encrypted external record cannot be preserved: its content key is not in
-    // the file and is not an input here, so every rewrite below would rebuild it
-    // with `encryption: None` and silently clear `enc`. R22 bans that combination
-    // only for `CONTAINER_V1` files, so a legacy record can carry it and reach this
-    // path. Refuse before any output is written.
-    if let Some(record) = bundle
-        .sections
-        .iter()
-        .find(|r| r.flags.contains(SectionFlags::EXTERNAL) && r.enc != Encryption::None)
-    {
-        return Err(format!(
-            "refusing to rewrite an encrypted external section (name_id {}): its bytes are \
-             not in the file and its content key is unavailable, so spec §5.2's \
-             preserve-or-refuse rule leaves only a refusal",
-            record.name_id
-        )
-        .into());
     }
     let manifest_record = bundle
         .sections

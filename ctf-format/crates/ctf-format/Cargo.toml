@@ -1,6 +1,6 @@
 [package]
 name = "ctf-format"
-version = "0.13.1"
+version = "0.13.2"
 description = "Reader and writer for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
