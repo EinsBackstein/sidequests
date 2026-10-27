@@ -238,14 +238,18 @@ pub fn offline_gate(
     if input.runtime_declared {
         return Ok(unverified(UnverifiedReason::RuntimeDeclared));
     }
-    if !input.offline_declared {
-        return Ok(unverified(UnverifiedReason::OfflineNotDeclared));
-    }
+    // §25.6 lists its conditions without an order, and more than one can hold at
+    // once. Name a missing module before a missing `verify.offline`: a bundle that
+    // declares no solver is not gated because there is nothing to run, which is
+    // the condition a caller can act on.
     let (generator_wasm, solver_wasm) = match (input.generator, input.solver) {
         (Some(generator), Some(solver)) => (generator, solver),
         (None, _) => return Ok(unverified(UnverifiedReason::NoGenerator)),
         (_, None) => return Ok(unverified(UnverifiedReason::NoSolver)),
     };
+    if !input.offline_declared {
+        return Ok(unverified(UnverifiedReason::OfflineNotDeclared));
+    }
 
     let gate =
         determinism_gate(generator_wasm, input.seed, limits, 2).map_err(|source| GateError {

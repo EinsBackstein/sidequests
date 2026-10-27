@@ -920,26 +920,29 @@ fn run_gate(args: &RunArgs) -> ExitCode {
 
 /// Everything the §25 gate needs, resolved from an authoring document.
 ///
-/// Resolving is separated from running so `ctf run` and `ctf verify` cannot
-/// disagree about which document, modules, seed, and declarations a gate uses. The
-/// two commands differ only in what they do with a non-`passed` outcome.
+/// For `ctf run` every field comes from the document. `ctf verify` replaces the
+/// declarations with the bundle's, prefers the bundle's module sections, and keeps
+/// a document module only when the bundle declares it (see
+/// [`gate_record_for_bundle`]). Resolving is separated from running so the two
+/// commands cannot disagree about the seed, the derived flag, or which stages a
+/// gate names. They differ only in what they do with a non-`passed` outcome.
 struct GateSetup {
     /// The document's `id`, as authored. A gate record describes the bundle whose
     /// manifest must agree with this.
     doc_id: String,
     /// The document's `version`, likewise.
     doc_version: u64,
-    /// The generator module's bytes, when the document names one.
+    /// The generator module's bytes, when the gate has one.
     generator: Option<Vec<u8>>,
-    /// The solver module's bytes, when the document names one.
+    /// The solver module's bytes, when the gate has one.
     solver: Option<Vec<u8>>,
     /// The reference subject's seed (§22.2).
     seed: [u8; 32],
     /// The derived flag the solver must recover (§22.3).
     expected: String,
-    /// Whether the document declares `runtime`, which needs a live instance.
+    /// Whether the gate's manifest declares `runtime`, which needs a live instance.
     runtime_declared: bool,
-    /// Whether the document declares `verify.offline`.
+    /// Whether the gate's manifest declares `verify.offline`.
     offline_declared: bool,
 }
 
@@ -1037,6 +1040,14 @@ fn run_setup_gate(
 
 /// The §25.6 verification record for `bundle`, running the gate if the inputs allow.
 ///
+/// The gate describes **the bundle**. Its `runtime` and `verify.offline`
+/// declarations, and whether it declares a generator and a solver, are read from
+/// `bundle` itself (§25.6). The module bytes are the bundle's own sections when it
+/// carries them; otherwise they come from the authoring document, and only for a
+/// module the bundle actually declares. The document supplies the reference seed,
+/// the derived flag, and the id/version cross-check, and never the declarations
+/// that decide whether the gate may run.
+///
 /// A gate that cannot be constructed is `unverified` — the gate did not run, and
 /// rule S8 forbids reporting that as `passed`. A gate that runs but fails a stage
 /// outright is `failed`: the bundle is intact, but it is not publishable.
@@ -1059,7 +1070,7 @@ fn gate_record_for_bundle(
         runs: None,
     };
 
-    let setup = match load_gate_setup(challenge, subject, secret_hex) {
+    let mut setup = match load_gate_setup(challenge, subject, secret_hex) {
         Ok(s) => s,
         Err(e) => {
             // The artifact is stable and path-free (spec §25.6.1, S12): the detail
@@ -1081,6 +1092,67 @@ fn gate_record_for_bundle(
             setup.doc_id, setup.doc_version
         ));
     }
+
+    // Spec §25.6 decides `unverified` from what the **bundle** declares. Reading
+    // these from the verification document would let a bundle that declares
+    // `runtime`, or one that never asked for the offline gate, be reported as
+    // `passed` because the document the operator supplied happened to say
+    // otherwise.
+    setup.runtime_declared = bundle.manifest.declaration("runtime").is_some();
+    setup.offline_declared = bundle
+        .manifest
+        .declaration("verify")
+        .and_then(|verify| verify.get("offline"))
+        .is_some_and(|offline| matches!(offline, Value::Bool(true)));
+
+    // §25.6's "declares no generator or no solver" is a statement about the
+    // manifest's `generate.wasm` and `verify.solver` declarations (§7.6), not
+    // about whether `pack` emitted module sections — it never does. The document's
+    // module may fill in for a declaration the bundle makes; it must not resurrect
+    // one the bundle does not.
+    let declares_generator = bundle
+        .manifest
+        .declaration("generate")
+        .and_then(|generate| generate.get("wasm"))
+        .and_then(Value::as_text)
+        .is_some();
+    let declares_solver = bundle
+        .manifest
+        .declaration("verify")
+        .and_then(|verify| verify.get("solver"))
+        .and_then(Value::as_text)
+        .is_some();
+
+    // A bundle that carries the module is stricter than one that merely declares
+    // it: its own bytes are the ones §25.5 says to run, and they win over the
+    // document's path. A read error is `unverified` with a path-free reason (S12).
+    let document_generator = setup.generator.take();
+    setup.generator = match bundle_module(bundle, SectionKind::Generator) {
+        Ok(Some(bytes)) => Some(bytes),
+        Ok(None) if declares_generator => document_generator,
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("ctf: the offline gate could not run: {e}");
+            return unverified(
+                "the offline gate could not run: the bundle's generator section is unreadable"
+                    .to_owned(),
+            );
+        }
+    };
+    let document_solver = setup.solver.take();
+    setup.solver = match bundle_module(bundle, SectionKind::Solver) {
+        Ok(Some(bytes)) => Some(bytes),
+        Ok(None) if declares_solver => document_solver,
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("ctf: the offline gate could not run: {e}");
+            return unverified(
+                "the offline gate could not run: the bundle's solver section is unreadable"
+                    .to_owned(),
+            );
+        }
+    };
+
     match run_setup_gate(&setup) {
         Ok(report) => ctf_generator::VerificationRecord::from_report(id, version, subject, &report),
         Err(e) => {
@@ -1103,6 +1175,23 @@ fn gate_record_for_bundle(
             }
         }
     }
+}
+
+/// The bytes of `bundle`'s first section of `kind`, verified against its root.
+///
+/// `Ok(None)` means the bundle carries no such section, which is a §25.6 condition
+/// for `unverified`, not an error. `Err` means the section is present but this
+/// reading cannot hand out its plaintext — sealed, external, encrypted, or of a
+/// kind this build does not implement. The caller turns that into `unverified` and
+/// keeps the detail on stderr (rule S12).
+fn bundle_module(bundle: &Bundle<'_>, kind: SectionKind) -> Result<Option<Vec<u8>>, String> {
+    let Some(record) = bundle.sections.iter().find(|r| r.kind == kind) else {
+        return Ok(None);
+    };
+    bundle
+        .section_bytes(record)
+        .map(|bytes| Some(bytes.into_owned()))
+        .map_err(|e| format!("the bundle's {} section: {e}", kind_name(kind)))
 }
 
 /// `ctf verify`: the ingest checks plus, when asked, the offline gate, as one

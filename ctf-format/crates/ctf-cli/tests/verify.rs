@@ -408,6 +408,35 @@ fn gate_fixture(dir: &TempDir, tag: &str, solver_flag: &str) -> (String, String)
     (source, bundle)
 }
 
+/// Rebuild `packed` with a `generator` section, keeping its manifest.
+///
+/// `ctf pack` reserves module names but emits no module sections, so a bundle that
+/// carries one is the stricter case the gate must prefer. The generator's
+/// `name_id` is `1`, the name `pack` reserved for `generate.wasm`.
+fn with_generator_section(packed: &str, generator: &[u8]) -> Vec<u8> {
+    let file = std::fs::read(packed).unwrap();
+    let parsed = Bundle::parse(&file).unwrap();
+    let manifest = parsed
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .expect("a bundle has a manifest");
+    let manifest_bytes = parsed.section_bytes(manifest).unwrap().into_owned();
+    write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &manifest_bytes,
+            ),
+            SectionSpec::inline(SectionKind::Generator, 1, SectionFlags::empty(), generator),
+        ],
+    )
+    .unwrap()
+}
+
 /// A correct solver and a correct gate: `passed`, exit 0.
 #[test]
 fn a_passing_gate_is_passed_and_exits_zero() {
@@ -467,6 +496,149 @@ fn a_failing_gate_is_failed_and_exits_one() {
     assert!(
         !stdout.contains(&secret),
         "the event secret must never appear in the artifact:\n{stdout}"
+    );
+}
+
+/// §25.6 reads the declarations from the **bundle**. A bundle that declares
+/// `runtime` is `unverified` even when the document passed to `--challenge` omits
+/// it: before this fix, the document's silence could turn a live challenge into a
+/// false `passed`.
+#[test]
+fn a_bundle_declaring_runtime_is_unverified_even_when_the_document_omits_it() {
+    let dir = TempDir::new("bundle-runtime");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, _packed) = gate_fixture(&dir, "runtime", &expected);
+
+    // Pack a second bundle from the same document plus a schema-valid runtime map.
+    // The bundle therefore carries `runtime`; the verification document below does
+    // not.
+    let text = std::fs::read_to_string(&source).unwrap();
+    let digest = "1".repeat(64);
+    let packing = dir.path("runtime-declared.yaml");
+    std::fs::write(
+        &packing,
+        format!(
+            "{text}runtime:\n  image: \"ctf-fixture.invalid/gate@sha256:{digest}\"\n  \
+             ports: [{{ container: 80, protocol: tcp }}]\n  \
+             resources: {{ cpu: \"0.5\", memory: \"256Mi\", pids: 64 }}\n  \
+             instancing: per_team\n  ttl: 30m\n  \
+             readiness: {{ tcp: 80, timeout: 30s }}\n"
+        ),
+    )
+    .unwrap();
+    let bundle = dir.path("runtime-declared.ctf");
+    let (code, stdout, stderr) = run(&["pack", &packing, "--out", &bundle]);
+    assert_eq!(code, 0, "pack failed: {stdout}{stderr}");
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &source,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 2,
+        "a bundle that declares runtime is never passed:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "unverified");
+    assert_eq!(artifact["intact"], true);
+    assert_eq!(artifact["gate"]["status"], "unverified");
+    assert!(
+        artifact["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("runtime"),
+        "the runtime declaration is the reason: {artifact}"
+    );
+}
+
+/// §25.6's "declares no solver" is the bundle's `verify.solver` declaration, not a
+/// module the verification document happens to name. A bundle packed without a
+/// `verify` map has no solver declaration, so a full passing document cannot make
+/// it `passed`.
+#[test]
+fn a_bundle_that_declares_no_solver_is_unverified_even_when_the_document_does() {
+    let dir = TempDir::new("no-solver-declaration");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, _packed) = gate_fixture(&dir, "nosolver", &expected);
+
+    // Drop the whole `verify` map from the packing document; `generate` stays.
+    let text = std::fs::read_to_string(&source).unwrap();
+    let verify_at = text.find("verify:").expect("fixture declares verify");
+    let packing = dir.path("no-solver.yaml");
+    std::fs::write(&packing, &text[..verify_at]).unwrap();
+    let bundle = dir.path("no-solver.ctf");
+    let (code, stdout, stderr) = run(&["pack", &packing, "--out", &bundle]);
+    assert_eq!(code, 0, "pack failed: {stdout}{stderr}");
+
+    // The verification document is the full passing one, solver included.
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &source,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 2,
+        "a bundle that declares no solver is never passed:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "unverified");
+    assert_eq!(artifact["gate"]["status"], "unverified");
+    assert!(
+        artifact["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no solver"),
+        "the absent declaration is the reason: {artifact}"
+    );
+}
+
+/// §25.5 runs the modules *of the bundle* when it has them. A bundle that carries
+/// a `generator` section whose output block is unreadable is `failed` even when the
+/// document names a generator that would pass: the section wins over the path.
+#[test]
+fn a_bundle_generator_section_wins_over_the_documents_module() {
+    let dir = TempDir::new("section-wins");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, packed) = gate_fixture(&dir, "section-wins", &expected);
+
+    // A valid module returning a malformed output block: the determinism stage
+    // fails, which is `failed` (exit 1), not `passed`.
+    let wrong = generator_wasm(&[0xff; 4]);
+    let bytes = with_generator_section(&packed, &wrong);
+    let bundle = dir.path("section-wins.ctf");
+    std::fs::write(&bundle, &bytes).unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &source,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 1,
+        "the bundle's generator must be the one that runs:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "failed");
+    assert_eq!(artifact["gate"]["status"], "failed");
+    assert!(
+        artifact["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("determinism"),
+        "the failing stage is named: {artifact}"
     );
 }
 
