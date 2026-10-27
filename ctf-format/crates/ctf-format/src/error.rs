@@ -89,6 +89,14 @@ pub enum Error {
     /// A combination of fields that is individually well-formed but jointly
     /// meaningless or unsafe.
     Inconsistent { what: &'static str },
+    /// The operation would rewrite a file whose header carries an unimplemented
+    /// `feat_ro_compat` bit. Spec §4.4 makes the refusal automatic, and the refusal
+    /// is not advisory: a rewriter that does not understand the feature cannot
+    /// preserve what it added, and the commitment covers the whole file.
+    ///
+    /// `what` is static on purpose — a read-only bundle is otherwise valid, so there
+    /// is no attacker-controlled text to echo (§13).
+    ReadOnlyBundle { what: &'static str },
     /// The footer's `total_len` is not the file's real length. Either the file has
     /// bytes appended after its commitment — the classic archive-format ambiguity —
     /// or it was truncated.
@@ -253,6 +261,7 @@ impl fmt::Display for Error {
             }
             Self::BadChunkSize { got } => write!(f, "bad chunk_size {got}"),
             Self::Inconsistent { what } => write!(f, "inconsistent: {what}"),
+            Self::ReadOnlyBundle { what } => write!(f, "read-only bundle: {what}"),
             Self::BadTotalLen { declared, file_len } => write!(
                 f,
                 "footer declares total_len {declared}, file is {file_len} bytes"

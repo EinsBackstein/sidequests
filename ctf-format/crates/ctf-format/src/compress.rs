@@ -113,25 +113,75 @@ pub fn compress_frames(plain: &[u8], chunk_size: u32) -> Result<Vec<Vec<u8>>> {
 /// claims a modest output but whose blocks produce more.
 pub fn decompress(stored: &[u8], len_plain: u64) -> Result<Vec<u8>> {
     check_caps(len_plain, stored.len() as u64)?;
+    decompress_exact(stored, len_plain)
+}
 
-    // Deliberately not `with_capacity(len_plain)`: `len_plain` is capped at 64 GiB,
-    // which is far too large to reserve up front for a small input. Grow as the
-    // real output arrives, bounded by the `take` limit.
+/// Decompress one frame and require exactly `want` bytes, without applying D1/D2.
+///
+/// The per-frame half of [`decompress`]: the bounded read and the exact-length check
+/// are always right here, while the caps are the caller's to apply. That split exists
+/// because the caps are section-level (spec §5.4) — they compare the section's
+/// declared totals, not one chunk's share of them — and a caller that runs them per
+/// frame would both miss a bomb spread across chunks and reject a legal one.
+pub fn decompress_exact(stored: &[u8], want: u64) -> Result<Vec<u8>> {
+    // Deliberately not `with_capacity(want)`: `want` may be capped at 64 GiB, which
+    // is far too large to reserve up front for a small input. Grow as the real
+    // output arrives, bounded by the `take` limit.
     let mut out = Vec::new();
     let decoder =
         zstd::stream::read::Decoder::new(stored).map_err(|_| Error::DecompressionFailed)?;
     // `take` counts the *decompressed* bytes on the reader side.
-    let limit = len_plain.saturating_add(1);
+    let limit = want.saturating_add(1);
     decoder
         .take(limit)
         .read_to_end(&mut out)
         .map_err(|_| Error::DecompressionFailed)?;
 
-    if out.len() as u64 != len_plain {
+    if out.len() as u64 != want {
         return Err(Error::DecompressedLength {
             got: out.len() as u64,
-            want: len_plain,
+            want,
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// The per-frame half enforces the exact length and applies no cap. That is the
+    /// point of the split: the caller runs D1/D2 once, on the section's totals
+    /// (§5.4), rather than against each chunk's share of them.
+    #[test]
+    fn decompress_exact_checks_the_length_without_the_caps() {
+        let frame = compress(b"abcdef", 0).unwrap();
+        assert_eq!(decompress_exact(&frame, 6).unwrap(), b"abcdef");
+        assert!(matches!(
+            decompress_exact(&frame, 5),
+            Err(Error::DecompressedLength { got: 6, want: 5 })
+        ));
+
+        // A declaration above the absolute cap is not D1-refused here; it fails the
+        // exact-length check. `check_caps` is what refuses it before the decoder.
+        assert!(matches!(
+            decompress_exact(&frame, u64::MAX),
+            Err(Error::DecompressedLength { .. })
+        ));
+    }
+
+    /// [`decompress`] is still the capped entry point: it refuses before decoding.
+    #[test]
+    fn decompress_still_applies_the_caps() {
+        let frame = compress(b"abcdef", 0).unwrap();
+        assert!(
+            matches!(
+                decompress(&frame, u64::MAX),
+                Err(Error::CompressionOutputTooLarge { .. })
+            ),
+            "an over-cap declaration must be refused, not decoded"
+        );
+    }
 }

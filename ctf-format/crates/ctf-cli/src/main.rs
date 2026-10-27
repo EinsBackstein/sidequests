@@ -1536,6 +1536,16 @@ fn read_chain(path: &str) -> Result<EntitlementChain, Box<dyn std::error::Error>
 fn embed_entitlement(path: &str, chain: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let file = std::fs::read(path)?;
     let bundle = Bundle::parse(&file)?;
+    // Spec §4.4: a file with an ro_compat bit this build does not implement MUST NOT
+    // be rewritten. Checked before anything else because every branch below rewrites.
+    if !bundle.header.may_rewrite() {
+        return Err(
+            "refusing to rewrite a read-only bundle: its header sets an unimplemented \
+             `feat_ro_compat` bit, and an automatic rewrite of such a file is forbidden \
+             by spec §4.4"
+                .into(),
+        );
+    }
     if bundle.signing() != Signing::Unsigned {
         return Err(
             "refusing to rewrite a bundle that already carries signatures; a rewrite \
@@ -1716,6 +1726,18 @@ fn seal_section(
 
     let file = std::fs::read(path)?;
     let b = Bundle::parse(&file)?;
+
+    // Spec §4.4: rewriting a file whose header carries an ro_compat bit this build
+    // does not implement is forbidden, automatically. This comes before the
+    // already-signed check because it applies to unsigned files too.
+    if !b.header.may_rewrite() {
+        return Err(
+            "refusing to rewrite a read-only bundle: its header sets an unimplemented \
+             `feat_ro_compat` bit, and an automatic rewrite of such a file is forbidden \
+             by spec §4.4"
+                .into(),
+        );
+    }
 
     // A rewrite reproduces the header's suite and every other section byte-for-byte,
     // so it must not touch a file whose integrity depends on an existing signature,

@@ -12,11 +12,12 @@
 )]
 
 use ctf_format::{
-    Bundle, Error, FEAT_RO_COMPAT_CONTAINER_V1, Footer, HEADER_LEN, Header, HybridPublicKey,
-    HybridSigningKey, MAGIC, Manifest, Payload, RuleSet, SECTION_RECORD_LEN, SectionFlags,
-    SectionKind, SectionRecord, SectionSpec, Signing,
+    Bundle, Compression, Error, FEAT_RO_COMPAT_CONTAINER_V1, Footer, HEADER_LEN, Header,
+    HybridPublicKey, HybridSigningKey, MAGIC, Manifest, Payload, Recipient, RuleSet,
+    SECTION_RECORD_LEN, SectionFlags, SectionKind, SectionRecord, SectionSpec, Signing,
     cbor::Value,
     chunk::ChunkIndex,
+    compress,
     footer::{MAX_SIG_LEN, MIN_FOOTER_LEN, commitment_root, sig_input},
     section, sign_bundle, suite, write_bundle, write_signed_bundle,
 };
@@ -2515,4 +2516,154 @@ fn a_verify_report_discloses_chunk_indices() {
         with_index.verify_inline_sections().unwrap().chunk_indices,
         1
     );
+}
+
+// ---------------------------------------------------------------------------
+// Carried-but-not-understood sections, and the read-only rule (spec §4.4, §5.2)
+// ---------------------------------------------------------------------------
+
+/// A bundle whose second section has a kind this build does not implement. The kind
+/// is necessarily `OPTIONAL`, which is what lets the file parse at all (§5.3).
+fn unknown_kind_bundle(comp: Compression) -> Vec<u8> {
+    let manifest = Manifest::build("future", "Future", &["manifest", "future"], Vec::new())
+        .unwrap()
+        .encode()
+        .unwrap();
+    let mut future = SectionSpec::inline(
+        SectionKind::unknown(9).unwrap(),
+        1,
+        SectionFlags(SectionFlags::OPTIONAL),
+        b"a section from a newer format",
+    );
+    future.comp = comp;
+    write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            future,
+        ],
+    )
+    .unwrap()
+}
+
+/// Spec §5.2 and §10: hashing an unknown kind's stored bytes is allowed, decompressing
+/// them is not. So `comp = 0` verifies against its root, while `comp = 1` is reported
+/// as unverifiable rather than decoded — its plaintext is out of reach without doing
+/// the one thing the reader must not do.
+#[test]
+fn an_unknown_section_is_hashed_but_never_decompressed() {
+    let plain_bytes = unknown_kind_bundle(Compression::None);
+    let plain = Bundle::parse(&plain_bytes).unwrap();
+    let report = plain.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 2, "both sections hash to their roots");
+    assert_eq!(report.unverifiable, 0);
+
+    let compressed_bytes = unknown_kind_bundle(Compression::Zstd);
+    let compressed = Bundle::parse(&compressed_bytes).unwrap();
+    let report = compressed.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 1, "only the manifest is decoded");
+    assert_eq!(
+        report.unverifiable, 1,
+        "an unknown kind with comp = 1 is never decompressed"
+    );
+    // And it is not servable, however well it verifies (§5.2).
+    assert!(
+        compressed
+            .section_bytes(compressed.section(1).unwrap())
+            .is_err()
+    );
+}
+
+/// Spec §4.4: a `feat_ro_compat` bit this build does not implement makes the file
+/// read-only, and signing counts as a rewrite. The vector is unsigned, so the
+/// already-signed refusal cannot be what produces the error.
+#[test]
+fn signing_a_read_only_bundle_is_refused() {
+    let file = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spec/vectors/conformance/future/ro-compat-bit.ctf"
+    ))
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    assert_eq!(b.signing(), Signing::Unsigned);
+    assert!(!b.header.may_rewrite());
+
+    let (sk, pk) = signing_keypair();
+    assert!(matches!(
+        sign_bundle(&file, &sk, &pk),
+        Err(Error::ReadOnlyBundle { .. })
+    ));
+}
+
+/// D1 and D2 are section-level (spec §5.4): they compare the section's declared
+/// `len_plain` and `len_stored`, not one chunk's share, and they run before any
+/// chunk is authenticated or decoded. That is what makes a violating declaration
+/// refusable without the content key.
+///
+/// The file here is writer-produced and therefore legal; the violating declaration
+/// is local, because no writer can be made to emit one.
+#[test]
+fn encrypted_compressed_caps_are_evaluated_on_the_section_totals() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "capped",
+        "Capped",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let plaintext = vec![0x41u8; 20_000];
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let mut secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        &plaintext,
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    secret.comp = Compression::Zstd;
+
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            SectionSpec::envelopes(SectionKind::Keys, 2),
+        ],
+    )
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    assert_eq!(record.comp, Compression::Zstd);
+    assert_eq!(record.enc, ctf_format::Encryption::AeadStream);
+    assert!(
+        record.len_plain > u64::from(record.chunk_size),
+        "the section spans several chunks, so its totals and a chunk's differ"
+    );
+
+    // Exactly the check `decrypt_section_bytes` runs before it slices or decrypts.
+    compress::check_caps(record.len_plain, record.len_stored).unwrap();
+
+    // A declaration D2 would refuse is refused with no key at all: the caps are
+    // evaluated on the section totals first, not per chunk after decryption.
+    let inflated = record
+        .len_stored
+        .saturating_mul(compress::MAX_DECOMPRESSION_RATIO)
+        .saturating_add(1);
+    assert!(matches!(
+        compress::check_caps(inflated, record.len_stored),
+        Err(Error::CompressionRatioExceeded { .. })
+    ));
+
+    // The same section still decrypts and verifies when the declaration is honest.
+    let key = b
+        .section_content_key(&record, &recipient.secret_key, "seal")
+        .unwrap();
+    assert_eq!(b.decrypt_section_bytes(&record, &key).unwrap(), plaintext);
 }

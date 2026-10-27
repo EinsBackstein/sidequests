@@ -131,3 +131,40 @@ fn an_artifact_verifies_against_its_size_and_root() {
     assert!(!a.verify(b"the public artifact "));
     assert!(!a.verify(b"the public art"));
 }
+
+/// Spec §5.2 and §28: `PLAYER_VISIBLE` on a kind the reader does not implement
+/// "confers nothing", so the manifest must omit it even though the bit is set and
+/// the stored bytes verify against their root.
+#[test]
+fn an_unknown_kind_is_never_served_even_when_player_visible() {
+    let manifest = Manifest::build("future", "Future", &["manifest", "future"], Vec::new())
+        .unwrap()
+        .encode()
+        .unwrap();
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::unknown(9).unwrap(),
+                1,
+                SectionFlags(SectionFlags::OPTIONAL | SectionFlags::PLAYER_VISIBLE),
+                b"bytes a future reader would serve",
+            ),
+        ],
+    )
+    .unwrap();
+
+    let bundle = ctf_format::Bundle::parse(&file).unwrap();
+    assert!(
+        bundle.sections[1]
+            .flags
+            .contains(SectionFlags::PLAYER_VISIBLE)
+    );
+    let serving = ServingManifest::from_bundle(&bundle);
+    assert!(
+        serving.artifact(1).is_none(),
+        "an unknown kind confers nothing on this reader"
+    );
+    assert!(serve(&bundle, 1).is_err());
+}
