@@ -1056,6 +1056,12 @@ fn a_declared_module_with_a_missing_document_file_is_unverified() {
     assert_eq!(artifact["status"], "unverified");
     assert_eq!(artifact["gate"]["status"], "unverified");
     let reason = artifact["reason"].as_str().unwrap_or_default();
+    // The deferred read produces its own fixed sentence; an eager read failed with
+    // the generic "authoring inputs were rejected" instead, so this pins the fix.
+    assert!(
+        reason.contains("authoring document's generator module could not be read"),
+        "the document module is read on demand: {artifact}"
+    );
     assert!(
         !reason.contains("missing-generator.wasm"),
         "the reason is path-free: {artifact}"

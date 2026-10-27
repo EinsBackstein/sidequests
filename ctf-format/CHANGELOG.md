@@ -16,15 +16,19 @@ transcript moved.
 
 ### Fixed — the bundle owns its gate
 
-- **A document's module files can no longer decide a bundle's verdict.**
+- **A document's module files can no longer veto a bundle's own module section.**
   `load_gate_setup_inner` now distinguishes `DeclarationSource::Document` from
   `DeclarationSource::Bundle`; in bundle mode it records the module *names* and
   reads no file. `apply_bundle_declarations` resolves each module as bundle section
-  bytes first, then the deferred document file only when the bundle declares that
-  module and carries no section, and an unreadable deferred file is `unverified`
-  with a fixed, path-free reason (§25.6, S8, S12). Previously a self-contained
-  bundle could be reported `unverified` — or leave `ctf run --bundle` with no record
-  — because the authoring document named a module file that was absent.
+  bytes first, so a bundle carrying a `generator` section is gated on its own bytes
+  even when the document names a missing file; a carried `solver` section remains
+  `unverified` because R6/R21 force it sealed and this build holds no key. A module
+  resolved from the document is still read when the bundle declares it and carries
+  no section, where the document legitimately supplies the bytes (§25.6); an
+  unreadable file is `unverified` with a fixed, path-free reason (S8, S12).
+  Previously a self-contained bundle could be reported `unverified` — or leave
+  `ctf run --bundle` with no record — because the authoring document named a
+  module file that was absent.
 - **A present non-integer `generate.interface`/`generate.profile` is `unverified`.**
   `bundle_declared_version` distinguishes absent (still `1`) from present-but-not-a-
   non-negative-integer; reading the latter as absent would run the module at version
@@ -34,10 +38,10 @@ transcript moved.
   for an `EXTERNAL` record with `enc != None`: `Bundle::parse` returns
   `LegacyContainer` for a pre-`CONTAINER_V1` file and R22 rejects the combination on
   every parsed bundle, so the guard could never fire. Nothing observable changes.
-- New tests pin the three cases: a self-contained bundle whose document names
-  missing module files still passes, a declared module with a missing document file
-  is `unverified` with a path-free reason, and a text-valued `generate.interface` is
-  `unverified` rather than `passed`.
+- New tests pin the three cases: a bundle carrying its own generator section still
+  passes when the document names a missing generator file; a declared module with a
+  missing document file is `unverified` with a path-free reason; and a text-valued
+  `generate.interface` is `unverified` rather than `passed`.
 
 ### Docs — release metadata
 
@@ -93,11 +97,12 @@ implied or fixes an internal inconsistency, so no feature bit is spent (§15).
 
 - **`ctf verify` reads the declarations the bundle makes.** `runtime`,
   `verify.offline`, `generate.wasm`, and `verify.solver` come from the bundle's
-  manifest, not the authoring document (§25.6). A bundle that carries a
-  `generator`/`solver` section is gated on that section's bytes; otherwise the
-  document's module is used only for a module the bundle declares, so a document can
-  no longer resurrect a declaration the bundle omits. `ctf run` without `--bundle`
-  stays document-only.
+  manifest, not the authoring document (§25.6). A bundle that carries a `generator`
+  section is gated on that section's bytes; a carried `solver` section is
+  `unverified` because R6/R21 force it sealed and this build holds no key. Otherwise
+  the document's module is used only for a module the bundle declares, so a document
+  can no longer resurrect a declaration the bundle omits. `ctf run` without
+  `--bundle` stays document-only.
 - **G6/G7 are enforced.** An unimplemented `generate.interface` or
   `generate.profile` is refused before a module runs: `ctf verify` reports
   `unverified` naming the version; `ctf run` fails with it unless `--bundle` supplies
