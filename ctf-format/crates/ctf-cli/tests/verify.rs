@@ -1104,6 +1104,86 @@ fn a_generator_section_under_another_name_is_not_gated() {
     );
 }
 
+/// The positive half of the same rule: when the bundle carries the declared
+/// generator *and* a decoy under another name, the declaration chooses between
+/// them. The decoy is first in the table and is not a valid module, so picking it
+/// fails the gate; the declared section is the correct generator.
+#[test]
+fn the_declared_generator_wins_over_a_decoy_section() {
+    let dir = TempDir::new("decoy-and-declared");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, packed) = gate_fixture(&dir, "declared", &expected);
+
+    let block = generator_block(&expected, &[("artifact.bin", b"artifact bytes")]);
+    let file = std::fs::read(&packed).unwrap();
+    let parsed = Bundle::parse(&file).unwrap();
+    let manifest = parsed
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .expect("a bundle has a manifest");
+    let manifest_bytes = parsed.section_bytes(manifest).unwrap().into_owned();
+    let declared_id = declared_name_id(&manifest_bytes, "generate", "wasm");
+    let decoy_id = {
+        let value = Value::decode(&manifest_bytes).unwrap();
+        let names = value
+            .get("names")
+            .and_then(Value::as_array)
+            .expect("a manifest has a name table");
+        let index = names
+            .iter()
+            .position(|name| name.as_text() == Some("artifact.bin"))
+            .expect("the fixture's output is a reserved name");
+        u16::try_from(index).unwrap()
+    };
+    let generator = generator_wasm(&block);
+    let specs = vec![
+        SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &manifest_bytes,
+        ),
+        SectionSpec::inline(
+            SectionKind::Generator,
+            decoy_id,
+            SectionFlags::empty(),
+            b"not a wasm module",
+        ),
+        SectionSpec::inline(
+            SectionKind::Generator,
+            declared_id,
+            SectionFlags::empty(),
+            &generator,
+        ),
+    ];
+    let bundle = dir.path("declared.ctf");
+    std::fs::write(&bundle, write_bundle(1, &specs).unwrap()).unwrap();
+
+    let document = dir.path("declared-missing.yaml");
+    let text = std::fs::read_to_string(&source)
+        .unwrap()
+        .replace("declared-gen.wasm", "missing-generator.wasm");
+    std::fs::write(&document, text).unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &document,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 0,
+        "the declared generator is the one that runs:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "passed");
+    assert_eq!(artifact["gate"]["status"], "passed");
+}
+
 /// A bundle that declares `generate.wasm` without carrying the section is gated on
 /// the authoring document's module (§25.6.1). When that file is absent the gate did
 /// not run: `unverified`, exit 2, with a path-free reason (S12).

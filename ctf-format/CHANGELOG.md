@@ -27,6 +27,14 @@ header, section, footer, commitment root, or signature transcript moved.
 - New test `a_generator_section_under_another_name_is_not_gated` carries a correct
   generator under an unrelated `names` entry while the document names a missing
   file: the gate must be `unverified`, not `passed`.
+- New test `the_declared_generator_wins_over_a_decoy_section` carries an invalid
+  decoy first and the declared generator second: only the declared one is run.
+
+### Spec — clarification
+
+- **§25.6:** a `solver` section is `SEALED` (R6) and therefore encrypted (R21), so a
+  gate that holds no key for it cannot run and is `unverified`. This states what the
+  status table already implied; the reference implementation holds no solver key.
 
 ## [0.13.2] — 2026-10-27
 
