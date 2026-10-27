@@ -26,7 +26,7 @@ and §25.6/§25.6.1 fix the gate's record and the ingest artifact. Release **0.1
 is a post-release audit round (PRs #114–#118): every reader path that still
 disagreed with §4.4, §5.2, §5.4, §7.6, §10, §18, §23, §24, §25, or §34 was fixed,
 with no byte layout moved and both goldens unchanged. Release **0.13.2** closes the
-last gate-input path — a bundle that carries its own generator section is no longer
+document-veto path — a bundle that carries its own generator section is no longer
 vetoed by a document naming a missing module file (a carried solver section stays
 `unverified`, since R6/R21 force it sealed) — and a present non-integer
 `generate.interface`/`generate.profile` is `unverified` rather than run as `1`, with

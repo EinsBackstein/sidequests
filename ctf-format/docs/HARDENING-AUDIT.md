@@ -114,8 +114,8 @@ Adding `-rss_limit_mb` to CI is part of the phase-8 "Fuzzing in CI" item
 ### Scope
 
 This audit reflects the tree at release 0.13.3; the post-0.13.0 audit rounds
-(#114–#118, then the 0.13.2 and 0.13.3 gate corrections) changed reader behaviour,
-not any invariant this checklist tracks. It
+(#114–#118) changed reader behaviour, and the 0.13.2/0.13.3 gate corrections changed
+CLI gate resolution, not any invariant this checklist tracks. It
 records gaps as tickets; no code was changed. Trailing-byte rejection, the CBOR
 depth cap, the zstd caps, and the `VerifiedChunkIndex` type were all confirmed
 against their implementations and tests, not against the design text.
