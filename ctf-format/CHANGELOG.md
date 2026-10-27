@@ -7,6 +7,53 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.8] — 2026-10-28
+
+Independent-implementation and validation-scope corrections. **No byte-layout
+change:** `version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf`
+4344 B, `demo.ctf` 18328 B), and no header, section, footer, commitment root, or
+signature transcript moved.
+
+### Fixed — the Go STREAM implementation now matches §20.2
+
+- **An empty `comp = 0` plaintext is zero chunks.** Go's `SealStream` forced
+  `count < 1` to one chunk, while the reference writer (and `ceil(len_plain /
+  chunk_size)`) produces a zero-byte body. The two writers therefore disagreed, and
+  each rejected the other's empty body. Go now seals no chunk and accepts an empty
+  body only when `len_plain = 0`.
+- **`OpenStream` validates the chunk division.** It now checks `chunk_size` is a
+  legal power of two in range (R14), that the body's chunk count equals
+  `ceil(len_plain / chunk_size)`, and that each chunk decrypts to exactly
+  `min(chunk_size, len_plain − i × chunk_size)` bytes. Previously a body sealed as
+  one 8 KiB chunk opened successfully while declaring 4 KiB chunks; the reference
+  reader rejected it, so the two disagreed on accept.
+
+`TestAEADStreamEmptyAndChunkDivision` pins the empty case, the count mismatch, an
+oversized chunk, an illegal `chunk_size`, and a non-divisible plaintext that ends in
+a short final chunk. §20.2 now states the exact per-chunk plaintext length for
+`comp = 0`, which both readers already enforced.
+
+### Clarified — what "validating a chain" means
+
+- §18.4 now scopes its rules to a reader **of the chain** — one that decodes an
+  `entitlement` section's plaintext as entitlement records — and states that E1–E8
+  run wherever that decoding happens (`ctf transfer` and the validators in
+  `entitlement.rs`). A pass that only hashes a section's bytes has not read the chain
+  and must not be described as having validated one. `ctf verify` is such a pass by
+  design and still reports a kind-6 section only against its `root`.
+
+### Documentation
+
+- `docs/ROADMAP.md`: the phase-8 hardening item now records that both gaps it left
+  open (the entitlement fuzz target and the Go implementation) landed in 0.13.0, and
+  the `wasmi` cross-check box reflects the shipped 0.10.0 work.
+- `docs/HARDENING-AUDIT.md`: the `-rss_limit_mb` note no longer points at a ROADMAP
+  line that no longer says what it claimed.
+- `HANDOFF.md`: the solver gate, `ctf pack` path emission, and phase-1 signature
+  verification are marked superseded with the release that shipped them, and the
+  `ctf verify` entitlement-chain boundary is stated as intended behaviour rather
+  than an undeclared gap.
+
 ## [0.13.7] — 2026-10-27
 
 Writer and record-definition corrections. **No byte-layout change:**

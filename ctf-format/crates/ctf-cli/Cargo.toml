@@ -1,6 +1,6 @@
 [package]
 name = "ctf-cli"
-version = "0.13.7"
+version = "0.13.8"
 description = "The `ctf` command-line tool for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true

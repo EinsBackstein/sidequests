@@ -13,7 +13,7 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.7. Phases 1–4
+**Last updated:** 2026-10-28, at format version 0.3 / release 0.13.8. Phases 1–4
 complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
 `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
 49/50, 35 fixtures in `spec/vectors/conformance/`), the **independent Go
@@ -40,7 +40,7 @@ record boundary 0.13.4 overgeneralised: `ctf run` writes no record when it canno
 a gate outcome (unreadable inputs, a mismatched document, an invalid document, an
 unusable secret), writes `unverified` when it identifies the bundle but a declaration
 leaves the gate unrunnable, and refuses a bare document's own unrunnable declarations
-without a record. Release **0.13.7** fixes two `write_bundle` paths that emitted `comp = 1` sections their own reader rejected, and states in §25.6/§25.6.1 what `ctf verify` records when a requested gate cannot run. Release 0.13.6 aligned the Go CBOR depth cap with the reference, defined the M1h count in §7.1, and repaired the corpus vectors that were meant to prove §5.4's `OPTIONAL` rule. The live gate is
+without a record. Release **0.13.8** aligns Go's `SealStream`/`OpenStream` with §20.2 (zero chunks for an empty plaintext; validate chunk size, chunk count, and per-chunk lengths), states in §18.4 that hashing a section is not reading its chain, and brings the ROADMAP, hardening audit, and this file in line with the shipped tree. Release **0.13.7** fixes two `write_bundle` paths that emitted `comp = 1` sections their own reader rejected, and states in §25.6/§25.6.1 what `ctf verify` records when a requested gate cannot run. Release 0.13.6 aligned the Go CBOR depth cap with the reference, defined the M1h count in §7.1, and repaired the corpus vectors that were meant to prove §5.4's `OPTIONAL` rule. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 
@@ -218,6 +218,14 @@ is deliberately no API that reports a bundle as authentic.
 > else's, and that step does not exist yet, so nothing downstream may consume this
 > crate as an authentication boundary today.
 
+**Superseded 2026-10-27 (0.6.0–0.7.0):** the step now exists —
+`Bundle::verify_signatures` returns `Authentication` only when both hybrid
+components verify, and `sign_bundle` writes the footer (§20.3). The type-level
+distinction above is unchanged and still the rule: parsing reports
+`Signing::Present`, never "valid", so a consumer must call `verify_signatures` with
+the trusted key it already has (§34). `ctf verify` does not take such a key and so
+reports the footer as present or absent, not as authentic.
+
 Implemented since 0.6.0 (spec §20): the hybrid KEM combiner (X25519 + ML-KEM-768),
 the AEAD-STREAM construction (AES-256-GCM and XChaCha20-Poly1305), and hybrid
 signature verification (Ed25519 + ML-DSA-65, both required). `Authentication` is a
@@ -234,12 +242,15 @@ carries the rule, never the flag), and **`ctf pack`** (`pack.rs`, ticket 35), wi
 
 Not implemented: key distribution and the live gate. The generator now **is**
 implemented (0.10.0): `ctf-generator` runs a capability-free module under profile 1
-and the determinism gate, with a `wasmi` cross-check. The solver gate (phase 4) is
-not: nothing yet runs `solver.wasm` against generated artifacts.
+and the determinism gate, with a `wasmi` cross-check.
 The writer now emits `enc = 1` for an encrypted section — compress, then encrypt —
 as well as `comp = 1` zstd sections; the reader enforces an absolute output cap and
 an expansion-ratio cap before running the decoder (spec §5.4, D1–D2), and a
 `comp = 1` + `enc = 1` body seals one zstd frame per STREAM chunk.
+
+**Superseded 2026-10-27 (0.11.0):** the solver gate landed — `gate::offline_gate`
+runs the generator at the reference seed, feeds its artifacts to `solver.wasm` in
+the same sandbox, and compares the recovered flag with the derived one (§25.5).
 
 Implemented since 0.8.0: **encrypted sections end to end** (ticket 16; the writer
 seals, wraps the content key in a per-recipient envelope in the `keys` section, and
@@ -247,6 +258,15 @@ a key holder can recover and verify the plaintext), the **entitlement chain** E1
 (ticket 39, `entitlement.rs`), **stage gating** (tickets 45–47, `flag.stage_gate`),
 `ctf keys`/`seal`/`unseal` (ticket 18), and the **`clap`** CLI with completions and
 integration tests (tickets 37, 83).
+
+**Where E1–E8 run.** Parsing the chain is what a reader must validate, so the rules
+run on the paths that parse it: `EntitlementChain::from_bytes` (and therefore
+`ctf transfer`, which decodes, appends, and re-embeds a chain) and the offline
+validators in `entitlement.rs`. `ctf verify` is a hash-and-account pass, not a chain
+reader: it reports a kind-6 section's bytes against their `root` and never decodes
+the records, so it cannot and does not report a chain as structurally valid. E9
+additionally needs the trusted key, exactly as §18.4 states. This is the same
+boundary §18.4 now states normatively, not an undeclared gap.
 
 **The envelope gained a `name_id` (spec §21.3, EN5)** — the identity of the section
 whose content key it wraps — so one `keys` section serves every encrypted section.
@@ -257,13 +277,16 @@ Implemented since 0.9.0: the last of the post-fix review tickets. The one normat
 addition is the optional **`paths`** manifest key (spec §7.2, M22–M25), which
 represents a directory tree without widening `names`: a relative POSIX path per
 `name_id`, checked component-by-component so `.`, `..`, an absolute path, and a `\`
-are unrepresentable. `ctf pack` does not emit it yet — that is phase 3 — but
-`Manifest::path_of` exposes it. Everything else is diagnostic or test work: a
+are unrepresentable. `Manifest::path_of` exposes it. Everything else is diagnostic or test work: a
 section root mismatch names its `name_id` and the verify pass reports every
 mismatch; `crit` errors carry an entry index; `ExceedsFile` reports the real file
 length; a pre-0.3 file is diagnosed as an older format; errors no longer echo input
 bytes; and `ctf inspect` prints each section's full name. No byte-layout change and
 no feature bit.
+
+**Superseded 2026-10-27 (0.13.0):** `ctf pack` now emits `paths` — and lists it in
+`crit` — for any authoring entry that names one (ticket 88). A document with no
+paths still packs byte-for-byte as before.
 
 Implemented since 0.10.0: **the generator** (spec §23, `ctf-generator`) — a core
 WebAssembly module with no imports, run under a pinned profile (relaxed-SIMD
