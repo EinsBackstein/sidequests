@@ -355,3 +355,50 @@ fn the_new_subcommands_are_discoverable() {
         assert_eq!(code, 0, "`{cmd} --help` must succeed:\n{err}");
     }
 }
+
+/// Spec §4.4: `ctf seal` rewrites the bundle, so a header carrying an unimplemented
+/// `feat_ro_compat` bit must be refused before anything reaches the output path.
+#[test]
+fn seal_refuses_a_read_only_bundle_and_writes_nothing() {
+    let dir = TempDir::new("read-only");
+    let key = dir.path("seal.key");
+    let public = dir.path("seal.pub");
+    let (ok, _out, err) = run(&[
+        "keys",
+        "--context",
+        "seal",
+        "--out-key",
+        &key,
+        "--out-pub",
+        &public,
+    ]);
+    assert!(ok, "keys failed: {err}");
+
+    let vector = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../spec/vectors/conformance/future/ro-compat-bit.ctf"
+    );
+    let out = dir.path("sealed.ctf");
+    let (code, _stdout, err) = run_status(&[
+        "seal",
+        vector,
+        "--pub",
+        &public,
+        "--context",
+        "seal",
+        "--section",
+        "manifest",
+        "--out",
+        &out,
+    ]);
+    assert_eq!(code, 1, "a read-only bundle must be refused: {err}");
+    assert!(
+        err.contains("read-only"),
+        "the error names the read-only header bit: {err}"
+    );
+    assert!(err.contains("4.4"), "the error names §4.4: {err}");
+    assert!(
+        !std::path::Path::new(&out).exists(),
+        "a refused seal must write no output"
+    );
+}

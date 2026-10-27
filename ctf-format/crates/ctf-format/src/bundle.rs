@@ -318,6 +318,11 @@ impl<'a> Bundle<'a> {
     /// authenticates, the last carries the final flag), `comp = 1` frames are
     /// decompressed to their declared chunk lengths, and the result is hashed against
     /// `root` before it is returned.
+    ///
+    /// D1 and D2 (spec §5.4) are applied to the section's declared `len_plain` and
+    /// `len_stored` **before** the first chunk is decrypted or decompressed. They are
+    /// section-level rules, not per-chunk ones: a bomb can be spread across chunks,
+    /// and the declared totals are what the section table commits to.
     pub fn decrypt_section_bytes(
         &self,
         record: &SectionRecord,
@@ -338,6 +343,12 @@ impl<'a> Bundle<'a> {
             return Err(Error::Inconsistent {
                 what: "section is not encrypted",
             });
+        }
+        // Spec §10: D1/D2 must be applied to a `comp = 1` section before invoking a
+        // decompressor. Checking the declared totals here means the refusal needs no
+        // key and happens before any chunk is authenticated.
+        if record.comp == Compression::Zstd {
+            compress::check_caps(record.len_plain, record.len_stored)?;
         }
         let suite = crate::suite::suite(self.header.suite_id)?;
         let aead = suite.aead()?;
@@ -378,7 +389,9 @@ impl<'a> Bundle<'a> {
                 Compression::Zstd => {
                     // One zstd frame per chunk (spec §5.4, §20.2): frame *i* MUST
                     // decompress to exactly `min(chunk_size, len_plain − i·chunk_size)`.
-                    plain.extend_from_slice(&compress::decompress(frame, want)?);
+                    // Caps were applied to the section totals above, so this is the
+                    // exact-length half only.
+                    plain.extend_from_slice(&compress::decompress_exact(frame, want)?);
                 }
             }
         }
@@ -401,6 +414,11 @@ impl<'a> Bundle<'a> {
     /// [`compress::check_caps`] run before the decoder, so verifying untrusted input
     /// is safe. Only an *encrypted* section is unverifiable by this build.
     ///
+    /// An unknown-kind section is hashed but never decompressed (spec §5.2, §10):
+    /// hashing is permitted, decompression is not. So `comp = 0` is verified against
+    /// its root, while `comp = 1` is counted as unverifiable — its plaintext cannot
+    /// be reached without doing the one thing the reader must not do.
+    ///
     /// Returns a [`VerifyReport`] rather than a count, because a count cannot
     /// distinguish "checked everything" from "checked what I could". See that
     /// type for why the difference is the whole point.
@@ -422,6 +440,12 @@ impl<'a> Bundle<'a> {
                 continue;
             }
             if r.enc != crate::Encryption::None {
+                report.unverifiable += 1;
+                continue;
+            }
+            // Spec §10 forbids decompressing a kind this build does not implement.
+            // Hashing its stored bytes is still allowed, so only the codec is skipped.
+            if !r.kind.is_known() && r.comp != Compression::None {
                 report.unverifiable += 1;
                 continue;
             }
@@ -451,9 +475,15 @@ impl<'a> Bundle<'a> {
     /// is still bounds-checked, still overlap-checked, and still committed; checking
     /// that the commitment actually holds is the follow-through, not a violation.
     ///
-    /// Consequence: [`Bundle::verify_inline_sections`] verifies unknown-kind
-    /// sections and counts them as verified, while [`Bundle::section_bytes`] refuses
-    /// to hand them to a caller.
+    /// Hashing a `comp = 1` unknown-kind section would require decompressing it, so
+    /// this function must not be called for one; [`Bundle::verify_inline_sections`]
+    /// counts it as unverifiable instead. Callers here are the manifest and
+    /// [`Bundle::section_bytes`], both of which have already refused every kind this
+    /// build does not implement.
+    ///
+    /// Consequence: [`Bundle::verify_inline_sections`] verifies uncompressed
+    /// unknown-kind sections and counts them as verified, while
+    /// [`Bundle::section_bytes`] refuses to hand them to a caller.
     fn verified_bytes(file: &'a [u8], record: &SectionRecord) -> Result<Cow<'a, [u8]>> {
         if record.flags.contains(SectionFlags::EXTERNAL) {
             return Err(Error::Inconsistent {
@@ -463,6 +493,14 @@ impl<'a> Bundle<'a> {
         if record.enc != crate::Encryption::None {
             return Err(Error::Inconsistent {
                 what: "encrypted sections are not readable in this version",
+            });
+        }
+        // Spec §10: never decompress a kind this build does not implement. The
+        // guard is here as well as in the caller so the rule cannot be lost by a
+        // future call site that forgets to check the kind first.
+        if !record.kind.is_known() && record.comp != Compression::None {
+            return Err(Error::Inconsistent {
+                what: "a compressed section of a kind this build does not implement is not decompressed",
             });
         }
         let end = record
@@ -1049,12 +1087,21 @@ fn encrypt_section(
 /// An already-signed bundle is rejected rather than re-signed: re-signing would have
 /// to strip the old signatures first, and a caller who wants that is really asking
 /// for a rewrite, which spec §4.4 governs.
+///
+/// The same rule refuses a file whose `feat_ro_compat` carries a bit this build does
+/// not implement: signing is a rewrite, and an unimplemented feature's bytes cannot be
+/// preserved. The refusal is automatic, not left to the operator (§4.4).
 pub fn sign_bundle(
     file: &[u8],
     signing_key: &HybridSigningKey,
     public_key: &HybridPublicKey,
 ) -> Result<Vec<u8>> {
     let bundle = Bundle::parse(file)?;
+    if !bundle.header.may_rewrite() {
+        return Err(Error::ReadOnlyBundle {
+            what: "signing would rewrite a header carrying an unimplemented feat_ro_compat bit",
+        });
+    }
     if bundle.signing() != Signing::Unsigned {
         return Err(Error::Inconsistent {
             what: "bundle already carries signatures",

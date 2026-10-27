@@ -99,11 +99,21 @@ pub struct ServingManifest {
 
 impl ServingManifest {
     /// Project a parsed bundle's serving surface.
+    ///
+    /// An unknown kind is omitted even when `PLAYER_VISIBLE` is set: the flag is a
+    /// statement about readers that understand the kind, and it confers nothing on
+    /// one that does not (spec §5.2, §28). The container also refuses to serve such
+    /// a section through [`Bundle::section_bytes`], so the manifest and the bytes
+    /// agree about what exists.
     pub fn from_bundle(bundle: &Bundle<'_>) -> Self {
         let artifacts = bundle
             .sections
             .iter()
-            .filter(|r| r.flags.contains(SectionFlags::PLAYER_VISIBLE) && !r.flags.sealed())
+            .filter(|r| {
+                r.kind.is_known()
+                    && r.flags.contains(SectionFlags::PLAYER_VISIBLE)
+                    && !r.flags.sealed()
+            })
             .map(|r| {
                 let external = r.flags.contains(SectionFlags::EXTERNAL);
                 ServedArtifact {
