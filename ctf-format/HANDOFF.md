@@ -13,11 +13,11 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.5. Phases 1–4
+**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.6. Phases 1–4
 complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
 `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
-49/50, 34 fixtures in `spec/vectors/conformance/`), the **independent Go
-implementation** (tickets 53/54, `go/`, byte-identical on both goldens and 34/34
+49/50, 35 fixtures in `spec/vectors/conformance/`), the **independent Go
+implementation** (tickets 53/54, `go/`, byte-identical on both goldens and 35/35
 fixtures), the **rerunnable ingest artifact** (ticket 64, `ctf verify`, spec
 §25.6.1), **`ctf pack` path emission** (ticket 88), and **fuzzing in CI with the
 entitlement target** (tickets 51/107). **The specification has no gaps** (ticket
@@ -40,7 +40,7 @@ record boundary 0.13.4 overgeneralised: `ctf run` writes no record when it canno
 a gate outcome (unreadable inputs, a mismatched document, an invalid document, an
 unusable secret), writes `unverified` when it identifies the bundle but a declaration
 leaves the gate unrunnable, and refuses a bare document's own unrunnable declarations
-without a record. No runtime code changed. The live gate is
+without a record. No runtime code changed. Release **0.13.6** aligns the Go CBOR depth cap with the reference, defines the M1h count in §7.1, and repairs the corpus vectors that were meant to prove §5.4's `OPTIONAL` rule. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 
@@ -95,7 +95,7 @@ ctf-format/
                         (clap); `src/verify.rs` is the §25.6.1 ingest artifact
   go/                   independent second implementation (tickets 53/54), written
                         from `spec/SPEC.md` alone: read path, byte-identical
-                        writer, primitive vectors, the 34-fixture conformance
+                        writer, primitive vectors, the 35-fixture conformance
                         runner, and `AMBIGUITIES.md`
   sdk/rust/             Rust guest SDK + sample generator (built to wasm)
   sdk/c/                C guest SDK (header + example)
@@ -308,7 +308,7 @@ big, that is the wrong reason; run the four clauses.
 ## Next three things, in order
 
 **0.13.0 completed phase 8**: fuzzing in CI with the entitlement target (51/107),
-the 34-fixture hostile and future-file corpora (49/50), the independent Go
+the 33-fixture hostile and future-file corpora (49/50), the independent Go
 implementation reproducing every vector from `spec/SPEC.md` alone (53/54), the
 rerunnable ingest artifact (64), and `ctf pack` path emission (88). What remains, in
 order:

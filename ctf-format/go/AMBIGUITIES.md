@@ -5,7 +5,7 @@ points at. The container is byte-exact only where the spec is; the list below
 records every place where the text admits more than one reasonable reading, the
 reading chosen, and why. None of these is a licence to reject a file the
 reference reader accepts or to accept one it rejects: the conformance suite
-under `spec/vectors/conformance` is the arbiter, and all 34 of its fixtures pass.
+under `spec/vectors/conformance` is the arbiter, and all 35 of its fixtures pass.
 
 ## A1. §8.2 F4 and the unsigned footer (a first misreading, kept as a warning)
 
@@ -29,16 +29,22 @@ pair). F4 is the downgrade check that stops a one-signature footer being read as
 `56 + sig_classical_len + sig_pq_len`, matching F5. The minimal golden parses
 and rewrites; no signature is treated as present.
 
-## A2. §7.1 M1h: what is depth 1?
+## A2. §7.1 M1h: is the outermost value depth 1?
 
-" Nesting deeper than 16" does not say whether the outermost value counts as
-depth 1 or whether depth counts only container children.
+"M1h" says "Nesting deeper than 16" without saying whether the outermost value
+counts as depth 1 or whether depth counts only container children.
 
-**Chosen reading.** The outermost value is depth 1 and each contained value is
-one deeper. Sixteen nested containers are accepted; the seventeenth is rejected
-with M1h. This is the inclusive reading of "16 levels" and keeps the cap a
-property of the document rather than of the caller's entry point. Tested by
-`TestCBORDepthCap` (17 nested arrays plus a scalar is rejected).
+**Chosen reading (superseded).** This implementation originally counted the
+outermost value as depth 1 and each contained value as one deeper. Sixteen
+nested containers were accepted; the seventeenth was rejected with M1h. That
+reading rejected a manifest the reference implementation and its writer accept
+at the boundary.
+
+**Resolved reading.** §7.1 now defines the count normatively: depth counts from
+0 at the outermost value, so 17 nested containers are accepted and a scalar
+inside them is rejected. `decodeCBOR` starts at `value(0)` and `appendValue`
+checks the same cap, matching `ctf_format::cbor`. Tested by `TestCBORDepthCap`
+(both the byte and value forms) and the Rust `rejects_nesting_past_the_depth_cap`.
 
 ## A3. §9: when a writer must emit a chunk index
 
@@ -101,10 +107,10 @@ are checked when the primitive is resolved. This implementation checks F10 in
 ## A7. Error identity and rule tags
 
 §2.1 makes accept/reject normative and error identity non-normative. Several
-fixtures can trigger more than one rule (for example, an unknown `enc`
-discriminant on the manifest is rejected by R20 because the manifest forbids a
-codec, while the fixture cites R10; a byte flip in a payload is reported as a
-root mismatch, while the fixture cites §10 step 7).
+fixtures can trigger more than one rule (for example, zeroing the manifest
+record's kind would violate both R3 and T1, so the unknown-kind vector mutates the
+artifact record instead; a byte flip in a payload is reported as a root mismatch,
+while the fixture cites §10 step 7).
 
 **Chosen reading.** The parser reports the most specific rule it applied, in
 the order §5.6/§4.3 require where an order is normative. A named-error vector is

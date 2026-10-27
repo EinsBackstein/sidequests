@@ -439,14 +439,14 @@ deliberately disabled in the test.
       non-normative authoring choices.
 - [x] Both implementations produce byte-identical output on every vector —
       **landed in 0.13.0** (ticket 54). `go/ctf/golden_test.go` compares raw bytes
-      for both committed goldens, and `go/conformance` executes all 34 corpus
+      for both committed goldens, and `go/conformance` executes all 35 corpus
       fixtures against the Go reader and writer. A mismatch is a specification bug,
       not a Go bug; `.github/workflows/ctf-go.yml` runs the whole suite, including a
       coverage check that fails if a fixture on disk is missing from `corpus.json`.
 
 **Done when** the Go implementation round-trips every vector without a single spec
 clarification needed. Any clarification required is a spec bug, and the spec gets
-fixed rather than the Go code. Both conditions hold: 34/34 fixtures pass in both
+fixed rather than the Go code. Both conditions hold: 35/35 fixtures pass in both
 implementations, and the goldens are byte-identical.
 
 ---

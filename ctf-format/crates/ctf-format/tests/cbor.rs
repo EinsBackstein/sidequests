@@ -218,6 +218,30 @@ fn rejects_bad_utf8() {
 /// (design §14). The cap is what stops it, and it is checked on both sides.
 #[test]
 fn rejects_nesting_past_the_depth_cap() {
+    // Depth counts from 0 at the outermost value (spec §7.1 M1h), so MAX_DEPTH
+    // containers plus a scalar are accepted, and so are MAX_DEPTH + 1 containers
+    // whose innermost value is itself a container.
+    let mut accepted = Value::Uint(0);
+    for _ in 0..MAX_DEPTH {
+        accepted = Value::Array(vec![accepted]);
+    }
+    assert!(accepted.encode().is_ok());
+
+    let mut accepted_empty = Value::Array(vec![]);
+    for _ in 0..MAX_DEPTH {
+        accepted_empty = Value::Array(vec![accepted_empty]);
+    }
+    assert!(accepted_empty.encode().is_ok());
+
+    let mut b = vec![0x81u8; MAX_DEPTH as usize];
+    b.push(0x00);
+    assert!(Value::decode(&b).is_ok());
+
+    let mut b = vec![0x81u8; MAX_DEPTH as usize];
+    b.push(0x80);
+    assert!(Value::decode(&b).is_ok());
+
+    // One level past the boundary.
     let mut deep = Value::Uint(0);
     for _ in 0..=MAX_DEPTH {
         deep = Value::Array(vec![deep]);
@@ -226,7 +250,7 @@ fn rejects_nesting_past_the_depth_cap() {
 
     // The same shape as bytes, so the decoder is checked independently of whether
     // the encoder would have produced it.
-    let mut b = vec![0x81u8; (MAX_DEPTH + 2) as usize];
+    let mut b = vec![0x81u8; MAX_DEPTH as usize + 1];
     b.push(0x00);
     assert!(matches!(Value::decode(&b), Err(Error::CborTooDeep { .. })));
 }

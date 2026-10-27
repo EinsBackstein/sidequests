@@ -71,7 +71,9 @@ type cborDecoder struct {
 
 func decodeCBOR(b []byte) (Value, error) {
 	d := &cborDecoder{b: b}
-	v, err := d.value(1)
+	// Depth counts from 0 at the outermost value, matching the reference
+	// implementation (spec §7.1 M1h).
+	v, err := d.value(0)
 	if err != nil {
 		return Value{}, err
 	}
@@ -258,10 +260,15 @@ func appendHead(dst []byte, major byte, arg uint64) []byte {
 // the order held; decoded maps are already canonical and writer-built maps are
 // canonicalized by Manifest.Encode.
 func encodeValue(v Value) ([]byte, error) {
-	return appendValue(nil, v)
+	return appendValue(nil, v, 0)
 }
 
-func appendValue(dst []byte, v Value) ([]byte, error) {
+func appendValue(dst []byte, v Value, depth int) ([]byte, error) {
+	// The encoder applies the same cap as the decoder, counted from 0 at the
+	// outermost value, so it cannot produce bytes its own reader rejects.
+	if depth > MaxCBORDepth {
+		return nil, errf(CatCBOR, "M1h", "nesting exceeds %d", MaxCBORDepth)
+	}
 	switch v.Kind {
 	case ValueUint:
 		return appendHead(dst, 0, v.U), nil
@@ -277,7 +284,7 @@ func appendValue(dst []byte, v Value) ([]byte, error) {
 		dst = appendHead(dst, 4, uint64(len(v.A)))
 		for _, item := range v.A {
 			var err error
-			dst, err = appendValue(dst, item)
+			dst, err = appendValue(dst, item, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -287,11 +294,11 @@ func appendValue(dst []byte, v Value) ([]byte, error) {
 		dst = appendHead(dst, 5, uint64(len(v.M)))
 		for _, p := range v.M {
 			var err error
-			dst, err = appendValue(dst, p.Key)
+			dst, err = appendValue(dst, p.Key, depth+1)
 			if err != nil {
 				return nil, err
 			}
-			dst, err = appendValue(dst, p.Val)
+			dst, err = appendValue(dst, p.Val, depth+1)
 			if err != nil {
 				return nil, err
 			}
