@@ -2,8 +2,11 @@ package ctf
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -186,5 +189,44 @@ func TestParseNeverPanics(t *testing.T) {
 			buf[j] = byte(seed >> 33)
 		}
 		check(buf)
+	}
+}
+
+// The bit, never version_minor, decides whether a whole-container read proceeds
+// (spec §2.3). A 0.2 file is an older format; a 0.3 file with CONTAINER_V1 clear is
+// a feature-negotiation inconsistency, and the diagnostic must say so.
+func TestContainerEraFileWithoutTheBitIsAFeatureError(t *testing.T) {
+	m := NewManifest()
+	m.Set("spec", Uint(1))
+	m.Set("id", Text("legacy-demo"))
+	m.Set("name", Text("Legacy Demo"))
+	m.Set("names", Array(Text("manifest")))
+	file, err := WriteBundle(m, nil, WriteOptions{})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	legacy := append([]byte(nil), file...)
+	binary.LittleEndian.PutUint16(legacy[10:12], 2)
+	binary.LittleEndian.PutUint32(legacy[44:48], 0)
+	if _, err := Parse(legacy); err == nil || !strings.Contains(err.Error(), "pre-0.3") {
+		t.Fatalf("a 0.2 header must keep the pre-0.3 wording, got %v", err)
+	}
+
+	missing := append([]byte(nil), file...)
+	binary.LittleEndian.PutUint32(missing[44:48], 0)
+	_, err = Parse(missing)
+	if err == nil {
+		t.Fatal("a 0.3 file without CONTAINER_V1 must be refused")
+	}
+	if strings.Contains(err.Error(), "pre-0.3") {
+		t.Fatalf("version 0.3 must not be called pre-0.3: %v", err)
+	}
+	if !strings.Contains(err.Error(), "CONTAINER_V1") || !strings.Contains(err.Error(), "feature") {
+		t.Fatalf("the error must name the missing feature: %v", err)
+	}
+	var ce *Error
+	if !errors.As(err, &ce) || ce.Category != CatHeader {
+		t.Fatalf("the refusal is a header/feature error, got %v", err)
 	}
 }

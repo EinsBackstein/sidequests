@@ -52,7 +52,9 @@ pub const LAYOUT_MARKER: &str = "oci-layout";
 pub enum OciError {
     /// A filesystem operation failed.
     Io(String),
-    /// The bytes are not a valid bundle, so no annotations can be derived.
+    /// A bundle-format failure surfaced through an OCI operation. Export does not
+    /// produce this — its parse is best-effort — but the variant is retained for
+    /// callers that surface the container error alongside layout failures.
     Format(crate::Error),
     /// A JSON document could not be written or read.
     Json(String),
@@ -101,19 +103,38 @@ pub fn digest_sha256(bytes: &[u8]) -> String {
 
 /// Export `bundle_bytes` as an OCI image layout rooted at `dir`.
 ///
-/// Parses the bundle to annotate the manifest with the challenge id and version; a
-/// bundle that does not parse is refused rather than wrapped, so a layout always
-/// describes a real challenge.
+/// The layer blob is the bundle, copied byte-for-byte: this function never
+/// re-serializes it, so a push/pull round trip reproduces the input exactly
+/// (spec §30.3). The parse below is **best-effort annotation** only — it names the
+/// challenge id and version in the OCI manifest when the bytes happen to parse,
+/// and is never a gate. A valid older-format bundle (a 0.2 file, which a 0.3
+/// whole-container read refuses under §10.2) or any other non-parsing byte
+/// sequence is still exported unchanged, simply without those annotations.
 pub fn export(bundle_bytes: &[u8], dir: &Path) -> Result<OciLayout, OciError> {
-    let parsed = Bundle::parse(bundle_bytes)?;
-    let title = parsed.manifest.id().to_owned();
-    let version = parsed.manifest.version().to_string();
+    let annotations = Bundle::parse(bundle_bytes).ok().map(|parsed| {
+        (
+            parsed.manifest.id().to_owned(),
+            parsed.manifest.version().to_string(),
+        )
+    });
 
     let bundle_digest = digest_sha256(bundle_bytes);
     let config_bytes = b"{}";
     let config_digest = digest_sha256(config_bytes);
 
-    let manifest = json!({
+    let mut layer = json!({
+        "mediaType": BUNDLE_MEDIA_TYPE,
+        "digest": bundle_digest,
+        "size": bundle_bytes.len(),
+    });
+    if let (Some(object), Some((title, _))) = (layer.as_object_mut(), &annotations) {
+        object.insert(
+            "annotations".to_owned(),
+            json!({ "org.opencontainers.image.title": title }),
+        );
+    }
+
+    let mut manifest = json!({
         "schemaVersion": 2,
         "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
         "config": {
@@ -121,32 +142,38 @@ pub fn export(bundle_bytes: &[u8], dir: &Path) -> Result<OciLayout, OciError> {
             "digest": config_digest,
             "size": config_bytes.len(),
         },
-        "layers": [{
-            "mediaType": BUNDLE_MEDIA_TYPE,
-            "digest": bundle_digest,
-            "size": bundle_bytes.len(),
-            "annotations": { "org.opencontainers.image.title": title },
-        }],
-        "annotations": {
-            "org.opencontainers.image.title": title,
-            "org.opencontainers.image.version": version,
-        },
+        "layers": [layer],
     });
+    if let (Some(object), Some((title, version))) = (manifest.as_object_mut(), &annotations) {
+        object.insert(
+            "annotations".to_owned(),
+            json!({
+                "org.opencontainers.image.title": title,
+                "org.opencontainers.image.version": version,
+            }),
+        );
+    }
     let manifest_bytes =
         serde_json::to_vec_pretty(&manifest).map_err(|e| OciError::Json(e.to_string()))?;
     let manifest_digest = digest_sha256(&manifest_bytes);
 
+    let mut manifest_entry = json!({
+        "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
+        "digest": manifest_digest,
+        "size": manifest_bytes.len(),
+    });
+    if let (Some(object), Some((title, version))) = (manifest_entry.as_object_mut(), &annotations) {
+        object.insert(
+            "annotations".to_owned(),
+            json!({
+                "org.opencontainers.image.ref.name": format!("{title}:{version}"),
+            }),
+        );
+    }
     let index = json!({
         "schemaVersion": 2,
         "mediaType": INDEX_MEDIA_TYPE,
-        "manifests": [{
-            "mediaType": IMAGE_MANIFEST_MEDIA_TYPE,
-            "digest": manifest_digest,
-            "size": manifest_bytes.len(),
-            "annotations": {
-                "org.opencontainers.image.ref.name": format!("{title}:{version}"),
-            },
-        }],
+        "manifests": [manifest_entry],
     });
     let index_bytes =
         serde_json::to_vec_pretty(&index).map_err(|e| OciError::Json(e.to_string()))?;

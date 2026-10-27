@@ -1678,3 +1678,72 @@ fn challenge_without_secret_is_a_usage_error() {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// A bundle whose manifest carries a tagged `runtime.image`. The container accepts
+/// it (§7.6) even though `ctf pack` would refuse to author it, so it is written
+/// through the library.
+fn tagged_runtime_bundle() -> Vec<u8> {
+    let m = Manifest::build(
+        "chal",
+        "Title",
+        &["manifest"],
+        vec![(
+            Value::Text("runtime".into()),
+            Value::Map(vec![(
+                Value::Text("image".into()),
+                Value::Text("ghcr.io/ctf/chal:latest".into()),
+            )]),
+        )],
+    )
+    .unwrap();
+    write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &m.encode().unwrap(),
+        )],
+    )
+    .unwrap()
+}
+
+/// Spec §29.2: the read-time policy pass reaches `ctf verify` as a stderr
+/// diagnostic. The stable JSON artifact and its exit code are unchanged.
+#[test]
+fn a_policy_issue_is_reported_on_stderr_without_changing_the_artifact() {
+    let dir = TempDir::new("policy-issue");
+    let path = dir.path("tagged.ctf");
+    std::fs::write(&path, tagged_runtime_bundle()).unwrap();
+
+    let (code, stdout, stderr) = run(&["verify", &path]);
+    assert_eq!(code, 2, "policy is not a rejection:\n{stdout}{stderr}");
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["intact"], true, "{artifact}");
+    assert_eq!(artifact["status"], "unverified", "{artifact}");
+    assert!(
+        artifact.get("policy").is_none(),
+        "the stable artifact must not grow a policy field: {artifact}"
+    );
+    assert!(
+        stderr.contains("policy: runtime.image:"),
+        "the policy issue must name the key on stderr:\n{stderr}"
+    );
+}
+
+/// A clean manifest prints no policy line at all: stderr stays empty.
+#[test]
+fn a_clean_bundle_prints_no_policy_line() {
+    let dir = TempDir::new("policy-clean");
+    let path = dir.path("clean.ctf");
+    std::fs::write(&path, minimal_bundle()).unwrap();
+
+    let (code, stdout, stderr) = run(&["verify", &path]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["intact"], true, "{artifact}");
+    assert!(
+        !stderr.contains("policy"),
+        "a clean bundle must not print a policy line:\n{stderr}"
+    );
+}

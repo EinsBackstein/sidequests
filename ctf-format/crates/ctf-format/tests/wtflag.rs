@@ -42,6 +42,17 @@ fn one_team_gets_one_flag() {
 }
 
 #[test]
-fn a_secret_that_is_not_32_bytes_is_refused() {
-    assert!(wtflag::seed(&[0u8; 31], "baby-rop", 0, "team").is_err());
+fn a_secret_of_any_length_is_accepted() {
+    // §22.2 constrains the seed's 32 bytes, not the event secret's length.
+    let seed = wtflag::seed(&[0u8; 31], "baby-rop", 0, "team").unwrap();
+    assert_eq!(
+        seed,
+        derive::subject_seed(&[0u8; 31], "baby-rop", 0, "team").unwrap()
+    );
+    assert_eq!(
+        wtflag::flag(&[0u8; 33], "baby-rop", 0, "team")
+            .unwrap()
+            .len(),
+        16
+    );
 }

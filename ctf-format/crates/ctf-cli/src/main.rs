@@ -34,6 +34,7 @@ use ctf_format::cbor::Value;
 use ctf_format::derive;
 use ctf_format::oci;
 use ctf_format::pack::{self, PackError};
+use ctf_format::policy;
 use ctf_format::{
     Bundle, Compression, Encryption, EntitlementChain, HEADER_LEN, HolderKeys, HybridPublicKey,
     HybridSigningKey, KemKeyPair, MAGIC, Payload, Recipient, SECTION_RECORD_LEN, SectionFlags,
@@ -1599,6 +1600,12 @@ fn run_verify(args: &VerifyArgs) -> ExitCode {
     match Bundle::parse(&file) {
         Err(e) => artifact.reject(format!("the bundle did not parse: {e}")),
         Ok(bundle) => {
+            // Read-time policy pass (spec §29.2). Diagnostics only: the stable
+            // artifact on stdout and the status-derived exit code are unchanged.
+            // The message can quote author-supplied text, so it is Debug-escaped.
+            for issue in policy::check_manifest(&bundle.manifest) {
+                eprintln!("policy: {}: {:?}", issue.key(), issue.message());
+            }
             artifact.commitment_root = Some(bundle.footer.root);
             artifact.signing = Some(bundle.signing());
             match bundle.verify_inline_sections() {
@@ -2610,6 +2617,20 @@ fn inspect(
     }
     if b.manifest.version() != 0 {
         println!("              version {}", b.manifest.version());
+    }
+
+    // Read-time policy pass (spec §29.2). It is not a parse failure: a tagged
+    // `runtime.image` is a readable bundle that the platform will refuse to boot,
+    // so the exit code stays 0 and no line above changes. The key and message can
+    // carry author-supplied text (an origin extracted from `description`), so both
+    // are Debug-escaped like the manifest and mirror lines above.
+    let issues = policy::check_manifest(&b.manifest);
+    if !issues.is_empty() {
+        println!();
+        println!("policy        {} issue(s)", issues.len());
+        for issue in &issues {
+            println!("              {:?}: {:?}", issue.key(), issue.message());
+        }
     }
 
     println!();

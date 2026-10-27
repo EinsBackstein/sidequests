@@ -14,9 +14,7 @@
 )]
 
 use ctf_format::derive::{base32_lower, flag, flag_with_bytes, stage_key, subject_seed};
-use ctf_format::{
-    Manifest, Role, SectionFlags, SectionKind, SectionSpec, SuiteError, write_bundle,
-};
+use ctf_format::{Manifest, SectionFlags, SectionKind, SectionSpec, write_bundle};
 
 const SUITE: u16 = 1;
 
@@ -325,20 +323,34 @@ fn known_answer_vectors_from_python() {
     );
 }
 
-/// A malformed secret is rejected by name, never padded or truncated.
+/// §22.2 fixes `seed` at 32 bytes, not the secret: `ikm = event_secret` carries no
+/// length rule, so a 16-byte and a 33-byte secret are both absorbed as-is and each
+/// still yields a 32-byte seed. The documented 32-byte known-answer vector is
+/// unchanged: `20b0f7556a9de4382cda2501eb74791e85474831adfe1ccf84dab59305099f6e`.
 #[test]
-fn a_non_32_byte_event_secret_is_rejected() {
-    for len in [0usize, 31, 33, 64] {
-        let got = subject_seed(&vec![0u8; len], "x", 0, "y").unwrap_err();
-        assert_eq!(
-            got,
-            SuiteError::InvalidLength {
-                role: Role::Kdf,
-                expected: 32,
-                got: len,
-            }
-        );
-    }
+fn any_event_secret_length_is_accepted() {
+    let sixteen = subject_seed(&[0x5au8; 16], "whos-that-bird", 3, "team-alpha").unwrap();
+    let thirty_three = subject_seed(&[0x5au8; 33], "whos-that-bird", 3, "team-alpha").unwrap();
+    assert_eq!(sixteen.len(), 32);
+    assert_eq!(thirty_three.len(), 32);
+    assert_ne!(
+        sixteen, thirty_three,
+        "the secret is not truncated or padded"
+    );
+
+    // The empty secret, too: weak input, but §22.2 permits it.
+    assert_eq!(
+        subject_seed(&[], "whos-that-bird", 3, "team-alpha")
+            .unwrap()
+            .len(),
+        32
+    );
+
+    let s1 = subject_seed(&secret(), "whos-that-bird", 3, "team-alpha").unwrap();
+    assert_eq!(
+        s1.to_vec(),
+        hex("20b0f7556a9de4382cda2501eb74791e85474831adfe1ccf84dab59305099f6e")
+    );
 }
 
 // ---------------------------------------------------------------------------
