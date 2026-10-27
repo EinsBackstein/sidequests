@@ -2667,3 +2667,74 @@ fn encrypted_compressed_caps_are_evaluated_on_the_section_totals() {
         .unwrap();
     assert_eq!(b.decrypt_section_bytes(&record, &key).unwrap(), plaintext);
 }
+
+/// A `keys` section written with `comp = 1` must store compressed bytes. The
+/// record's `comp` and the payload have to agree, or the writer emits a file its
+/// own reader refuses (spec §5.4, §10). The envelope CBOR is still the plaintext:
+/// `len_plain` and `root` describe it, and `section_bytes` returns it decoded.
+#[test]
+fn a_compressed_keys_section_round_trips_its_envelope_cbor() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "compressed-keys",
+        "Compressed Keys",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let plaintext = b"a sealed payload";
+    let secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        plaintext,
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    let keys = SectionSpec::envelopes(SectionKind::Keys, 2)
+        .chunked(4096)
+        .compressed();
+
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            keys,
+        ],
+    )
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(2).unwrap();
+    assert_eq!(record.comp, Compression::Zstd);
+    assert_eq!(record.enc, ctf_format::Encryption::None);
+
+    // The payload really is a zstd frame, not raw CBOR behind a `comp = 1` label.
+    let stored = &file[record.offset as usize..(record.offset + record.len_stored) as usize];
+    assert_eq!(
+        &stored[..4],
+        &[0x28, 0xB5, 0x2F, 0xFD],
+        "a comp = 1 section must store a zstd frame"
+    );
+
+    // Reading it back yields the envelope CBOR the writer would have stored
+    // uncompressed: one envelope naming the encrypted section.
+    let envelope_cbor = b.section_bytes(&record).unwrap();
+    let value = Value::decode(&envelope_cbor).unwrap();
+    let entries = value.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let envelope = ctf_format::envelope::Envelope::from_cbor(&entries[0]).unwrap();
+    assert_eq!(envelope.name_id, 1);
+    assert_eq!(envelope.context, "seal");
+    assert_eq!(value.encode().unwrap(), envelope_cbor.as_ref());
+
+    let report = b.verify_inline_sections().unwrap();
+    assert_eq!(report.verified, 2, "the manifest and the keys section");
+    assert_eq!(report.unverifiable, 1, "the encrypted section needs a key");
+}

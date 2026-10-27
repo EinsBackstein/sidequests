@@ -872,14 +872,23 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
             }
             Payload::Envelopes => {
                 let bytes = envelope_payload.as_deref().unwrap_or(&[]);
+                // `comp` applies here like any other inline payload: the record
+                // says `comp = 1`, so the stored bytes must be zstd frames of the
+                // envelope CBOR. `len_plain` and `root` still describe the
+                // uncompressed bytes (spec §5.4). This branch never encrypts — the
+                // pre-pass refuses `Payload::Envelopes` with an encryption spec —
+                // so there is no sealed body to copy.
+                let stored: Cow<'_, [u8]> = match s.comp {
+                    Compression::None => Cow::Borrowed(bytes),
+                    Compression::Zstd => Cow::Owned(compress::compress(bytes, s.chunk_size)?),
+                };
                 pad_to(&mut body, crate::PAYLOAD_ALIGN)?;
                 let offset = u64::from(HEADER_LEN) + body.len() as u64;
-                body.extend_from_slice(bytes);
-                let len = bytes.len() as u64;
+                body.extend_from_slice(&stored);
                 (
                     offset,
-                    len,
-                    len,
+                    stored.len() as u64,
+                    bytes.len() as u64,
                     *blake3::hash(bytes).as_bytes(),
                     crate::Encryption::None,
                 )

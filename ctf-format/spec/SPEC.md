@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.6
+**Version:** 0.3 (major 0, minor 3); document revision 0.13.7
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
@@ -568,9 +568,11 @@ specified in §20.2, including the composition of `comp = 1` with `enc = 1`.
 **Frames align to chunk boundaries.** When `comp = 1` and `chunk_size ≠ 0`, the
 stored bytes are the concatenation of one zstd frame per chunk, in address order:
 frame *i* covers `[i × chunk_size, min((i+1) × chunk_size, len_plain))` of the
-plaintext and decodes without its predecessors. When `chunk_size = 0`, the stored
-bytes are a single zstd frame covering the whole plaintext. `len_stored` is the
-total stored length; `len_plain` is the total decompressed length.
+plaintext and decodes without its predecessors. An empty plaintext is stored as a
+single empty zstd frame and carries no chunk index (the frame count is otherwise
+one per chunk). When `chunk_size = 0`, the stored bytes are a single zstd frame
+covering the whole plaintext. `len_stored` is the total stored length; `len_plain`
+is the total decompressed length.
 
 Alignment is a **writer** obligation. A reader is not required to re-derive frame
 boundaries in order to hash or return a section: decoding the concatenation as one
@@ -1959,6 +1961,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.13.4 | Gate-record completeness. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. A solver-stage failure after the determinism stage succeeded now keeps the `generator_root`, `cross_engine`, and `runs` the stage produced, instead of serializing them as `null`; §25.6 reserves `null` for a gate that did not run or a determinism stage that did not complete, now stated explicitly (including two engines that disagreed). `ctf run` also persists the `failed` record for a hard stage failure wherever it would write a record (`--status` or `--bundle`), where previously it exited 1 without one, and §25.6 now states that a `ctf run` which cannot reach a gate outcome writes no record and leaves an earlier one untouched, while one that identifies its bundle but cannot gate it writes `unverified`. Every change enforces a rule the text already stated; no feature bit is spent (§15). |
 | 0.13.5 | Correction to 0.13.4's record-boundary wording. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §25.6's new paragraph claimed that any run refusing an input before the gate writes no record, but `ctf verify` emits an `unverified` `gate` record when the authoring document does not describe the bundle, and `ctf run` does the same when a bundle declaration makes the gate unrunnable. The paragraph now states the rule at the level the code implements: `ctf run` writes no record when it cannot reach a gate outcome, writes `unverified` when it identifies the bundle but a declaration leaves the gate unrunnable, and refuses a bare document's own unrunnable declarations without a record. The corresponding 0.13.4 changelog bullet and §17 row are narrowed the same way, and the refusal test now asserts its earlier record is `passed`, not merely present. Every change states a rule the code already implements; no feature bit is spent (§15). |
 | 0.13.6 | Independent-implementation and corpus corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §7.1 now defines the M1h depth count normatively: depth is 0 at the outermost value, so 17 nested containers are accepted and a scalar inside them is rejected. The Go reader previously counted the outermost value as depth 1, and the Go writer had no cap, so Go rejected a manifest the reference accepts at that boundary and could emit bytes its own reader refused; both now count from 0. The corpus vector `unknown-enc-discriminant` mutated the manifest, so R20 could be the rejection and an `OPTIONAL` exemption from R10 would still pass; it now mutates an unknown-kind (kind 9) `OPTIONAL` section, which a reader must skip for serving but must still validate, and `unknown-comp-discriminant` covers the other field (§5.4). The Go conformance suite asserts the chunk-index refusal and inline verification for the unknown-kind vector that the index already claimed. Every change makes an existing rule explicit or enforces it in both implementations; no feature bit is spent (§15). |
+| 0.13.7 | Writer and record-definition corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Two `write_bundle` paths ignored `comp` on the stored side: a `keys` section written with `SectionSpec::envelopes(..).compressed()` stored raw envelope CBOR under a record saying `comp = 1`, and an empty plaintext with `chunk_size != 0` stored zero zstd frames; both produced a bundle `ctf verify` rejected with `DecompressionFailed`. The envelope payload is now compressed as §5.4 requires (`len_plain` and `root` stay over the uncompressed bytes), an empty plaintext is one empty frame, and §5.4 states that framing. §25.6 and §25.6.1 now state the shipped rule for `ctf verify`: an intact bundle with a requested gate that could not run is an `unverified` record with null determinism fields, not `null`; the no-record rule for `ctf run` is unchanged. Every change enforces or states a rule the text already implied; no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2761,6 +2764,13 @@ document's own unrunnable declarations — an unsupported `generate.interface` o
 `generate.profile`, or a module file it cannot read — and writes no record. A consumer
 MUST NOT treat a record as current merely because the file exists.
 
+`ctf verify` differs in one respect: it is always given the bundle, so once that
+bundle is intact it describes the gate attempt even when the gate could not run. A
+requested gate that its inputs cannot run — an unreadable or invalid authoring
+document, a document that describes another challenge, or an unusable secret — is the
+`unverified` record of this section, with `generator_root`, `cross_engine`, and `runs`
+null, rather than no record at all.
+
 ### 25.6.1 The ingest verification artifact
 
 A verification that a platform reruns as a job emits one artifact, the **ingest
@@ -2835,7 +2845,7 @@ offline gate passed; the two digests are placeholders:
 | `sections.chunk_indices` | integer | sections carrying a chunk index; C1–C7 are on-use rules (§10), so the count discloses what the pass did not evaluate |
 | `sections.mismatches` | array of integers | `name_id` of every inline section whose plaintext did not hash to its `root` |
 | `signing` | `"unsigned"`, `"present"`, or null | present, **not verified**; `null` when the file did not parse |
-| `gate` | object or null | the §25.6 verification record, field for field; `null` when the gate did not run — no gate was requested, or the file was rejected before the gate could run |
+| `gate` | object or null | the §25.6 verification record, field for field; `null` when no gate was requested, or the file did not parse or failed an integrity check before the gate could run. A requested gate that could not run on an intact bundle is an `unverified` record (§25.6), not `null`. |
 | `status` | string | exactly one of the four statuses below |
 | `reason` | string | a deterministic sentence naming the outcome and, for a non-`passed` result, the cause |
 

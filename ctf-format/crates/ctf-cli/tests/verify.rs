@@ -1609,6 +1609,54 @@ fn an_unreadable_section_is_disclosed_not_rejected() {
     );
 }
 
+/// §25.6.1: a gate that was requested but could not run is an `unverified`
+/// record, not `null`. A `--challenge` path that does not exist is exactly that
+/// case: the gate never ran, so its determinism fields stay null and the record
+/// must not leak the path it could not read.
+#[test]
+fn a_requested_gate_with_a_missing_challenge_document_is_an_unverified_record() {
+    let dir = TempDir::new("missing-challenge");
+    let path = dir.path("chal.ctf");
+    std::fs::write(&path, minimal_bundle()).unwrap();
+    let missing = dir.path("nowhere/absent-challenge.yaml");
+    let secret = "00".repeat(32);
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &path,
+        "--challenge",
+        &missing,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(code, 2, "unverified must not exit 0:\n{stdout}{stderr}");
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "unverified");
+    assert_eq!(artifact["intact"], true);
+    assert_eq!(
+        artifact["gate"]["status"], "unverified",
+        "a requested gate that could not run is a record, not null: {artifact}"
+    );
+    assert!(artifact["gate"]["generator_root"].is_null());
+    assert!(artifact["gate"]["cross_engine"].is_null());
+    assert!(artifact["gate"]["runs"].is_null());
+
+    let record_reason = artifact["gate"]["reason"].as_str().unwrap();
+    assert!(
+        !record_reason.contains(&missing),
+        "the record must not name the missing document: {record_reason}"
+    );
+    assert!(
+        !record_reason.contains(['/', '\\']),
+        "the record must be path-free: {record_reason}"
+    );
+    let reason = artifact["reason"].as_str().unwrap();
+    assert!(
+        !reason.contains(['/', '\\']) && !reason.contains(&missing),
+        "the artifact reason must be path-free: {reason}"
+    );
+}
+
 /// `--challenge` and `--secret` are both required together: asking for a gate
 /// without the secret is a usage error (exit 1), not an `unverified` artifact.
 #[test]

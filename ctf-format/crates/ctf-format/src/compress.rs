@@ -87,10 +87,12 @@ pub fn compress(plain: &[u8], chunk_size: u32) -> Result<Vec<u8>> {
 /// This is the same framing [`compress`] emits, kept un-concatenated so the
 /// encrypted path (`enc = 1` with `comp = 1`, spec §20.2) can seal each frame as
 /// its own STREAM chunk. `chunk_size = 0` yields a single frame; otherwise frame
-/// *i* covers `[i × chunk_size, min((i+1) × chunk_size, len(plain)))`.
+/// *i* covers `[i × chunk_size, min((i+1) × chunk_size, len(plain)))`. An empty
+/// plaintext is always that single frame, whatever the chunk size: zero frames
+/// would be a `comp = 1` section no reader can decode.
 pub fn compress_frames(plain: &[u8], chunk_size: u32) -> Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
-    if chunk_size == 0 {
+    if chunk_size == 0 || plain.is_empty() {
         let frame = zstd::bulk::compress(plain, LEVEL).map_err(|_| Error::DecompressionFailed)?;
         out.push(frame);
     } else {
@@ -170,6 +172,16 @@ mod tests {
             decompress_exact(&frame, u64::MAX),
             Err(Error::DecompressedLength { .. })
         ));
+    }
+
+    /// An empty plaintext is one empty zstd frame at any chunk size. Zero frames
+    /// would leave a `comp = 1` section no decoder can open (§5.4).
+    #[test]
+    fn an_empty_plaintext_is_one_empty_frame_at_any_chunk_size() {
+        let frames = compress_frames(b"", 4096).unwrap();
+        assert_eq!(frames.len(), 1);
+        let frame = frames.first().expect("one frame");
+        assert_eq!(decompress_exact(frame, 0).unwrap(), b"");
     }
 
     /// [`decompress`] is still the capped entry point: it refuses before decoding.
