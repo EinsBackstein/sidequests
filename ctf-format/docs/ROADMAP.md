@@ -391,9 +391,9 @@ deliberately disabled in the test.
 
 - [x] Full §14 hardening checklist audited line by line against the code —
       **landed in 0.12.0** (ticket 48, `docs/HARDENING-AUDIT.md`). Every bullet carries
-      a verdict and a `file:line` citation; the two gaps it found are tracked rather
+      a verdict and a `file:line` citation; the two gaps it found were tracked rather
       than fixed inline — the entitlement-chain fuzz target (#107) and the Go second
-      implementation (#53).
+      implementation (#53) — and both landed in 0.13.0 (below).
 - [x] Fuzzing in CI, corpus committed — **landed in 0.13.0** (#51, #107). The
       workflow names a pinned-stable `Fuzz oracle` lane (`tests/fuzzmirror.rs` plus
       `tests/mutation.rs`), checks that the six committed seed sets build as a fuzz
@@ -424,7 +424,7 @@ deliberately disabled in the test.
       serves it, and still verifies the inline hashes). The compatibility matrix is
       therefore exercised, not asserted, and the Go implementation runs the same
       three fixtures.
-- [ ] `wasmi` as a second engine in the determinism cross-check — **landed in
+- [x] `wasmi` as a second engine in the determinism cross-check — **landed in
       0.10.0** for the generator (rule G10, `second::run_second_engine`). A module
       `wasmi` cannot run (SIMD) reports `cross_engine: false` rather than passing
       silently.
