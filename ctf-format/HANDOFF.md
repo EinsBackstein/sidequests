@@ -13,7 +13,7 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-28, at format version 0.3 / release 0.13.8. Phases 1–4
+**Last updated:** 2026-10-28, at format version 0.3 / release 0.13.9. Phases 1–4
 complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
 `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
 49/50, 35 fixtures in `spec/vectors/conformance/`), the **independent Go
@@ -40,7 +40,7 @@ record boundary 0.13.4 overgeneralised: `ctf run` writes no record when it canno
 a gate outcome (unreadable inputs, a mismatched document, an invalid document, an
 unusable secret), writes `unverified` when it identifies the bundle but a declaration
 leaves the gate unrunnable, and refuses a bare document's own unrunnable declarations
-without a record. Release **0.13.8** aligns Go's `SealStream`/`OpenStream` with §20.2 (zero chunks for an empty plaintext; validate chunk size, chunk count, and per-chunk lengths), states in §18.4 that hashing a section is not reading its chain, and brings the ROADMAP, hardening audit, and this file in line with the shipped tree. Release **0.13.7** fixes two `write_bundle` paths that emitted `comp = 1` sections their own reader rejected, and states in §25.6/§25.6.1 what `ctf verify` records when a requested gate cannot run. Release 0.13.6 aligned the Go CBOR depth cap with the reference, defined the M1h count in §7.1, and repaired the corpus vectors that were meant to prove §5.4's `OPTIONAL` rule. The live gate is
+without a record. Release **0.13.9** validates a `keys` section as a whole (EN5), tries every matching envelope so multi-recipient bundles unseal in any order, makes §22.2's `event_secret` length unconstrained, makes OCI export a byte-copy that does not need to parse the bundle, applies §29.2's read-time policy pass in `ctf inspect` and `ctf verify`, and gives Go the reference's 0.3-missing-bit diagnostic. Release **0.13.8** aligns Go's `SealStream`/`OpenStream` with §20.2 (zero chunks for an empty plaintext; validate chunk size, chunk count, and per-chunk lengths), states in §18.4 that hashing a section is not reading its chain, and brings the ROADMAP, hardening audit, and this file in line with the shipped tree. Release **0.13.7** fixes two `write_bundle` paths that emitted `comp = 1` sections their own reader rejected, and states in §25.6/§25.6.1 what `ctf verify` records when a requested gate cannot run. Release 0.13.6 aligned the Go CBOR depth cap with the reference, defined the M1h count in §7.1, and repaired the corpus vectors that were meant to prove §5.4's `OPTIONAL` rule. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 

@@ -7,6 +7,53 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.9] — 2026-10-28
+
+Envelope, derivation, and platform-policy corrections. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved.
+
+### Fixed — `keys` sections are validated whole (§21.3 EN5)
+
+- **A malformed element after a usable envelope was ignored.** `section_content_key`
+  decoded elements lazily and returned at the first `(name_id, context)` match, so a
+  `keys` payload such as `[<valid envelope>, 42]` yielded the content key instead of
+  rejecting the section. Every element is now decoded and validated before any key
+  is returned, as EN5 requires.
+- **Multi-recipient bundles failed on recipient order.** One section may be wrapped
+  to several recipients, producing several envelopes with the same `name_id` and
+  context. The first matching envelope's failure was final, so a reader whose
+  envelope was not first could not unseal. Every matching envelope is now tried in
+  file order and the first that opens is used.
+
+### Fixed — `event_secret` length is unconstrained (§22.2)
+
+The spec fixes `seed` at 32 bytes and says nothing about the input key material;
+Go accepted any length while Rust rejected anything but 32 bytes. Rust now absorbs
+the secret as supplied, and §22.2 states that its length is unconstrained.
+
+### Fixed — OCI export is a byte-copy (§30.3)
+
+`ctf oci-export` parsed the bundle only to annotate the OCI manifest and refused a
+file that did not parse, so a valid 0.2 `.ctf` — which a 0.3 whole-container read
+refuses by design — could not be distributed. Export now writes the layer
+unchanged and treats annotations as optional; §30.3 states that the exporting build
+need not parse the bundle. Export→import remains byte-for-byte.
+
+### Fixed — read-time policy pass (§29.2 P3)
+
+The digest-pinning check ran at authoring time only, although P3 requires it again
+at read time. `ctf inspect` now reports policy issues in its output and `ctf verify`
+reports them on stderr; neither changes its record or treats a policy failure as a
+parse failure. §29.2 names that reporting.
+
+### Fixed — Go diagnostic for a 0.3 file missing `CONTAINER_V1`
+
+Go called any file without the bit a "pre-0.3 file", even at `version_minor` 3.
+It now mirrors the reference: below 0.3 the legacy wording stands, at 0.3 or later
+the error names the missing `ro_compat` feature (§2.3).
+
 ## [0.13.8] — 2026-10-28
 
 Independent-implementation and validation-scope corrections. **No byte-layout
