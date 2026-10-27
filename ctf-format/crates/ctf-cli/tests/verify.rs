@@ -15,6 +15,7 @@
 
 use std::process::Command;
 
+use ctf_format::cbor::Value;
 use ctf_format::{Bundle, Manifest, Payload, SectionFlags, SectionKind, SectionSpec, write_bundle};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ctf");
@@ -408,12 +409,35 @@ fn gate_fixture(dir: &TempDir, tag: &str, solver_flag: &str) -> (String, String)
     (source, bundle)
 }
 
-/// Rebuild `packed` with a `generator` section, keeping its manifest.
+/// The `name_id` a manifest reserves for the module `key` names under `map`.
+///
+/// `ctf pack` reserves `generate.wasm` and `verify.solver` in `names`, so the id is
+/// always derivable from the manifest. Reading it beats hard-coding one, which would
+/// collide as soon as the name table's order changes.
+fn declared_name_id(manifest: &[u8], map: &str, key: &str) -> u16 {
+    let value = Value::decode(manifest).unwrap();
+    let name = value
+        .get(map)
+        .and_then(|m| m.get(key))
+        .and_then(Value::as_text)
+        .expect("the fixture declares the module");
+    let names = value
+        .get("names")
+        .and_then(Value::as_array)
+        .expect("a manifest has a name table");
+    let id = names
+        .iter()
+        .position(|n| n.as_text() == Some(name))
+        .expect("the module name is a reserved name");
+    u16::try_from(id).expect("the name table is small")
+}
+
+/// Rebuild `packed` with the module sections supplied, keeping its manifest.
 ///
 /// `ctf pack` reserves module names but emits no module sections, so a bundle that
-/// carries one is the stricter case the gate must prefer. The generator's
-/// `name_id` is `1`, the name `pack` reserved for `generate.wasm`.
-fn with_generator_section(packed: &str, generator: &[u8]) -> Vec<u8> {
+/// carries one is the stricter case the gate must prefer. Each module's `name_id`
+/// comes from the manifest's own name table.
+fn with_module_sections(packed: &str, generator: Option<&[u8]>, solver: Option<&[u8]>) -> Vec<u8> {
     let file = std::fs::read(packed).unwrap();
     let parsed = Bundle::parse(&file).unwrap();
     let manifest = parsed
@@ -422,19 +446,40 @@ fn with_generator_section(packed: &str, generator: &[u8]) -> Vec<u8> {
         .find(|r| r.kind == SectionKind::Manifest)
         .expect("a bundle has a manifest");
     let manifest_bytes = parsed.section_bytes(manifest).unwrap().into_owned();
-    write_bundle(
-        1,
-        &[
-            SectionSpec::inline(
-                SectionKind::Manifest,
-                0,
-                SectionFlags::empty(),
-                &manifest_bytes,
-            ),
-            SectionSpec::inline(SectionKind::Generator, 1, SectionFlags::empty(), generator),
-        ],
-    )
-    .unwrap()
+    rebuild_with_modules(&manifest_bytes, generator, solver)
+}
+
+/// Rebuild a bundle around `manifest_bytes`, adding the module sections supplied.
+fn rebuild_with_modules(
+    manifest_bytes: &[u8],
+    generator: Option<&[u8]>,
+    solver: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut specs = vec![SectionSpec::inline(
+        SectionKind::Manifest,
+        0,
+        SectionFlags::empty(),
+        manifest_bytes,
+    )];
+    if let Some(bytes) = generator {
+        let name_id = declared_name_id(manifest_bytes, "generate", "wasm");
+        specs.push(SectionSpec::inline(
+            SectionKind::Generator,
+            name_id,
+            SectionFlags::empty(),
+            bytes,
+        ));
+    }
+    if let Some(bytes) = solver {
+        let name_id = declared_name_id(manifest_bytes, "verify", "solver");
+        specs.push(SectionSpec::inline(
+            SectionKind::Solver,
+            name_id,
+            SectionFlags::empty(),
+            bytes,
+        ));
+    }
+    write_bundle(1, &specs).unwrap()
 }
 
 /// A correct solver and a correct gate: `passed`, exit 0.
@@ -614,7 +659,7 @@ fn a_bundle_generator_section_wins_over_the_documents_module() {
     // A valid module returning a malformed output block: the determinism stage
     // fails, which is `failed` (exit 1), not `passed`.
     let wrong = generator_wasm(&[0xff; 4]);
-    let bytes = with_generator_section(&packed, &wrong);
+    let bytes = with_module_sections(&packed, Some(&wrong), None);
     let bundle = dir.path("section-wins.ctf");
     std::fs::write(&bundle, &bytes).unwrap();
 
@@ -933,6 +978,162 @@ fn run_refuses_an_unimplemented_profile_without_running_the_module() {
         stderr.contains("profile") && stderr.contains('2'),
         "the unimplemented version is named: {stderr}"
     );
+}
+
+/// Spec §25.6: a bundle that carries a module section is gated on that section's
+/// bytes, so the authoring document's files must not decide the outcome. The
+/// document here names a generator file that does not exist.
+///
+/// Only the generator is carried: a `solver` section MUST be `SEALED` (R6) and
+/// `SEALED` MUST be encrypted (R21), so a gate holding no key can never read one —
+/// carrying it would make the record `unverified` for that reason instead. The
+/// bundle's own generator bytes are what this test proves are used.
+#[test]
+fn a_self_contained_bundle_ignores_missing_document_modules() {
+    let dir = TempDir::new("self-contained");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, packed) = gate_fixture(&dir, "carried", &expected);
+
+    let block = generator_block(&expected, &[("artifact.bin", b"artifact bytes")]);
+    let bytes = with_module_sections(&packed, Some(&generator_wasm(&block)), None);
+    let bundle = dir.path("carried.ctf");
+    std::fs::write(&bundle, &bytes).unwrap();
+
+    // Same id, version, and declarations; the generator file is absent.
+    let document = dir.path("carried-missing.yaml");
+    let text = std::fs::read_to_string(&source)
+        .unwrap()
+        .replace("carried-gen.wasm", "missing-generator.wasm");
+    std::fs::write(&document, text).unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &document,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 0,
+        "the bundle's own section is the module that runs:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "passed");
+    assert_eq!(artifact["gate"]["status"], "passed");
+}
+
+/// A bundle that declares `generate.wasm` without carrying the section is gated on
+/// the authoring document's module (§25.6.1). When that file is absent the gate did
+/// not run: `unverified`, exit 2, with a path-free reason (S12).
+#[test]
+fn a_declared_module_with_a_missing_document_file_is_unverified() {
+    let dir = TempDir::new("deferred-missing");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, bundle) = gate_fixture(&dir, "deferred", &expected);
+
+    let document = dir.path("deferred-missing.yaml");
+    let text = std::fs::read_to_string(&source)
+        .unwrap()
+        .replace("deferred-gen.wasm", "missing-generator.wasm");
+    std::fs::write(&document, text).unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &document,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 2,
+        "a module that cannot be read is unverified, never passed:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "unverified");
+    assert_eq!(artifact["gate"]["status"], "unverified");
+    let reason = artifact["reason"].as_str().unwrap_or_default();
+    assert!(
+        !reason.contains("missing-generator.wasm"),
+        "the reason is path-free: {artifact}"
+    );
+    assert!(
+        !reason.contains('/'),
+        "the reason names no path separator: {artifact}"
+    );
+}
+
+/// Spec §7.6/G6: `interface` is a uint. A present-but-non-integer value is not
+/// absent-means-1; it is a version this build cannot implement, so the gate is
+/// `unverified` rather than silently running at 1.
+#[test]
+fn a_bundle_with_a_non_integer_interface_is_unverified() {
+    let dir = TempDir::new("text-interface");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, packed) = gate_fixture(&dir, "text-interface", &expected);
+
+    // Decode the manifest, replace `generate.interface`, and re-encode it, so the
+    // bundle's commitment root is rebuilt by the writer over the patched bytes.
+    let file = std::fs::read(&packed).unwrap();
+    let parsed = Bundle::parse(&file).unwrap();
+    let manifest = parsed
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .expect("a bundle has a manifest");
+    let mut value = Value::decode(&parsed.section_bytes(manifest).unwrap()).unwrap();
+    set_generate_key(&mut value, "interface", Value::Text("2".to_owned()));
+    let manifest_bytes = value.encode().unwrap();
+
+    let block = generator_block(&expected, &[("artifact.bin", b"artifact bytes")]);
+    let bytes = rebuild_with_modules(&manifest_bytes, Some(&generator_wasm(&block)), None);
+    let bundle = dir.path("text-interface.ctf");
+    std::fs::write(&bundle, &bytes).unwrap();
+
+    let (code, stdout, stderr) = run(&[
+        "verify",
+        &bundle,
+        "--challenge",
+        &source,
+        "--secret",
+        &secret,
+    ]);
+    assert_eq!(
+        code, 2,
+        "a non-integer interface is unverified, never passed:\n{stdout}{stderr}"
+    );
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "unverified");
+    assert_ne!(artifact["status"], "passed");
+    assert!(
+        artifact["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("generate.interface"),
+        "the reason names the malformed declaration: {artifact}"
+    );
+}
+
+/// Set `key` inside the manifest's `generate` map, replacing it or inserting it.
+fn set_generate_key(manifest: &mut Value, key: &str, value: Value) {
+    let Value::Map(entries) = manifest else {
+        panic!("a manifest is a map");
+    };
+    let (_, generate) = entries
+        .iter_mut()
+        .find(|(k, _)| k.as_text() == Some("generate"))
+        .expect("the fixture declares generate");
+    let Value::Map(inner) = generate else {
+        panic!("`generate` is a map");
+    };
+    match inner.iter_mut().find(|(k, _)| k.as_text() == Some(key)) {
+        Some((_, slot)) => *slot = value,
+        None => inner.push((Value::Text(key.to_owned()), value)),
+    }
 }
 
 /// A document describing a different challenge must not be attached to this
