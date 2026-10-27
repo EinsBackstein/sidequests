@@ -61,6 +61,7 @@ const REC_KIND: usize = 0;
 const REC_NAME_ID: usize = 2;
 const REC_FLAGS: usize = 4;
 const REC_ENC: usize = 6;
+const REC_COMP: usize = 7;
 const REC_OFFSET: usize = 8;
 const REC_LEN_PLAIN: usize = 24;
 const REC_CHUNK_SIZE: usize = 32;
@@ -1184,13 +1185,45 @@ fn build_cases(g: &Goldens) -> Result<Vec<Case>, String> {
             hardening: &[],
             rules: &["R10"],
             matrix_row: None,
-            proves: "an unassigned enc/comp value is refused even on a skippable section",
+            proves: "an unassigned enc value is refused on an unknown-kind OPTIONAL section a reader would otherwise skip, so the skip cannot hide R10",
         },
-        committed(&g.minimal, |b| set_u8(b, mrec(0) + REC_ENC, 2))?,
-        // R10 and R20 are both violated: an unassigned `enc` value, and a manifest
-        // section whose codec is not 0. §2.1 allows a named reason only when exactly
-        // one rule is broken, so this vector asserts rejection, not a reason.
-        Expectation::Rejects,
+        // The demo's notes.md artifact, not the manifest: mutating the manifest
+        // would violate R20 as well. Kind 9 with OPTIONAL makes the record one a
+        // reader must skip for serving, so a reader that skipped before checking the
+        // codec would accept it; §5.4 still requires R10. R18 is satisfied, and R10
+        // is the next rule that can fail.
+        committed(&g.demo, |b| {
+            set_u16(b, drec(1) + REC_KIND, 9);
+            set_u16(
+                b,
+                drec(1) + REC_FLAGS,
+                demo_artifact.flags.0 | SectionFlags::OPTIONAL,
+            );
+            set_u8(b, drec(1) + REC_ENC, 2);
+        })?,
+        // R10 is the only rule broken at this step, so the reason is assertable.
+        Expectation::Error("UnknownDiscriminant"),
+    ));
+    cases.push(case(
+        Meta {
+            name: "unknown-comp-discriminant",
+            file: "hostile/unknown-comp-discriminant.ctf",
+            kind: VectorKind::Hostile,
+            hardening: &[],
+            rules: &["R10"],
+            matrix_row: None,
+            proves: "an unassigned comp value is refused on the same unknown-kind OPTIONAL section; §5.4 applies to either field",
+        },
+        committed(&g.demo, |b| {
+            set_u16(b, drec(1) + REC_KIND, 9);
+            set_u16(
+                b,
+                drec(1) + REC_FLAGS,
+                demo_artifact.flags.0 | SectionFlags::OPTIONAL,
+            );
+            set_u8(b, drec(1) + REC_COMP, 2);
+        })?,
+        Expectation::Error("UnknownDiscriminant"),
     ));
     cases.push(case(
         Meta {

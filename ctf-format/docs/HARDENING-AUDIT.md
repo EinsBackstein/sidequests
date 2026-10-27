@@ -1,7 +1,7 @@
 # Audit — parser hardening checklist (design §14)
 
 **Date:** 2026-10-27
-**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.5
+**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.6
 **Source checklist:** `docs/FORMAT-DESIGN.md` §14, lines 800–831.
 **Method:** every claim below was verified by reading the enforcement site and the
 tests that pin it in the current tree, not inferred from the design text. Line
@@ -21,7 +21,7 @@ numbers are against this commit.
 | 8 | Verify signatures and the commitment root before interpreting the manifest semantically | Commitment root: `bundle.rs:90-112` (footer → root recomputed → `verified_bytes` over the manifest record) and `bundle.rs:441-469`; signatures: deliberately a separate caller step, `bundle.rs:132-143` `Bundle::verify_signatures` | Commitment: `bundle.rs:365` `section_bytes_are_verified_before_they_are_returned`; `bundle.rs:452,481` byte-flip breaks root; `bundle.rs:497` `commitment_root_is_the_documented_construction`; `bundle.rs:2131` `t8_does_not_reach_into_claimed_regions` (manifest payload byte fails at parse with `SectionRootMismatch { name_id: 0 }`). Signatures: `bundle.rs:2254,2289,2328,2340` | Satisfied by design | — |
 | 9 | Verify chunk authenticity before exposing chunk bytes | `chunk.rs:255-362` (`ChunkIndex::verify_root` consumes the index and yields `VerifiedChunkIndex`; no method returns chunk bytes), `compile_fail` doctests at `chunk.rs:274-280,321-326`; serving boundary `bundle.rs:231-250` (C8) | `chunk.rs:116` `a_chunk_cannot_be_checked_against_an_unverified_index`; `chunk.rs:137,155,183` tamper/swap/forge; `chunk.rs:350` `c7_chunk_bytes_are_never_exposed_without_passing_c5`; `bundle.rs:1962,1979` C8 | Satisfied | — |
 | 10 | Fuzz from day one (header, section table, manifest, chunk index, entitlement chain); oracle no panic, no OOM, round-trip stable | `fuzz/fuzz_targets/{bundle,header,section_table,manifest,chunk_index,entitlement}.rs`; `fuzz/Cargo.toml:27-67`; stable-toolchain mirror `tests/fuzzmirror.rs:19-170`; mutation oracle `tests/mutation.rs:110-147,221-239`. No-OOM oracle is not a fuzzer memory cap; see Notes | `fuzzmirror.rs:208` `fuzz_targets_still_compile_and_run` over every committed seed, including `fuzz/corpus/entitlement/chain.cbor` (accepted-and-re-encoded branch asserted at `fuzzmirror.rs:239-244`); `mutation.rs:152,174,188,205,221` flips/truncation/corruption/arbitrary/sub-parsers | Satisfied | #107 |
-| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions it can run without suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (`demo.ctf` byte-for-byte), `go/ctf/ctf_test.go` (`minimal.ctf`); `go/conformance` (all 34 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
+| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions it can run without suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (`demo.ctf` byte-for-byte), `go/ctf/ctf_test.go` (`minimal.ctf`); `go/conformance` (all 35 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
 
 ## Gaps
 
@@ -54,7 +54,7 @@ Tracked by issue #107 ("Fuzz the entitlement chain"), now closed.
 without reading the Rust crates. It implements the §10 read path (H1–H14, R1–R22,
 T1–T8, M1–M25, F1–F10, C1–C8), a writer that reproduces both committed goldens
 byte-for-byte, the primitive vectors, and the §20–§24 constructions it can run
-without suite 3. `go/conformance` executes the same 34-fixture corpus the Rust
+without suite 3. `go/conformance` executes the same 35-fixture corpus the Rust
 runner does and fails if a fixture on disk is missing from `corpus.json`.
 
 `go/AMBIGUITIES.md` records the places where the text admitted more than one
@@ -113,7 +113,7 @@ Adding `-rss_limit_mb` to CI is part of the phase-8 "Fuzzing in CI" item
 
 ### Scope
 
-This audit reflects the tree at release 0.13.5; the post-0.13.0 audit rounds
+This audit reflects the tree at release 0.13.6; the post-0.13.0 audit rounds
 (#114–#118) changed reader behaviour, and the 0.13.2–0.13.4 gate corrections changed
 CLI gate resolution and its record (0.13.5 corrects 0.13.4's record-boundary wording), not any invariant this checklist tracks. It
 records gaps as tickets; no code was changed. Trailing-byte rejection, the CBOR
