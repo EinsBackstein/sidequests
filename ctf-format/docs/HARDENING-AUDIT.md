@@ -21,7 +21,7 @@ numbers are against this commit.
 | 8 | Verify signatures and the commitment root before interpreting the manifest semantically | Commitment root: `bundle.rs:90-112` (footer → root recomputed → `verified_bytes` over the manifest record) and `bundle.rs:441-469`; signatures: deliberately a separate caller step, `bundle.rs:132-143` `Bundle::verify_signatures` | Commitment: `bundle.rs:365` `section_bytes_are_verified_before_they_are_returned`; `bundle.rs:452,481` byte-flip breaks root; `bundle.rs:497` `commitment_root_is_the_documented_construction`; `bundle.rs:2131` `t8_does_not_reach_into_claimed_regions` (manifest payload byte fails at parse with `SectionRootMismatch { name_id: 0 }`). Signatures: `bundle.rs:2254,2289,2328,2340` | Satisfied by design | — |
 | 9 | Verify chunk authenticity before exposing chunk bytes | `chunk.rs:255-362` (`ChunkIndex::verify_root` consumes the index and yields `VerifiedChunkIndex`; no method returns chunk bytes), `compile_fail` doctests at `chunk.rs:274-280,321-326`; serving boundary `bundle.rs:231-250` (C8) | `chunk.rs:116` `a_chunk_cannot_be_checked_against_an_unverified_index`; `chunk.rs:137,155,183` tamper/swap/forge; `chunk.rs:350` `c7_chunk_bytes_are_never_exposed_without_passing_c5`; `bundle.rs:1962,1979` C8 | Satisfied | — |
 | 10 | Fuzz from day one (header, section table, manifest, chunk index, entitlement chain); oracle no panic, no OOM, round-trip stable | `fuzz/fuzz_targets/{bundle,header,section_table,manifest,chunk_index,entitlement}.rs`; `fuzz/Cargo.toml:27-67`; stable-toolchain mirror `tests/fuzzmirror.rs:19-170`; mutation oracle `tests/mutation.rs:110-147,221-239`. No-OOM oracle is not a fuzzer memory cap; see Notes | `fuzzmirror.rs:208` `fuzz_targets_still_compile_and_run` over every committed seed, including `fuzz/corpus/entitlement/chain.cbor` (accepted-and-re-encoded branch asserted at `fuzzmirror.rs:239-244`); `mutation.rs:152,174,188,205,221` flips/truncation/corruption/arbitrary/sub-parsers | Satisfied | #107 |
-| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions it can run without suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (both goldens byte-for-byte); `go/conformance` (all 34 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
+| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions it can run without suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (`demo.ctf` byte-for-byte), `go/ctf/ctf_test.go` (`minimal.ctf`); `go/conformance` (all 34 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
 
 ## Gaps
 
@@ -109,7 +109,7 @@ The checklist's oracle is "no panic, no OOM, and round-trip stability". In this 
 This is adequate today — every length field is bounded before it can size an
 allocation — but it is an enforced-by-construction property, not a fuzzer memory cap.
 Adding `-rss_limit_mb` to CI is part of the phase-8 "Fuzzing in CI" item
-(`docs/ROADMAP.md:360`) rather than a new gap.
+(`docs/ROADMAP.md:397`) rather than a new gap.
 
 ### Scope
 

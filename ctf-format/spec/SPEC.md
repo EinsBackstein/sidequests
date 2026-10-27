@@ -2779,7 +2779,7 @@ offline gate passed; the two digests are placeholders:
 | `sections.chunk_indices` | integer | sections carrying a chunk index; C1–C7 are on-use rules (§10), so the count discloses what the pass did not evaluate |
 | `sections.mismatches` | array of integers | `name_id` of every inline section whose plaintext did not hash to its `root` |
 | `signing` | `"unsigned"`, `"present"`, or null | present, **not verified**; `null` when the file did not parse |
-| `gate` | object or null | the §25.6 verification record, field for field; `null` when no gate was requested |
+| `gate` | object or null | the §25.6 verification record, field for field; `null` when the gate did not run — no gate was requested, or the file was rejected before the gate could run |
 | `status` | string | exactly one of the four statuses below |
 | `reason` | string | a deterministic sentence naming the outcome and, for a non-`passed` result, the cause |
 
@@ -2788,7 +2788,8 @@ When the file does not parse, `sections` carries zeros and an empty `mismatches`
 does not guess. A section pass that cannot run to completion after a successful parse
 also leaves `sections` at zeros, with the parsed `commitment_root` and `signing`
 retained and `status` `rejected`. `intact` and `status` are the authority on whether
-the file passed.
+the file passed. A rejected file does not run the gate: `gate` stays `null` and the
+rejection is carried by `status` and `reason`.
 
 The four statuses are exhaustive and disjoint:
 
