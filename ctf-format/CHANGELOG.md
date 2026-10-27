@@ -7,6 +7,103 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.0] — 2026-10-27
+
+Phase 8 complete: the hostile-input and future-file corpora, the independent Go
+implementation, the rerunnable ingest artifact, `paths` emission in `ctf pack`, and
+the long-deferred entitlement fuzz target. **No byte-layout change:** `version_minor`
+stays `3`, every structure in §3–§9 is untouched, and every `.ctf` file this
+version's writer produces from a document that declares no `artifacts` is
+byte-identical to a 0.12 file's for the same document. Every spec addition either defines a structure
+a previous version left unspecified, states a rule the text already implied, or adds
+platform-side derived data, so no feature bit is spent (§15).
+
+### Spec — ingest artifact, authoring paths, and two clarifications
+
+- **§25.6.1, the ingest verification artifact (ticket 64).** One JSON record,
+  schema `ctf/ingest-verification/v1`, that separates "is the file intact" from "did
+  the offline gate pass" and never claims authenticity. Its four statuses
+  (`passed`/`failed`/`unverified`/`rejected`), exit contract (0/1/2), fixed key
+  order, and byte-stability rule are normative. Rules **S11–S12**; S1–S10 unchanged.
+- **§7.8, authoring-time destination checking (ticket 88).** An `artifacts` entry's
+  `path` is checked component-by-component against §7.2 before packing, two sections
+  may not declare the same effective destination, and `ctf pack` emits `paths` only
+  when a declared path differs from the flat name, naming it in `crit`.
+- **§30.1, media-type status (ticket 56).** `application/vnd.ctf.bundle.v1` is used
+  unregistered and is stable for every compatible revision; an incompatible change
+  gets a new identifier. No IANA registration is claimed.
+- **§8.2, F4 wording.** "Exactly one" is stated to be exact: both lengths zero (the
+  legal unsigned state) and both non-zero are outside F4. This is a clarification,
+  not a rule change — the rule already read that way.
+
+### Added — the hostile-input and future-file corpora (tickets 49, 50)
+
+`spec/vectors/conformance/` now carries, beside the two goldens, **29 hostile
+fixtures** (covering every hardening item that is a byte stream) and **three
+future-file fixtures** — an invented `feat_incompat` bit, an invented
+`feat_ro_compat` bit, and an `OPTIONAL` section of an undefined kind. `corpus.json`
+is a machine-readable index that distinguishes "reject outright" from "reject at
+the rule the reader reaches first" (a named reason is asserted only when §10's
+check order makes that rule the first failure, and the fixture leaves no second
+rule broken at the same step) from "parse, refuse on use". `crates/ctf-conformance` runs all 34 fixtures,
+`--emit` regenerates the index from the fixtures, and a test asserts every §14 audit
+row is fixture-covered or explicitly listed as not file-shaped. The corpus runs as a
+named CI step.
+
+### Added — the independent Go implementation (tickets 53, 54)
+
+`ctf-format/go/` is a second implementation written from `spec/SPEC.md` alone, sharing
+no code with the Rust crates and using an independent crypto stack (Go's
+`crypto/mlkem`, `crypto/mldsa`, `crypto/ed25519`, and `lukechampine.com/blake3`).
+It implements the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a
+writer that reproduces both goldens **byte-for-byte**, the primitive vectors, and the
+§20–§24 constructions it can run without suite 3. `go/AMBIGUITIES.md` records every
+place the text admitted more than one reading — it surfaced one real ambiguity in
+§8.2's F4 (now stated explicitly) — and `go/conformance` executes all 34 corpus
+fixtures, failing if a fixture on disk is missing from the index. A dedicated
+`ctf-go` CI workflow runs `gofmt`, `go vet`, and `go test`.
+
+### Added — `ctf verify` (ticket 64)
+
+`ctf verify <bundle> [--challenge <yaml> --secret <hex>] [--subject <id>]
+[--out <path>]` runs the commitment and inline-section checks and,
+when the authoring inputs are supplied, the §25 offline gate through the same code
+path as `ctf run`. It emits one stable `ctf/ingest-verification/v1` JSON record to
+stdout or `--out`, with exactly four statuses and exit codes 0/1/2. A record whose
+authoring `id`/`version` does not match the bundle manifest is `unverified` rather
+than mislabelled. It carries no timestamp, path, flag value, or event secret, and
+never claims authenticity.
+
+### Added — `ctf pack` emits `paths` (ticket 88)
+
+The authoring document gains an `artifacts:` list: `name` (section name), `source`
+(payload file, resolved relative to the YAML), and an optional `path` (destination
+in the player's tree). Each entry becomes an inline player-visible `artifact`
+section; a non-identity `path` becomes a `paths` entry with `crit: ["paths"]`. Two
+entries may not resolve to one destination, a traversing or absolute path is refused
+with the offending key named, and a document that declares no path packs exactly as
+it did before.
+
+### Fixed — fuzzing in CI and the entitlement target (tickets 51, 107)
+
+The `fuzz/` crate is excluded from the root workspace instead of believed to be in
+it, so `cargo check --manifest-path fuzz/Cargo.toml` builds on the pinned stable
+toolchain (the stale `bundle` target is fixed too). Six target corpora are committed
+(`bundle`, `header`, `manifest`, `chunk_index`, `section_table`, `entitlement`), the
+mirror walks `fuzz/corpus/*/*` rather than a fixed list so a crashing input copied
+out of `fuzz/artifacts/` becomes a regression test with no code change, and the new
+entitlement target fuzzes a real three-record signed chain. `fuzz/README.md`
+documents the crash-to-regression path.
+
+### Docs — the media type and the authority of the spec (ticket 56)
+
+`docs/MEDIA-TYPE.md` records the media-type decision, the identifier table, the
+Compact C Type Format extension collision, and the compatibility rule.
+`docs/FORMAT-DESIGN.md` now states that it carries no rules of its own, and a
+line-by-line pass against the spec corrected every contradiction it had accumulated
+(footer layout, `feat_ro_compat`, holder signature vs KEM keys, `u64_le(chal_version)`,
+crate claims, the entitlement record fields, and the extensibility citation).
+
 ## [0.12.0] — 2026-09-21
 
 Fills the last specification gaps and lands the phase-8 conformance work (tickets

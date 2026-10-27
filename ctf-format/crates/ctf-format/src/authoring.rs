@@ -31,7 +31,7 @@ use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 
 use crate::cbor::Value;
-use crate::manifest::{check_id, check_name};
+use crate::manifest::{check_id, check_name, check_path};
 
 /// The highest authoring `spec` this build understands.
 ///
@@ -111,6 +111,14 @@ pub struct ChallengeDoc {
     /// Platform overlay: fields the format does not own (spec §7.7).
     #[serde(default)]
     pub platform: Option<PlatformSpec>,
+    /// Static payloads carried inline in the bundle, in section order.
+    ///
+    /// An entry is a section: it becomes a `names` entry and, when it declares a
+    /// `path`, a `paths` entry (spec §7.2). This is the authoring surface for a
+    /// directory tree such as `src/main.c`; generated outputs remain declarations
+    /// of a later pass.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactSpec>,
 }
 
 impl ChallengeDoc {
@@ -467,6 +475,20 @@ impl ChallengeDoc {
                     }
                 }
             }
+            // An inline artifact is player-visible by construction, so sealing one
+            // is the same R5 conflict. Checked here rather than left to the serving
+            // pass, which would discover it only after ingest.
+            for member in &s.members {
+                if self.artifacts.iter().any(|a| &a.name == member) {
+                    issues.push(ValidationIssue::new(
+                        "sealed.members",
+                        format!(
+                            "`{member}` is an inline artifact and is player-visible \
+                             (spec §5.3, R5)"
+                        ),
+                    ));
+                }
+            }
         }
 
         if let Some(v) = &self.verify {
@@ -508,6 +530,103 @@ impl ChallengeDoc {
             }
         }
 
+        issues.extend(self.artifact_issues());
+
+        issues
+    }
+
+    /// The rules that apply to `artifacts` entries, shared by [`ChallengeDoc::validate`]
+    /// and `ctf pack`'s manifest builder.
+    ///
+    /// The path shape is checked with [`check_path`], the same component-by-component
+    /// rule the manifest decoder applies (M23), so the authoring surface cannot accept
+    /// a path the format rejects. What the manifest cannot check is a *destination*
+    /// collision with a section that has no `paths` entry — that section keeps its
+    /// flat name (§7.2) — so the effective destination is compared here as well. That
+    /// is M24's invariant, not merely its literal map comparison: two sections must
+    /// not extract to one file.
+    ///
+    /// `pub(crate)` because `pack` runs it when a caller builds a manifest without
+    /// going through [`ChallengeDoc::errors`] first, so both paths reject the same
+    /// document.
+    pub(crate) fn artifact_issues(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        let mut seen_names: Vec<&str> = Vec::new();
+        // Effective destinations already claimed by a section: the manifest's flat
+        // name and every generator output's flat name (a generator output becomes a
+        // section at run time, §7.6). `sealed.members` and `verify.solver` *name* a
+        // section — the same section may be both — so they declare no second
+        // destination and are not seeds here.
+        let mut destinations: Vec<(String, String)> = Vec::new();
+        claim(
+            &mut destinations,
+            &mut issues,
+            "manifest",
+            "the manifest section (§7.1)".to_owned(),
+        );
+        if let Some(g) = &self.generate {
+            for (i, output) in g.outputs.iter().enumerate() {
+                claim(
+                    &mut destinations,
+                    &mut issues,
+                    &output.name,
+                    format!("generate.outputs[{i}].name"),
+                );
+            }
+        }
+
+        for (i, artifact) in self.artifacts.iter().enumerate() {
+            if let Some(reason) = check_name(&artifact.name) {
+                issues.push(ValidationIssue::new(format!("artifacts[{i}].name"), reason));
+            }
+            // `manifest` is `name_id` 0 and `pack` emits that section itself. A second
+            // section with the same name would be assigned the same identity, which
+            // the section table rejects far from the author's file.
+            let reserved = artifact.name == "manifest";
+            if reserved {
+                issues.push(ValidationIssue::new(
+                    format!("artifacts[{i}].name"),
+                    "`manifest` is reserved for the manifest section",
+                ));
+            }
+            if seen_names.contains(&artifact.name.as_str()) {
+                issues.push(ValidationIssue::new(
+                    format!("artifacts[{i}].name"),
+                    "duplicate artifact name",
+                ));
+            }
+            seen_names.push(&artifact.name);
+
+            if artifact.source.is_empty() {
+                issues.push(ValidationIssue::new(
+                    format!("artifacts[{i}].source"),
+                    "must not be empty",
+                ));
+            }
+
+            if let Some(path) = &artifact.path
+                && let Some(reason) = check_path(path)
+            {
+                issues.push(ValidationIssue::new(
+                    format!("artifacts[{i}].path"),
+                    format!(
+                        "{reason}; a destination is a relative POSIX path whose every \
+                         component is a name (no `.`, `..`, leading `/`, or `\\`)"
+                    ),
+                ));
+            }
+
+            let destination = artifact.path.as_deref().unwrap_or(&artifact.name);
+            if !reserved {
+                let key = if artifact.path.is_some() {
+                    format!("artifacts[{i}].path")
+                } else {
+                    format!("artifacts[{i}].name")
+                };
+                claim(&mut destinations, &mut issues, destination, key);
+            }
+        }
+
         issues
     }
 
@@ -530,6 +649,29 @@ impl ChallengeDoc {
 
 fn text(s: &str) -> Value {
     Value::Text(s.to_owned())
+}
+
+/// Claim a section's effective destination, or report that another key claimed it
+/// first. §7.8 compares the manifest, every artifact, and every generated output;
+/// a sealed member or the solver *names* a section and declares no destination, so
+/// the same rule applies to a seed and to an artifact's declared `path`.
+fn claim(
+    destinations: &mut Vec<(String, String)>,
+    issues: &mut Vec<ValidationIssue>,
+    destination: &str,
+    key: String,
+) {
+    if destination.is_empty() {
+        return;
+    }
+    if let Some((_, other)) = destinations.iter().find(|(d, _)| d == destination) {
+        issues.push(ValidationIssue::new(
+            key,
+            format!("destination collides with {other}"),
+        ));
+        return;
+    }
+    destinations.push((destination.to_owned(), key));
 }
 
 /// Entries are emitted in whatever order the author wrote them; the canonical
@@ -716,6 +858,31 @@ impl OutputSpec {
             ("player_visible", Value::Bool(self.player_visible)),
         ])
     }
+}
+
+/// One `artifacts` entry: a static payload the bundle carries inline.
+///
+/// `name` is the section's name-table entry — its human identity and the flat
+/// filename when `path` is absent. `source` is the file the bytes are read from,
+/// relative to the authoring document. `path` is the optional destination in the
+/// extracted tree (spec §7.2); declaring it is the only way to express a nested
+/// layout such as `src/main.c`, because `names` is flat by design.
+///
+/// The shape is deliberately one entry per section rather than a map keyed by
+/// path: `path` is optional, and a map key would make "no path" unrepresentable
+/// without inventing a sentinel.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSpec {
+    /// Section name; indexes the manifest's `names` table and is the flat filename
+    /// when `path` is absent.
+    pub name: String,
+    /// Payload file, resolved relative to the authoring document's directory.
+    pub source: String,
+    /// Relative POSIX destination path in the extracted tree (spec §7.2). Absent
+    /// means the flat `name`.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// `runtime:` — the runtime contract the future orchestrator consumes (design §2).

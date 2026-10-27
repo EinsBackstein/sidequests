@@ -1,0 +1,44 @@
+name: ctf-go
+
+on:
+  push:
+    paths:
+      - "ctf-format/**"
+      - ".github/workflows/ctf-go.yml"
+  pull_request:
+    paths:
+      - "ctf-format/**"
+      - ".github/workflows/ctf-go.yml"
+
+defaults:
+  run:
+    working-directory: ctf-format/go
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The module's own `go` directive is the single source of truth, so a
+          # toolchain bump does not need a second edit here.
+          # Repo-root-relative: action inputs do not honour `defaults.run.working-directory`.
+          go-version-file: ctf-format/go/go.mod
+          cache-dependency-path: ctf-format/go/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required for:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...

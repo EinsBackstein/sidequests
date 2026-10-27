@@ -13,16 +13,18 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-09-21, at format version 0.3 / release 0.12.0. Phases 1–4
-complete; **the offline solvability gate is staged and persisted** (spec §25.6,
-tickets 29/30), and the phase-8 surface has started: the **hardening audit** (ticket
-48, `docs/HARDENING-AUDIT.md`), the **conformance vector runner** (ticket 52,
-`crates/ctf-conformance`), the **two reference challenges packing** (ticket 69), and
-the **challenge-key migration runbook** (ticket 59). **Spec §34 now specifies
-trusted-key distribution**, suite 3's SLH-DSA parameters, and the gate's
-verification record, so the specification has no gaps (ticket 55). The live gate is
+**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.0. Phases 1–4
+complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
+`docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
+49/50, 34 fixtures in `spec/vectors/conformance/`), the **independent Go
+implementation** (tickets 53/54, `go/`, byte-identical on both goldens and 34/34
+fixtures), the **rerunnable ingest artifact** (ticket 64, `ctf verify`, spec
+§25.6.1), **`ctf pack` path emission** (ticket 88), and **fuzzing in CI with the
+entitlement target** (tickets 51/107). **The specification has no gaps** (ticket
+55): §34 fixes trusted-key distribution, §20.3 fixes suite 3's SLH-DSA parameters,
+and §25.6/§25.6.1 fix the gate's record and the ingest artifact. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
---workspace` green, 0 clippy warnings.
+--workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 
 ## Where this lives
 
@@ -66,12 +68,17 @@ ctf-format/
                         wasmi cross-check, the determinism gate, the offline
                         solver host (spec §25), seed injection (spec §26), and
                         the `ctf-generator` container binary
-  crates/ctf-conformance/ the phase-8 vector runner (ticket 52): executes the
-                        golden `.ctf` fixtures and named hostile mutations under
-                        `spec/vectors/conformance/` against the library
+  crates/ctf-conformance/ the phase-8 vector runner (tickets 49/50/52): executes
+                        the golden, hostile, and future-file fixtures indexed by
+                        `spec/vectors/conformance/corpus.json` against the library
   crates/ctf-cli/       the `ctf` binary — inspect, validate, pack, keygen, sign,
                         keys, seal, unseal, init, transfer, serving-manifest,
-                        oci-export, oci-import, release, run, completions (clap)
+                        oci-export, oci-import, release, run, verify, completions
+                        (clap); `src/verify.rs` is the §25.6.1 ingest artifact
+  go/                   independent second implementation (tickets 53/54), written
+                        from `spec/SPEC.md` alone: read path, byte-identical
+                        writer, primitive vectors, the 34-fixture conformance
+                        runner, and `AMBIGUITIES.md`
   sdk/rust/             Rust guest SDK + sample generator (built to wasm)
   sdk/c/                C guest SDK (header + example)
   sdk/reference/        detached guest generators for the ticket-69 fixtures
@@ -84,6 +91,7 @@ ctf-format/
   docs/HARDENING-AUDIT.md         design §14 checklist, audited (ticket 48)
   docs/CHALLENGE-KEY-MIGRATION.md challenge-key -> (id, version) runbook (ticket 59)
   docs/WTFLAG-ADAPTER.md the flag-oracle adapter (spec §33)
+  docs/MEDIA-TYPE.md    the media-type decision and the .ctf extension collision
   CHANGELOG.md
   HANDOFF.md            this file
 ```
@@ -281,25 +289,24 @@ big, that is the wrong reason; run the four clauses.
 
 ## Next three things, in order
 
-**0.12.0 closed the specification** (§34 trusted keys, suite-3 SLH-DSA, the gate
-verification record; ticket 55) and landed the first phase-8 work: the hardening
-audit (48), the conformance runner (52), the reference-challenge packing (69), and
-the key-migration runbook (59). What remains, in order:
+**0.13.0 completed phase 8**: fuzzing in CI with the entitlement target (51/107),
+the 34-fixture hostile and future-file corpora (49/50), the independent Go
+implementation reproducing every vector from `spec/SPEC.md` alone (53/54), the
+rerunnable ingest artifact (64), and `ctf pack` path emission (88). What remains, in
+order:
 
 1. **The platform ingest path** (phase 5): the Postgres schema, the ingest pipeline,
    and the admin TUI — the first point the system is operable end to end. It now has
    everything it needs: `Bundle::parse`, `offline_gate`, `PlatformDescriptor`,
-   `ServingManifest`, `release_at_event_end`, and the `ctf/verification/v1` record
-   `ctf run` persists.
+   `ServingManifest`, `release_at_event_end`, the `ctf/verification/v1` record
+   `ctf run` persists, and the `ctf/ingest-verification/v1` artifact `ctf verify`
+   emits for a job to gate on.
 2. **The live solvability gate** (spec §32): the orchestrator project implements the
    socket contract; until then a `runtime`-bearing bundle is `unverified`.
-3. **The rest of phase 8**: fuzzing in CI, the per-§14-bullet hostile corpus and
-   synthetic future-file vectors, the entitlement fuzz target (#107), and the Go
-   second implementation (#53) reproducing every conformance vector from
-   `spec/SPEC.md` alone.
-4. **`ctf pack` emits the optional `paths` tree** (ticket 88) and, with it, the
-   authoring surface for `external` payloads, which `forensics` scaffolding
-   currently has to describe in prose because `ChallengeDoc` has no `external` key.
+3. **The authoring surface for `external` payloads**, which `forensics` scaffolding
+   still has to describe in prose because `ChallengeDoc` has no `external` key. The
+   `artifacts`/`path` half of the old handoff item landed in 0.13.0; mirror metadata
+   did not, and spec §7.4's `external` map remains reader-only.
 
 ## Gotchas that will bite you
 
@@ -356,7 +363,7 @@ the key-migration runbook (59). What remains, in order:
 - **`fuzz/` is outside the workspace** because `cargo-fuzz` needs nightly and the
   toolchain pin is load-bearing. `tests/fuzzmirror.rs` compiles and runs each
   target's body on the pinned toolchain, so an API change cannot silently rot the
-  fuzz targets between nightly CI runs.
+  fuzz targets between interactive nightly runs.
 - Rust was installed with rustup `--no-modify-path`; `~/.cargo/bin` has since been
   appended to `~/.zshrc`.
 

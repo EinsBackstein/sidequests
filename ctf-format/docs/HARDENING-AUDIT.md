@@ -1,8 +1,8 @@
 # Audit — parser hardening checklist (design §14)
 
-**Date:** 2026-09-21
-**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.12.0
-**Source checklist:** `docs/FORMAT-DESIGN.md` §14, lines 777–803.
+**Date:** 2026-10-27
+**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.0
+**Source checklist:** `docs/FORMAT-DESIGN.md` §14, lines 800–831.
 **Method:** every claim below was verified by reading the enforcement site and the
 tests that pin it in the current tree, not inferred from the design text. Line
 numbers are against this commit.
@@ -20,29 +20,50 @@ numbers are against this commit.
 | 7 | Normalize and reject path-like names (`../`, absolute, symlink-shaped) | `manifest.rs:701-738` (`check_name`/`check_path`: separators, `.`/`..`, control and bidi chars, empty components); applied at `manifest.rs:252-322`; authoring side `pack.rs:143-151` | `bundle.rs:1027` `manifest_rejects_path_like_names`; `bundle.rs:1064` `manifest_rejects_bidi_controls_in_names`; `bundle.rs:1099` `manifest_accepts_right_to_left_script_in_names`; `bundle.rs:906` `paths_reject_traversal_and_duplicates` | Satisfied | — |
 | 8 | Verify signatures and the commitment root before interpreting the manifest semantically | Commitment root: `bundle.rs:90-112` (footer → root recomputed → `verified_bytes` over the manifest record) and `bundle.rs:441-469`; signatures: deliberately a separate caller step, `bundle.rs:132-143` `Bundle::verify_signatures` | Commitment: `bundle.rs:365` `section_bytes_are_verified_before_they_are_returned`; `bundle.rs:452,481` byte-flip breaks root; `bundle.rs:497` `commitment_root_is_the_documented_construction`; `bundle.rs:2131` `t8_does_not_reach_into_claimed_regions` (manifest payload byte fails at parse with `SectionRootMismatch { name_id: 0 }`). Signatures: `bundle.rs:2254,2289,2328,2340` | Satisfied by design | — |
 | 9 | Verify chunk authenticity before exposing chunk bytes | `chunk.rs:255-362` (`ChunkIndex::verify_root` consumes the index and yields `VerifiedChunkIndex`; no method returns chunk bytes), `compile_fail` doctests at `chunk.rs:274-280,321-326`; serving boundary `bundle.rs:231-250` (C8) | `chunk.rs:116` `a_chunk_cannot_be_checked_against_an_unverified_index`; `chunk.rs:137,155,183` tamper/swap/forge; `chunk.rs:350` `c7_chunk_bytes_are_never_exposed_without_passing_c5`; `bundle.rs:1962,1979` C8 | Satisfied | — |
-| 10 | Fuzz from day one (header, section table, manifest, chunk index, entitlement chain); oracle no panic, no OOM, round-trip stable | `fuzz/fuzz_targets/{bundle,header,section_table,manifest,chunk_index}.rs`; `fuzz/Cargo.toml:27-59`; stable-toolchain mirror `tests/fuzzmirror.rs:114-145`; mutation oracle `tests/mutation.rs:110-147,221-239`. **No `entitlement` target exists** (see Gaps). No-OOM oracle is not a fuzzer memory cap; see Notes | `fuzzmirror.rs:115` `fuzz_targets_still_compile_and_run`; `mutation.rs:152,174,188,205,221` flips/truncation/corruption/arbitrary/sub-parsers | Gap | #107 |
-| 11 | Write an independent second implementation from the spec text alone | Absent: no `go/` directory; planned at `docs/ROADMAP.md:372` | — | Gap | #53 |
+| 10 | Fuzz from day one (header, section table, manifest, chunk index, entitlement chain); oracle no panic, no OOM, round-trip stable | `fuzz/fuzz_targets/{bundle,header,section_table,manifest,chunk_index,entitlement}.rs`; `fuzz/Cargo.toml:27-67`; stable-toolchain mirror `tests/fuzzmirror.rs:19-170`; mutation oracle `tests/mutation.rs:110-147,221-239`. No-OOM oracle is not a fuzzer memory cap; see Notes | `fuzzmirror.rs:208` `fuzz_targets_still_compile_and_run` over every committed seed, including `fuzz/corpus/entitlement/chain.cbor` (accepted-and-re-encoded branch asserted at `fuzzmirror.rs:239-244`); `mutation.rs:152,174,188,205,221` flips/truncation/corruption/arbitrary/sub-parsers | Satisfied | #107 |
+| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions it can run without suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (both goldens byte-for-byte); `go/conformance` (all 34 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
 
 ## Gaps
 
-### 10 — no `entitlement` fuzz target
+### 10 — `entitlement` fuzz target (closed by #107)
 
 The checklist names five targets: header, section table, manifest, chunk index, and
-**entitlement chain**. The first four exist (`fuzz/Cargo.toml:27-59`). There is no
-`fuzz/fuzz_targets/entitlement.rs` and no `[[bin]] name = "entitlement"` entry, so
-`Entitlement` parsing is fuzzed only indirectly through the whole-bundle target and
-the stable-toolchain mutation pass. No existing issue tracks this.
+**entitlement chain**. All five exist: `fuzz/fuzz_targets/entitlement.rs` and its
+`[[bin]] name = "entitlement"` entry in `fuzz/Cargo.toml` were added by issue #107,
+matching the other targets' layout and oracle.
 
-**Tracked by issue #107** ("Fuzz the entitlement chain"). A target that
-parses an entitlement record, checks it re-encodes byte-for-byte, and exercises its
-signature/validation paths, with the same oracle as the other targets.
+The target parses with `EntitlementChain::from_bytes` and, for an accepted input,
+requires `to_bytes()` and `encode()` to reproduce the bytes exactly, re-parses to
+check determinism, and exercises `validate`, `validate_against_root`, `records`,
+`get`, `record_id`, `check`, and the record-type/timestamp accessors at plausible
+and out-of-range indexes. E9 signature verification is deliberately out of scope:
+it needs trusted keys the bundle does not carry (§14, §18.4), so the target never
+calls `verify_signatures`.
 
-### 11 — no independent second implementation
+The committed seed `fuzz/corpus/entitlement/chain.cbor` is a genuine grant →
+transfer → progress chain generated and encoded through the library API, not
+hand-written bytes. `tests/fuzzmirror.rs` asserts that the seed reaches the
+accepted-and-re-encoded branch, so the coverage cannot rot silently.
+
+Tracked by issue #107 ("Fuzz the entitlement chain"), now closed.
+
+### 11 — the independent second implementation (#53)
 
 `docs/FORMAT-DESIGN.md` §14 requires a second implementation written from
-`spec/SPEC.md` alone. There is no `go/` directory (`docs/ROADMAP.md:19` reserves it;
-`docs/ROADMAP.md:372` still has it unchecked). Tracked by issue **#53**, "Go second
-implementation".
+`spec/SPEC.md` alone. `ctf-format/go/` is that implementation, and it was written
+without reading the Rust crates. It implements the §10 read path (H1–H14, R1–R22,
+T1–T8, M1–M25, F1–F10, C1–C8), a writer that reproduces both committed goldens
+byte-for-byte, the primitive vectors, and the §20–§24 constructions it can run
+without suite 3. `go/conformance` executes the same 34-fixture corpus the Rust
+runner does and fails if a fixture on disk is missing from `corpus.json`.
+
+`go/AMBIGUITIES.md` records the places where the text admitted more than one
+reading. The one real ambiguity it surfaced — §8.2's F4 versus the legal unsigned
+footer — is now stated explicitly in the spec; the rest are non-normative authoring
+or API choices. A disagreement between the two readers is treated as a specification
+bug, not a Go bug.
+
+Tracked by issue **#53**, now closed.
 
 ## Notes
 
@@ -92,7 +113,7 @@ Adding `-rss_limit_mb` to CI is part of the phase-8 "Fuzzing in CI" item
 
 ### Scope
 
-This audit reflects the tree at release 0.12.0. It records gaps as tickets; no code
+This audit reflects the tree at release 0.13.0. It records gaps as tickets; no code
 was changed. Trailing-byte rejection, the CBOR depth cap, the zstd caps, and the
 `VerifiedChunkIndex` type were all confirmed against their implementations and tests,
 not against the design text.

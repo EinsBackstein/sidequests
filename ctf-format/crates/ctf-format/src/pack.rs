@@ -20,18 +20,31 @@
 //!
 //! `names[name_id]` is a section's identity, so the order in which names are
 //! assigned is format-relevant. `pack` assigns, in order: `manifest` first (so the
-//! manifest is always `name_id` 0), then the generator module, its declared outputs
-//! in declaration order, the sealed members, and the solver. A name repeated across
-//! those places is assigned once, at its first occurrence. Every name passes
-//! `check_name`, so a path-shaped or control-character name is refused here — at
-//! authoring time, with the offending key named — rather than by the manifest
-//! decoder with no context.
+//! manifest is always `name_id` 0), then the author's inline `artifacts` in
+//! declaration order, the generator module, its declared outputs in declaration
+//! order, the sealed members, and the solver. A name repeated across those places
+//! is assigned once, at its first occurrence. Every name passes `check_name`, so a
+//! path-shaped or control-character name is refused here — at authoring time, with
+//! the offending key named — rather than by the manifest decoder with no context.
+//!
+//! # Paths, and why the key is omitted when it says nothing
+//!
+//! An `artifacts` entry may declare `path` (spec §7.2). `pack` compiles those into
+//! the manifest's `paths` map, keyed by the section's `name_id`, and lists `paths`
+//! in `crit` because a reader that ignores the tree would unpack the challenge
+//! flat (§7.2 asks a writer that relies on the tree to do so). A path equal to the
+//! section's flat name is *not* emitted: the fallback already places it there, so
+//! an entry would be a second spelling of one fact. A document with no declared
+//! path therefore has no `paths` key and packs byte-for-byte as it did before the
+//! key existed.
 
 use core::fmt;
+use std::path::Path;
 
 use crate::Error;
 use crate::authoring::{ChallengeDoc, ValidationIssue};
 use crate::bundle::{SectionSpec, write_bundle};
+use crate::cbor::Value;
 use crate::descriptor::PlatformDescriptor;
 use crate::manifest::{Manifest, check_name};
 use crate::policy::PolicyIssue;
@@ -90,22 +103,28 @@ impl From<Error> for PackError {
 /// name that key.
 struct NameSource {
     name: String,
-    key: &'static str,
+    key: String,
 }
 
 /// The names `pack` will assign, in `name_id` order, with their source keys.
 fn name_sources(doc: &ChallengeDoc) -> Vec<NameSource> {
     let mut out: Vec<NameSource> = vec![NameSource {
         name: "manifest".to_owned(),
-        key: "manifest",
+        key: "manifest".to_owned(),
     }];
-    fn push(out: &mut Vec<NameSource>, name: &str, key: &'static str) {
+    fn push(out: &mut Vec<NameSource>, name: &str, key: &str) {
         if !name.is_empty() && !out.iter().any(|s| s.name == name) {
             out.push(NameSource {
                 name: name.to_owned(),
-                key,
+                key: key.to_owned(),
             });
         }
+    }
+    // Before the declarations: an inline artifact is a real section today, while a
+    // generator output is only a reserved name. Putting artifacts first keeps
+    // `name_id` assignment stable for documents that do not declare any.
+    for (i, a) in doc.artifacts.iter().enumerate() {
+        push(&mut out, &a.name, &format!("artifacts[{i}].name"));
     }
     if let Some(g) = &doc.generate {
         if let Some(wasm) = &g.wasm {
@@ -139,10 +158,10 @@ pub fn names_for(doc: &ChallengeDoc) -> Vec<String> {
 /// Build the manifest a document compiles to.
 pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackError> {
     let sources = name_sources(doc);
-    let mut issues = Vec::new();
+    let mut issues = doc.artifact_issues();
     for s in &sources {
         if let Some(reason) = check_name(&s.name) {
-            issues.push(ValidationIssue::new(s.key, reason));
+            issues.push(ValidationIssue::new(s.key.clone(), reason));
         }
     }
     if !issues.is_empty() {
@@ -170,7 +189,61 @@ pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackEr
         return Err(PackError::Invalid(issues));
     }
 
-    Manifest::build(&doc.id, &doc.name, &names, doc.manifest_entries()).map_err(PackError::Format)
+    let mut extra = doc.manifest_entries();
+    let paths = path_entries(doc, &names)?;
+    if !paths.is_empty() {
+        extra.push((
+            text("paths"),
+            Value::Map(
+                paths
+                    .into_iter()
+                    .map(|(name_id, path)| (Value::Uint(u64::from(name_id)), Value::Text(path)))
+                    .collect(),
+            ),
+        ));
+        // §7.2: a writer that relies on the tree SHOULD list `paths` in `crit`, so a
+        // reader that would ignore it refuses the file instead of unpacking flat.
+        extra.push((text("crit"), Value::Array(vec![text("paths")])));
+    }
+
+    Manifest::build(&doc.id, &doc.name, &names, extra).map_err(PackError::Format)
+}
+
+/// The `paths` entries a document declares, as `(name_id, path)`.
+///
+/// A path equal to the artifact's flat name is skipped: `names` already places the
+/// section there, so the entry would carry no information and would change a
+/// manifest only to restate it. The result is empty for a document that declares no
+/// non-trivial path, which is what keeps existing bundles byte-identical.
+fn path_entries(
+    doc: &ChallengeDoc,
+    names: &[&str],
+) -> core::result::Result<Vec<(u16, String)>, PackError> {
+    let mut out = Vec::new();
+    for (i, artifact) in doc.artifacts.iter().enumerate() {
+        let Some(path) = artifact.path.as_deref() else {
+            continue;
+        };
+        if path == artifact.name {
+            continue;
+        }
+        let name_id = names
+            .iter()
+            .position(|n| *n == artifact.name)
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or_else(|| {
+                PackError::Invalid(vec![ValidationIssue::new(
+                    format!("artifacts[{i}].name"),
+                    "has no entry in the manifest name table",
+                )])
+            })?;
+        out.push((name_id, path.to_owned()));
+    }
+    Ok(out)
+}
+
+fn text(s: &str) -> Value {
+    Value::Text(s.to_owned())
 }
 
 /// Compile an authoring document into an unsigned bundle.
@@ -181,6 +254,10 @@ pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackEr
 /// returning, so a bundle this function produces is one a conforming reader
 /// accepts. A warning-severity issue (a third-party origin in the description) does
 /// not block packing; [`ChallengeDoc::warnings`] reports it separately.
+///
+/// An artifact's `source` is resolved against the current directory. A caller that
+/// has the authoring document's path — `ctf pack` does — should use
+/// [`pack_with_root`] so a relative `source` means next to the document.
 pub fn pack(doc: &ChallengeDoc) -> core::result::Result<Vec<u8>, PackError> {
     pack_with_suite(doc, DEFAULT_SUITE_ID)
 }
@@ -190,7 +267,20 @@ pub fn pack_with_suite(
     doc: &ChallengeDoc,
     suite_id: u16,
 ) -> core::result::Result<Vec<u8>, PackError> {
-    pack_with_descriptor(doc, suite_id).map(|(bytes, _)| bytes)
+    pack_with_root(doc, suite_id, Path::new("."))
+}
+
+/// [`pack_with_suite`], resolving relative artifact `source` paths against `root`.
+///
+/// `root` is the directory holding the authoring document, so `source: assets/main.c`
+/// names a file beside it rather than one beside the operator's shell. An absolute
+/// `source` is used as written.
+pub fn pack_with_root(
+    doc: &ChallengeDoc,
+    suite_id: u16,
+    root: &Path,
+) -> core::result::Result<Vec<u8>, PackError> {
+    pack_with_descriptor_root(doc, suite_id, root).map(|(bytes, _)| bytes)
 }
 
 /// [`pack`] returning the platform ingest descriptor alongside the bundle (ticket 60).
@@ -203,6 +293,16 @@ pub fn pack_with_descriptor(
     doc: &ChallengeDoc,
     suite_id: u16,
 ) -> core::result::Result<(Vec<u8>, PlatformDescriptor), PackError> {
+    pack_with_descriptor_root(doc, suite_id, Path::new("."))
+}
+
+/// [`pack_with_descriptor`], resolving relative artifact `source` paths against
+/// `root`. See [`pack_with_root`].
+pub fn pack_with_descriptor_root(
+    doc: &ChallengeDoc,
+    suite_id: u16,
+    root: &Path,
+) -> core::result::Result<(Vec<u8>, PlatformDescriptor), PackError> {
     let errors = doc.errors();
     if !errors.is_empty() {
         return Err(PackError::Invalid(errors));
@@ -213,9 +313,52 @@ pub fn pack_with_descriptor(
     if !issues.is_empty() {
         return Err(PackError::Policy(issues));
     }
+
+    // Read every payload before writing a byte, so a missing file is a clean
+    // authoring error naming the key rather than a half-written `--out`.
+    let mut payloads: Vec<Vec<u8>> = Vec::with_capacity(doc.artifacts.len());
+    let mut read_issues = Vec::new();
+    for (i, artifact) in doc.artifacts.iter().enumerate() {
+        let source = root.join(&artifact.source);
+        match std::fs::read(&source) {
+            Ok(bytes) => payloads.push(bytes),
+            Err(e) => read_issues.push(ValidationIssue::new(
+                format!("artifacts[{i}].source"),
+                format!("could not read `{}`: {e}", artifact.source),
+            )),
+        }
+    }
+    if !read_issues.is_empty() {
+        return Err(PackError::Invalid(read_issues));
+    }
+
     let bytes = manifest.encode().map_err(PackError::Format)?;
-    let section = SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &bytes);
-    let file = write_bundle(suite_id, &[section]).map_err(PackError::Format)?;
+    let mut sections = Vec::with_capacity(1 + payloads.len());
+    sections.push(SectionSpec::inline(
+        SectionKind::Manifest,
+        0,
+        SectionFlags::empty(),
+        &bytes,
+    ));
+    let names = manifest.names();
+    for (artifact, payload) in doc.artifacts.iter().zip(&payloads) {
+        let name_id = names
+            .iter()
+            .position(|n| *n == artifact.name)
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or(PackError::Format(Error::Inconsistent {
+                what: "an artifact has no name-table entry after a successful manifest build",
+            }))?;
+        // A static artifact is material for the player, so it is player-visible.
+        // `validate` refuses sealing one, because that is the R5 contradiction.
+        sections.push(SectionSpec::inline(
+            SectionKind::Artifact,
+            name_id,
+            SectionFlags(SectionFlags::PLAYER_VISIBLE),
+            payload,
+        ));
+    }
+    let file = write_bundle(suite_id, &sections).map_err(PackError::Format)?;
     Ok((file, descriptor))
 }
 

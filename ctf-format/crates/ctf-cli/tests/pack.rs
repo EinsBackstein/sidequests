@@ -127,3 +127,74 @@ generate:
         "the key must be named: {stderr}"
     );
 }
+
+#[test]
+fn packs_a_nested_artifact_tree_and_round_trips_its_path() {
+    let dir = TempDir::new("nested");
+    let assets = dir.0.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("main.c"), b"int main(void) { return 0; }\n").unwrap();
+
+    // `source` is relative to the authoring document, not the shell's cwd.
+    let source = yaml(
+        &dir,
+        "chal.yaml",
+        "\
+spec: 1
+id: source-tree
+name: Source Tree
+artifacts:
+  - name: main.c
+    source: assets/main.c
+    path: src/main.c
+",
+    );
+    let out = dir.path("chal.ctf");
+
+    let (ok, stdout, stderr) = pack(&source, &out);
+    assert!(ok, "pack refused a valid tree: {stdout}{stderr}");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let bundle = ctf_format::Bundle::parse(&bytes).unwrap();
+    let name_id = bundle
+        .manifest
+        .names()
+        .iter()
+        .position(|n| *n == "main.c")
+        .expect("the artifact has a name-table entry") as u16;
+    assert_eq!(bundle.manifest.path_of(name_id), Some("src/main.c"));
+}
+
+#[test]
+fn refuses_a_traversing_path_and_names_the_key() {
+    for path in ["../escape", "/etc/passwd", "src/../../main.c"] {
+        let dir = TempDir::new("bad-path");
+        let source = yaml(
+            &dir,
+            "bad.yaml",
+            &format!(
+                "\
+spec: 1
+id: x
+name: X
+artifacts:
+  - name: main.c
+    source: main.c
+    path: \"{path}\"
+"
+            ),
+        );
+        let out = dir.path("bad.ctf");
+
+        let (ok, _stdout, stderr) = pack(&source, &out);
+        assert!(!ok, "a traversing path must be refused: {path}");
+        assert!(
+            stderr.contains("artifacts[0].path"),
+            "the key must be named for {path}: {stderr}"
+        );
+        assert!(
+            !std::path::Path::new(&out).exists(),
+            "a refused pack must not leave a bundle"
+        );
+    }
+}

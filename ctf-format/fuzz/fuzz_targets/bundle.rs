@@ -33,5 +33,5 @@ fuzz_target!(|data: &[u8]| {
         .find(|r| r.kind == SectionKind::Manifest)
         .expect("a parsed bundle has exactly one manifest");
     let bytes = b.section_bytes(record).expect("manifest was verified in parse");
-    assert_eq!(b.manifest.encode().expect("re-encode"), bytes);
+    assert_eq!(b.manifest.encode().expect("re-encode"), bytes.as_ref());
 });

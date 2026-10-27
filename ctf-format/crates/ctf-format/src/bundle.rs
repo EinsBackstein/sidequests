@@ -89,6 +89,22 @@ impl<'a> Bundle<'a> {
 
         // 5. Footer: total_len equality, no trailing bytes, no slack.
         let footer = Footer::parse(file, header.footer_off)?;
+        // F10 (§8.1, §20.3): for a suite this build implements, the declared
+        // lengths are a property of the suite, never of the file. An unsigned
+        // footer has no slots to locate; an unknown suite is not resolved here
+        // (§19.1 S1) and its lengths are checked when the primitive is used.
+        if !footer.sig_classical.is_empty()
+            && let Ok(suite) = crate::suite::suite(header.suite_id)
+            && let Ok(role) = suite.signature()
+            && (footer.sig_classical.len() != role.classical_signature_len()
+                || footer.sig_pq.len() != role.pq_signature_len())
+        {
+            return Err(Error::SignatureSlotLength {
+                suite: header.suite_id,
+                classical: footer.sig_classical.len(),
+                pq: footer.sig_pq.len(),
+            });
+        }
 
         // 6. The commitment root, over the header and table bytes exactly as they
         //    appear in the file — not as re-serialized from the parsed structs,

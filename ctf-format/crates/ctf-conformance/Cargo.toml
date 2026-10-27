@@ -1,6 +1,6 @@
 [package]
 name = "ctf-conformance"
-version = "0.11.0"
+version = "0.13.0"
 description = "Conformance vector runner for the .ctf format: golden bundles and hostile inputs"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,9 +11,11 @@ path = "src/main.rs"
 
 # Only the reference implementation. The runner deliberately has no crypto
 # dependency of its own: it exercises `ctf-format`'s public API, so a vector can
-# never pass by re-implementing a rule the reference gets wrong.
+# never pass by re-implementing a rule the reference gets wrong. `serde_json` is
+# used solely to render and read the committed corpus index.
 [dependencies]
 ctf-format = { path = "../ctf-format" }
+serde_json = "1"
 
 [lints]
 workspace = true

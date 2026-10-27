@@ -1124,7 +1124,7 @@ reversed domain such as `example.org`) to that platform's opaque data.
 
 Authors do not write canonical CBOR by hand; they write YAML and `ctf pack`
 compiles it (design §10). The YAML schema is independent of this document and of
-`MANIFEST_SPEC`, but two properties are normative for the authoring front end:
+`MANIFEST_SPEC`, but three properties are normative for the authoring front end:
 
 - **Unknown keys are rejected.** Every structure in the authoring schema MUST
   reject a key it does not define, at every nesting level. This is the typo guard
@@ -1134,6 +1134,21 @@ compiles it (design §10). The YAML schema is independent of this document and o
 - **The error names the offending key.** Authoring input is the author's own file,
   not a hostile byte stream, so the diagnostic MUST name the key rather than
   restating the rule abstractly.
+
+- **A declared destination is checked before packing.** An `artifacts` list entry
+  names a section (`name`), the file its payload is read from (`source`), and MAY
+  declare a `path` — a relative POSIX path that becomes that section's `paths`
+  entry (§7.2). The front end MUST apply the §7.2 path rule to every component and
+  MUST refuse two sections whose effective destinations are the same file, where
+  the effective destination is a declared `path` or, absent one, the flat `name`.
+  The manifest, every artifact, and every `generate.outputs` entry are compared —
+  a generator output becomes a section at run time (§7.6), so its flat name is a
+  destination today. A `sealed.members` entry and `verify.solver` *name* a section
+  rather than declaring a new one; the same section may be both, and neither adds
+  a destination to compare. `ctf pack` emits `paths` only
+  when at least one declared path differs from its flat name — never an empty map
+  or an identity map — and names `paths` in `crit` when it does (§7.2). A document
+  that declares no paths packs exactly as it did before the key existed.
 
 `crit` is *reader* forward compatibility and is not a substitute for this; the two
 mechanisms answer different questions (§7.3).
@@ -1196,6 +1211,7 @@ A reader MUST reject the file if any of the following holds.
 | F7 | `total_len ≠ file_len`. |
 | F8 | `root` differs from the commitment recomputed per §8.3. |
 | F9 | Any byte follows the footer. |
+| F10 | Both declared lengths are non-zero and disagree with the slot lengths §20.3 fixes for a suite this reader implements (§8.1). |
 
 F3, F4, and F5 SHOULD be evaluated before F6 and F7. Those three read fields at
 fixed offsets from `footer_off`, so they are the only part of the footer whose
@@ -1209,10 +1225,18 @@ Notes, all normative:
 
 - **F4 is the downgrade check.** Hybrid signing is mandated: both the classical and
   the post-quantum signature must verify. A footer carrying one of the pair is
-  rejected by F4 rather than read as "classically signed".
+  rejected by F4 rather than read as "classically signed". "Exactly one" is exact:
+  a footer with both lengths zero (the unsigned state below) and one with both
+  non-zero (a signed pair) are both outside F4; only the half-signed combination is
+  a violation.
 - **F9 is implied by F5 and F7 together** and is stated separately because it is
   the rule a writer must obey, and because it is the property a security reviewer
   looks for by name.
+- **F10 is checked only for a suite this reader implements.** §8.1 makes the slot
+  lengths the suite's, not the file's: a suite-1 footer declares 64 and 3309. An
+  unrecognized `suite_id` is still not a header-parse rejection (§19.1 S1), and its
+  slot lengths are checked when the primitive is resolved. An unsigned footer has no
+  slots to locate and is outside F10.
 - **`sig_classical_len = sig_pq_len = 0` is legal** and means the bundle is
   unsigned. Such a bundle authenticates nothing and MUST NOT be served, executed,
   or trusted. It is a valid intermediate state — a writer produces the file, a
@@ -1486,7 +1510,7 @@ MAY NOT, because each depends on values the previous one validated.
    R1–R22 to every record; then apply T1–T8. **R20, R21, R22 and T8 are applied
    only if the header sets `CONTAINER_V1`** (§16); every other rule applies to
    every file. R4 MUST precede R3 and R18, and R16 MUST precede R19.
-5. Parse the footer and apply F1–F7 and F9.
+5. Parse the footer and apply F1–F7, F9 and F10.
 6. Recompute the commitment root per §8.3 and apply F8.
 7. Locate the manifest section, verify its `root` against its stored bytes, then
    decode it and apply M1–M18 and M22–M24.
@@ -1913,8 +1937,9 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.8.0 | Encrypted sections end to end, the entitlement chain, and stage gating. **No byte-layout change:** `version_minor` stays `3`, and the header, section table, footer, commitment root, and signature transcript are untouched. Adds **`name_id`** to the key-envelope map (§21.3, EN5), which is what lets one `keys` section deliver the content keys of every encrypted section; no writer has ever emitted a `keys` section, so no existing file carries the old three-key form. The reference writer now emits `enc = 1` — compress, then encrypt, with `comp = 1` framing one zstd frame per STREAM chunk (§5.4, §20.2) — and a reader recovers a section's key from its envelope and decrypts it. A **stage-gated** section's content key is `stage_key(flag(N−1), N)` rather than random (§20.2, §22.4); the derivation is the gate and no envelope carries it. Implements the entitlement chain's E1–E9 (§18): the record format was specified in 0.5.0, and **E9** now verifies `sig_platform` always and a `transfer`'s `sig_holder` given trusted keys, so §14 shrinks to key distribution and the live gate. Adds the optional `flag.stage_gate` declaration (§7.6) and enforces **DF5**: a stage gate on a static flag is rejected, and a static flag is `static`/`none` or any derivation this version does not implement. Closes the review-debt tickets 75, 77, 78, 79, and 82: §15's limit row is split by direction and §12 reconciled with it; §3's padding clause is gated on `CONTAINER_V1`; §16's M7 cell no longer claims to name the key; §4.5 names the test that asserts each header vector, with a dedicated **0.3 header vector test** added; and `ctf` gains argument parsing, shell completions, and CLI integration tests. Every change either defines what a previous version left unspecified or *widens* what a reader accepts, so no feature bit is spent (§15). |
 | 0.9.0 | Review-debt tickets 81, 83, 86–88, 90–92, 95–97. **No byte-layout change:** `version_minor` stays `3` and every existing `.ctf` file is byte-identical. Adds the optional **`paths`** manifest key and rules M22–M25 (§7.2, §7.5), so a directory tree is representable without widening `names`: a relative POSIX path per `name_id`, checked component-by-component against the name rule so `.`, `..`, an absolute path, and a `\` are unrepresentable rather than filtered; unique across the map; and naming a real section. It is an ordinary manifest key, so no feature bit is spent — a reader that does not implement it carries it byte-for-byte (§7.3). The rest are diagnostic and reference-implementation changes with no format effect: a section root mismatch carries the section's `name_id` and the whole-file verification pass reports every mismatch instead of aborting on the first; `crit` list errors (M6–M8) carry an entry index like the sibling list rules; `ExceedsFile` reports the real file length and names `footer_off` as the bound when that is what fired; a pre-0.3 file is diagnosed as an older format with no container rather than as a feature-negotiation failure; `BadMagic` and `CborUnsupported` no longer echo input bytes; `ctf inspect` prints each section's full name so truncated labels cannot collide; the unused `Bundle::sig_input` is deleted and `Manifest::description` is pinned by a test. The design note's thread-parallel BLAKE3 claim is corrected to state the reference implementation hashes single-threaded. |
 | 0.10.0 | Phase 3: the deterministic generator, and the progress payload of a handoff. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.9 file's for the same inputs. Adds **§23**, fixing the generator interface (a core WebAssembly module with no imports, exporting `memory`, `ctf_alloc`, `ctf_generate`, and `ctf_output_len`), the canonical output block, the output root, the interface version and WASM profile, the three determinism modes (`strict`, `flag_only`, `none`), and rules G1–G12 — including fuel rather than epochs, forced deterministic relaxed-SIMD, NaN canonicalization, and a cross-engine cross-check, which is how §23.6's settings are validated rather than trusted. Adds **§24**, fixing the sealed-progress payload a `progress` record carries across a handoff (P1–P4): a `holder`-context envelope and an AEAD ciphertext whose AAD binds suite, challenge, and subject. §7.6 gains `generate.interface` and `generate.profile`, makes `wasm` and `outputs` conditional on a non-`flag_only` determinism mode, and states that the container reader carries these declarations without acting on them; the output-to-`names` mapping is enforced by the authoring tool (§7.8), not the reader. Every change either defines a structure a previous version left unspecified or relaxes a rule, so no feature bit is spent (§15). Reference implementation: the `ctf-generator` crate (Wasmtime host with a `wasmi` cross-check and the determinism gate), the Rust and C guest SDKs, `ctf init` archetype scaffolds, the sealed-progress helpers, and `ctf transfer`. |
-| 0.11.0 | Phase 4 and the platform interfaces. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.10 file's for the same inputs. Adds **§25**, the offline solvability gate: the `solver.wasm` ABI (a core module with no imports exporting `memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len`), the artifact block that deliberately omits the flag, the flag output block, the gate procedure, the tri-state `passed`/`failed`/`unverified` status, and rules S1–S8. Adds **§26** (seed and flag injection: `CTF_SEED`/`/ctf/seed`, `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and the no-guessing rule I1–I5), **§27** (sealed release and its audit record, L1–L4), **§28** (the static artifact serving manifest and its two independent checks, V1–V5), **§29** (the platform ingest descriptor and the digest-pinning and referrer/origin policy checks, P1–P3 and O1–O3), **§30** (the bundle as an OCI image, media type `application/vnd.ctf.bundle.v1`, X1–X3), **§31** (the challenge base image contract, B1–B3), **§32** (the live gate socket contract, N1–N4 — specified, not implemented), and **§33** (the WTFlag adapter, W1–W3). Registers the bundle media type in §12 and removes the live gate from §14's unspecified list. Every addition defines a structure a previous version left unspecified, adds a platform-side policy that is not a container rule, or relaxes nothing; no feature bit is spent (§15). Reference implementation: `ctf-generator`'s solver host and offline gate, the `ctf-generator` container binary, and the `ctf` subcommands `run`, `serving-manifest`, `oci-export`, `oci-import`, and `release`. |
+| 0.11.0 | Phase 4 and the platform interfaces. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.10 file's for the same inputs. Adds **§25**, the offline solvability gate: the `solver.wasm` ABI (a core module with no imports exporting `memory`, `ctf_alloc`, `ctf_solve`, and `ctf_output_len`), the artifact block that deliberately omits the flag, the flag output block, the gate procedure, the tri-state `passed`/`failed`/`unverified` status, and rules S1–S8. Adds **§26** (seed and flag injection: `CTF_SEED`/`/ctf/seed`, `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and the no-guessing rule I1–I5), **§27** (sealed release and its audit record, L1–L4), **§28** (the static artifact serving manifest and its two independent checks, V1–V5), **§29** (the platform ingest descriptor and the digest-pinning and referrer/origin policy checks, P1–P3 and O1–O3), **§30** (the bundle as an OCI image, media type `application/vnd.ctf.bundle.v1`, X1–X3), **§31** (the challenge base image contract, B1–B3), **§32** (the live gate socket contract, N1–N4 — specified, not implemented), and **§33** (the WTFlag adapter, W1–W3). Records the bundle media type in §12 and removes the live gate from §14's unspecified list. Every addition defines a structure a previous version left unspecified, adds a platform-side policy that is not a container rule, or relaxes nothing; no feature bit is spent (§15). Reference implementation: `ctf-generator`'s solver host and offline gate, the `ctf-generator` container binary, and the `ctf` subcommands `run`, `serving-manifest`, `oci-export`, `oci-import`, and `release`. |
 | 0.12.0 | Fills the last specification gaps (ticket 55). **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces is byte-identical to a 0.11 file's for the same inputs. Adds **§34**, the trusted-key interface: the trust set a verifier is supplied (`root`, `platform`, `holder`), the **holder public-key hash** `BLAKE3("ctf/holder-hash/v1" ‖ pk_classical ‖ pk_pq)` that E9 resolves a `transfer` against, the rule that a key trusted for one role is not accepted for another, and the separation of the §24 progress recipient KEM key from the holder signature key. Completes **§20.3** for suite 3 by fixing its parameter set (`SLH-DSA-SHA2-128s`, FIPS 205) and slot layout (`sig_pq = ML-DSA-65 ‖ SLH-DSA-SHA2-128s`, 11165 bytes), so a suite-3 verifier need not guess. Adds **S9–S10** to §25.7, requiring a gate to name each §25.5 stage it ran (with the §25.6 condition behind a non-passed outcome) and to persist a `ctf/verification/v1` record. Rewrites §14 to state that nothing is left unspecified and to list the three items specified but not implemented here. Every change defines a structure a previous version left unspecified and narrows nothing, so no feature bit is spent (§15). |
+| 0.13.0 | Phase 8 complete. **No byte-layout change:** `version_minor` stays `3`, the header, section table, footer, commitment root, and signature transcript are untouched, and every `.ctf` file this version's writer produces from a document that declares no `artifacts` is byte-identical to a 0.12 file's for the same document. Adds **§25.6.1**, the ingest verification artifact (`ctf/ingest-verification/v1`): four statuses, the exit-code contract, fixed key order, and byte-stability, with rules **S11–S12**. Adds the authoring-side destination rules to **§7.8** (an `artifacts` entry's `path`, checked component-by-component, unique by effective destination; `ctf pack` emits `paths` only when a path differs from the flat name, and names it in `crit`). States the media-type status in **§30.1** — `application/vnd.ctf.bundle.v1` is used unregistered and is stable across compatible revisions — and makes **§8.2**'s F4 note explicit that "exactly one length is zero" means the half-signed pair only, so the legal unsigned state is not a violation. Completes the phase-8 corpora: **29 hostile fixtures** covering every §14 item that is a byte stream, and **three future-file vectors** (invented `feat_incompat` bit, invented `feat_ro_compat` bit, unknown `OPTIONAL` kind) executed by both implementations, with a machine-readable `corpus.json` index. Reference implementation: the independent Go reader/writer in `go/` (byte-identical on both goldens, 34/34 corpus fixtures), `ctf verify`, `ctf pack` path emission, and the entitlement fuzz target. Every change defines what a previous version left unspecified, states what the text already implied, or is platform-side derived data, so no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2642,7 +2667,7 @@ A solver that does not recover the derived flag blocks publication.
 | Status | Meaning |
 |---|---|
 | `passed` | The solver recovered the derived flag. |
-| `failed` | The solver ran but produced a different flag. |
+| `failed` | The solver ran but produced a different flag, or a stage of §25.5 failed outright. |
 | `unverified` | The gate could not be run. |
 
 A bundle is `unverified`, never `passed`, when any of the following holds: it
@@ -2650,6 +2675,12 @@ declares `runtime` (solving needs a booted instance, §32); its `verify.offline`
 declaration is false or absent; or it declares no generator or no solver. An honest
 `unverified` is a usable state; a false `passed` is worse than no gate at all
 (design §3).
+
+`unverified` is the state for a gate that was **not run**, because an input it needs
+is absent. A gate that ran and could not complete a stage — a module that failed the
+determinism check or could not be sandboxed — is `failed`, not `unverified`, and S9
+requires the stage to be named. The distinction is the difference between "there was
+nothing to run" and "it ran and broke".
 
 A conforming gate MUST name each stage of §25.5 that it ran, and for a `failed` or
 `unverified` outcome MUST name the stage or the condition that produced it, so a
@@ -2677,6 +2708,122 @@ commitment root.
 `generator_root`, `cross_engine`, and `runs` are `null` when the gate did not run;
 `challenge` and `subject` are JSON strings with `"` and `\` escaped.
 
+### 25.6.1 The ingest verification artifact
+
+A verification that a platform reruns as a job emits one artifact, the **ingest
+verification record**, so ingest gates on a value rather than on a shell exit code.
+It answers two questions separately, because collapsing them is how a tool reports
+success it did not earn:
+
+1. **Is the file intact?** It parses (§10 steps 1–8) and its commitment root matches
+   its header and section table; then every inline section the checking build can
+   read is hashed against its `root` (§5.1). A section whose bytes are present and
+   which the build cannot read — an encrypted section, when no key is an input to
+   the command — is counted in `sections.unverifiable` and disclosed. It is not
+   silently treated as verified, and it is not, by itself, an integrity failure.
+2. **Did the offline gate pass?** §25.5's tri-state, and only when the caller supplies
+   the authoring inputs the gate needs.
+
+The record never answers "authentic". Signatures are present or absent, and presence
+is not verification: §10 step 9 needs a trusted key that this artifact does not carry
+(§8.2, §34). An artifact that blurred intact and authentic would be worse than no
+artifact.
+
+It is serialized as JSON with the schema id `ctf/ingest-verification/v1`. The
+example below describes a two-section bundle (manifest and one artifact) whose
+offline gate passed; the two digests are placeholders:
+
+```json
+{
+  "schema": "ctf/ingest-verification/v1",
+  "bundle_digest_algorithm": "blake3",
+  "bundle_digest": "<64 lowercase hex>",
+  "bundle_size": 4680,
+  "commitment_root": "<64 lowercase hex, or null>",
+  "intact": true,
+  "sections": {
+    "verified": 2,
+    "external": 0,
+    "unverifiable": 0,
+    "chunk_indices": 0,
+    "mismatches": []
+  },
+  "signing": "unsigned",
+  "gate": {
+    "schema": "ctf/verification/v1",
+    "challenge": "whos-that-bird",
+    "version": 0,
+    "subject": "reference",
+    "status": "passed",
+    "reason": "the solver recovered the derived flag",
+    "generator_root": "<64 lowercase hex, or null>",
+    "cross_engine": true,
+    "runs": 2
+  },
+  "status": "passed",
+  "reason": "the bundle is intact and the offline gate passed"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema` | string | exactly `ctf/ingest-verification/v1` |
+| `bundle_digest_algorithm` | string | exactly `blake3`; names the digest so it is never guessed |
+| `bundle_digest` | string | 64 lowercase hex digits: BLAKE3 over the whole bundle file's bytes as they appear on disk |
+| `bundle_size` | integer | the bundle file's length in bytes |
+| `commitment_root` | string or null | the footer's §8.3 root, 64 lowercase hex; `null` when the file did not parse |
+| `intact` | boolean | true only when the file parsed, its commitment root matched, and no inline section that the checking build could read mismatched its `root`. A present-but-unreadable section is counted in `unverifiable` and does not make the file `rejected`; a consumer that requires every inline byte checked MUST also require `sections.unverifiable = 0` |
+| `sections.verified` | integer | inline sections hashed and matched |
+| `sections.external` | integer | `EXTERNAL` sections; their bytes are absent by design and are reported, never rejected |
+| `sections.unverifiable` | integer | inline sections whose bytes are present and which the checking build cannot read |
+| `sections.chunk_indices` | integer | sections carrying a chunk index; C1–C7 are on-use rules (§10), so the count discloses what the pass did not evaluate |
+| `sections.mismatches` | array of integers | `name_id` of every inline section whose plaintext did not hash to its `root` |
+| `signing` | `"unsigned"`, `"present"`, or null | present, **not verified**; `null` when the file did not parse |
+| `gate` | object or null | the §25.6 verification record, field for field; `null` when no gate was requested |
+| `status` | string | exactly one of the four statuses below |
+| `reason` | string | a deterministic sentence naming the outcome and, for a non-`passed` result, the cause |
+
+When the file does not parse, `sections` carries zeros and an empty `mismatches`, and
+`commitment_root` and `signing` are `null`: the record reports what it established and
+does not guess. A section pass that cannot run to completion after a successful parse
+also leaves `sections` at zeros, with the parsed `commitment_root` and `signing`
+retained and `status` `rejected`. `intact` and `status` are the authority on whether
+the file passed.
+
+The four statuses are exhaustive and disjoint:
+
+| `status` | Holds when |
+|---|---|
+| `rejected` | The file failed a commitment or integrity check: it did not parse, its commitment root did not match, or a readable section mismatched its `root`. External payloads and present-but-unreadable sections are disclosed in `sections`, never rejected on their own. |
+| `passed` | `intact` is true **and** the §25.5 gate is `passed`. |
+| `failed` | `intact` is true **and** the gate is `failed`, or the gate failed a §25.5 stage outright. |
+| `unverified` | `intact` is true and either no gate was requested or the gate is `unverified` (§25.6). |
+
+A bundle that is `rejected` or `failed` MUST NOT be reported `passed`, whatever else
+the record contains. `unverified` is honest incompleteness, never success: it MUST NOT
+be treated as, or serialized as, `passed` (rule S8).
+
+The record is **stable**: for the same bundle bytes and the same gate inputs,
+successive runs MUST produce byte-identical JSON. It therefore carries no timestamp,
+no file path, no run counter, no flag value, and no event secret, and its keys appear
+in the order shown above. A job may digest the artifact and compare it across reruns.
+
+The reference tooling's exit-code contract is:
+
+| Exit | Meaning |
+|---:|---|
+| 0 | `passed` |
+| 1 | `rejected` or `failed` — the bundle must not be published |
+| 2 | `unverified` — intact, but not a pass |
+
+A usage error also exits 1. Exit 2 keeps the meaning it already has elsewhere in the
+reference CLI: intact, but not something the tool can vouch for.
+
+The record is **derived data about a run**, not a container structure. It is never
+written inside a bundle, no manifest key or section kind references it, and it is not
+covered by the commitment root (§8.3). Adding it, losing it, or rewriting it does not
+change a single byte of a `.ctf` file.
+
 ### 25.7 Rules
 
 | # | Rule |
@@ -2691,6 +2838,8 @@ commitment root.
 | S8 | A bundle whose gate does not run MUST be reported `unverified` (§25.6), never `passed`. |
 | S9 | A gate MUST name each §25.5 stage it ran, and MUST name the stage or §25.6 condition behind a `failed` or `unverified` outcome. |
 | S10 | A persisted verification record MUST carry the `ctf/verification/v1` schema, the `status`, and the `challenge` it describes. |
+| S11 | An ingest verification record MUST report `passed` only when the bundle is intact and the §25.5 gate is `passed`. A `rejected` or `failed` bundle MUST exit non-zero, and an `unverified` result MUST NOT exit 0. |
+| S12 | For the same bundle bytes and gate inputs an ingest verification record MUST be byte-identical across runs. It MUST NOT carry a timestamp, a path, a flag value, or the event secret, and it MUST remain derived data outside the commitment root. |
 
 ## 26. Seed and flag injection
 
@@ -2888,6 +3037,14 @@ gains digests, immutability, and replication without knowing the format.
 | `application/vnd.ctf.bundle.config.v1+json` | an empty image config |
 | `application/vnd.oci.image.manifest.v1+json` | the image manifest |
 | `application/vnd.oci.image.index.v1+json` | the image index |
+
+The `vnd.` identifiers are vendor-specific and this project uses them unregistered:
+no IANA media type registration has been filed, and none is claimed here. The
+identifiers are stable. `application/vnd.ctf.bundle.v1` stays `v1` for every
+compatible revision of the container, including this document's `version_minor`
+3; an incompatible change gets a new identifier, conventionally `...v2`, and the
+`v1` identifier is never reused. `docs/MEDIA-TYPE.md` records the decision and the
+registration path if one is ever wanted.
 
 ### 30.2 The layout
 

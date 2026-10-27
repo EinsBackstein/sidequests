@@ -99,6 +99,14 @@ pub enum Error {
     BadFooterLen { got: u64, want: u64 },
     /// A signature length beyond what any suite in the registry can produce.
     SignatureTooLong { got: u32, max: u32 },
+    /// The footer's declared signature lengths disagree with the slot lengths the
+    /// file's suite fixes (F10, §8.1, §20.3). The lengths locate the slots, so a
+    /// mismatched pair is a file that cannot be authenticated as its own suite.
+    SignatureSlotLength {
+        suite: u16,
+        classical: usize,
+        pq: usize,
+    },
     /// A recomputed BLAKE3 root does not match the one the file claims. The file
     /// is corrupt or has been tampered with; which, this error cannot say.
     RootMismatch { at: &'static str },
@@ -255,6 +263,14 @@ impl fmt::Display for Error {
             Self::SignatureTooLong { got, max } => {
                 write!(f, "signature length {got} exceeds cap {max}")
             }
+            Self::SignatureSlotLength {
+                suite,
+                classical,
+                pq,
+            } => write!(
+                f,
+                "signature slots {classical}/{pq} bytes do not match suite {suite}'s slot lengths"
+            ),
             Self::RootMismatch { at } => write!(f, "BLAKE3 root mismatch at {at}"),
             Self::SectionRootMismatch { name_id } => {
                 write!(f, "BLAKE3 root mismatch for section {name_id}")

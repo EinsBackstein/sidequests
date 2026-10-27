@@ -50,6 +50,12 @@
 //! (spec §5.7) remains reachable only through the bundle layer until the
 //! authoring surface grows the key.
 //!
+//! Inline static payloads *are* authorable now: an `artifacts:` entry names the
+//! section, the file to read, and an optional `path` for the extracted tree
+//! (spec §7.2, §7.8). That is the right shape for a small attachment, not for a
+//! 40 GB evidence image, which is why the gap above is specifically about
+//! `external`.
+//!
 //! # Determinism
 //!
 //! The output is a pure function of `(archetype, id)`: files are returned in a
@@ -256,8 +262,9 @@ fn notes(id: &str) -> String {
     format!(
         "# {id} analysis notes\n\n\
          Design 10 expresses forensics-scale payloads with an `external:` list, but the\n\
-         authoring schema has no such key yet and rejects unknown keys (spec 7.8). Record\n\
-         the payload inventory here until it does.\n\n\
+         authoring schema still has no such key and rejects unknown keys (spec 7.8).\n\
+         Small static payloads can be carried inline now with an `artifacts:` entry and\n\
+         its `path:`. Record the external payload inventory here until `external` lands.\n\n\
          - name:\n\
          - size:\n\
          - root (blake3):\n\
@@ -331,13 +338,14 @@ Next steps:
 const FORENSICS_BODY: &str = "\
 Design 10's forensics-scale payloads are declared with an `external:` list, but
 the authoring schema has no `external` key yet and rejects unknown keys (spec
-7.8). The scaffold therefore carries only `flag: derived`; keep the payload paths
-and hashes in `notes.md` for now. The manifest's `external` mechanism (spec 5.7)
-is reachable through the bundle layer until the authoring surface grows the key.
+7.8). Small static payloads can be carried inline with `artifacts:` and a `path:`;
+keep the external payload inventory in `notes.md` for now. The manifest's
+`external` mechanism (spec 5.7) is reachable through the bundle layer until the
+authoring surface grows the key.
 
 Next steps:
 
-1. Put the analysis and payload inventory in `notes.md`.
+1. Put the analysis and external payload inventory in `notes.md`.
 2. Replace `name` and `description` in `challenge.yaml`.
 3. Run `ctf validate`, then `ctf pack`.
 ";

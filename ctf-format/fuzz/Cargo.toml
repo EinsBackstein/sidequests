@@ -58,3 +58,10 @@ path = "fuzz_targets/chunk_index.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "entitlement"
+path = "fuzz_targets/entitlement.rs"
+test = false
+doc = false
+bench = false

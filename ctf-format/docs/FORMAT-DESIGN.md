@@ -1,9 +1,17 @@
 # `.ctf` — Challenge Transport Format
 
 **Status:** design rationale and threat model. The normative specification is
-[`spec/SPEC.md`](../spec/SPEC.md), which wins wherever the two disagree; this
-document explains *why* the bytes are what they are, and specifies the phases not
-yet frozen there.
+[`spec/SPEC.md`](../spec/SPEC.md), which wins wherever the two disagree. This
+document explains *why* the bytes are what they are. It states no rules of its own:
+every `MUST` below restates a rule the spec already fixes, and the spec governs.
+
+## Authority
+
+`spec/SPEC.md` is authoritative. This document records the reasoning, threat
+model, and design history behind it, not normative rules. Where this document and
+the spec differ, including any byte layout, rule number, feature bit, version
+claim, or "not yet specified" claim, the spec is correct and this document is the
+bug to fix.
 
 ## 1. What this is
 
@@ -68,10 +76,10 @@ offline half (implemented here) and a live half (specified here, implemented the
      solution is artifact-only: OSINT, crypto, RE, forensics.
    - **Live gate (orchestrator project).** For challenges declaring `runtime`, the
      same solver runs against a booted instance over a socket the orchestrator hands
-     back. Specified here as an interface; not implemented here. Until it exists,
-     `runtime`-bearing bundles pass ingest with the live gate recorded as `unverified`
-     rather than silently as `passed` — an honest `unverified` is a usable state, a
-     false `passed` is worse than no gate at all.
+     back. Specified in spec §32; not implemented here. Until it exists, ingest
+     records a `runtime`-bearing bundle as `unverified` (spec §25.6, §25.6.1), never
+     as `passed` — an honest `unverified` is a usable state, a false `passed` is
+     worse than no gate at all.
 
 ## 4. Threat model — read before trusting any claim below
 
@@ -112,7 +120,7 @@ offline half (implemented here) and a live half (specified here, implemented the
 
 ## 5. Archetype coverage (R2)
 
-The dynamic range is roughly 2 KB → 40 GB. Three mechanisms cover it:
+The dynamic range is roughly 4 KB → 40 GB. Three mechanisms cover it:
 
 | Archetype | Sections used | Bundle size |
 |---|---|---|
@@ -150,15 +158,16 @@ The dynamic range is roughly 2 KB → 40 GB. Three mechanisms cover it:
 │ Section payloads — each 4096-byte aligned (mmap/page)        │
 ├──────────────────────────────────────────────────────────────┤
 │ Section table — fixed-width 128 B records, castable, aligned │
-│ Chunk indices — fixed-width, one per chunked section         │
+│ Chunk indices — fixed-width, only when chunk_index_off ≠ 0   │
 │ Manifest — canonical CBOR (RFC 8949 §4.2)                    │
 │ Key envelopes — hybrid KEM, one per recipient                │
 │ Entitlement chain — append-only signed records (§9)          │
 ├──────────────────────────────────────────────────────────────┤
-│ Footer                                                       │
+│ Footer (variable width, §8)                                  │
 │   root[32]              BLAKE3 over header + section table   │
-│   sig_classical[64]     Ed25519                              │
-│   sig_pq[3309]          ML-DSA-65                            │
+│   sig_classical_len u32 | sig_pq_len u32                     │
+│   sig_classical[N]      Ed25519 (suite 1: 64)                │
+│   sig_pq[M]             ML-DSA-65 (suite 1: 3309)            │
 │   total_len u64 | magic[8] repeated                          │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -195,9 +204,11 @@ was a gap worth closing before anything depends on the bytes:
   what stops a swap of the two lengths steering a verifier to different slot
   boundaries. This is the `v1` → `v2` transcript change.
 
-The chunk index must also be committed; how is settled when its format is, in
-phase 1. Nothing else may be added to the root without a format version bump —
-the root definition is as load-bearing as the byte layout.
+The chunk index is committed without being added to the root: each entry is a
+BLAKE3 chaining value, and merging the index reproduces the section's `root`,
+which already lives in the table bytes (spec §9.2, §8.3). Nothing else may be
+added to the root without a format version bump. The root definition is as
+load-bearing as the byte layout.
 
 ### Header (64 B, normative offsets)
 
@@ -221,9 +232,10 @@ off  size  field
 ```
 
 The two feature words are the format's forward-compatibility mechanism, specified
-in spec §2.3 and §11. They cost nothing today — both are zero — and could not have
-been added later, because a reader of the previous version enforces zero across
-everything after `footer_off`.
+in spec §2.3 and §4.1. `feat_incompat` is zero today. `feat_ro_compat` bit 0 is
+`CONTAINER_V1`, and every 0.3 writer MUST set it (spec §4.1). The words could not
+have been added later, because a reader of the previous version enforces zero
+across `[40, 64)`.
 
 The signature is exactly PNG's construction with `CTF` as the three-character tag,
 which is why it is 8 bytes and why every byte is load-bearing:
@@ -272,8 +284,9 @@ kind enum would make those unrepresentable.
 `SEALED` says **who cannot open the section**, not which recipient can: it means
 the plaintext needs a key the platform does not hold while the event runs. That
 covers a writeup encrypted to the offline seal recipient and a `progress` blob
-encrypted to a player's holder key (§9) alike — defining it as "encrypted to the
-seal recipient" would contradict the rule that `progress` sections must carry it.
+encrypted to a player's holder KEM key (§9, §24) alike — defining it as "encrypted
+to the seal recipient" would contradict the rule that `progress` sections must
+carry it.
 
 A **stage-gated** section is not sealed. It is `enc = 1` to a `stage:N` recipient
 and `PLAYER_VISIBLE`, because it is served as ciphertext to whoever earned stage
@@ -446,7 +459,7 @@ event_secret (32 B — KMS/HSM, never in a bundle, never in git)
 └── seed(challenge, subject) = HKDF(
         ikm  = event_secret,
         salt = "ctf/seed/v1",
-        info = LP(chal_id) ‖ LP(chal_version) ‖ LP(subject_id) )
+        info = LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id) )
     ├── flag(subject)     = base32(HMAC(seed,"ctf/flag/v1")[:10])   # 80 bits
     └── artifact_key      # per-subject generated artifacts
 
@@ -456,8 +469,14 @@ content_key (random per encryption — never reused, see STREAM above)
     ├── seal      — offline/HSM, released at event end. NOT on the platform (§4).
     └── stage:N   — HKDF(ikm = flag(N-1), salt = "ctf/stage/v1", info = u32_le(N))
 
-holder_key(player) — X25519 + ML-KEM keypair, for entitlement and progress (§9)
+holder signature key — Ed25519 + ML-DSA keypair, hashed to `holder` (§18, §34.1)
+holder KEM key       — X25519 + ML-KEM keypair, for the progress envelope (§24)
 ```
+
+`chal_version` is a fixed-width `u64_le` and is not length-prefixed; spec §22.2
+fixes that encoding, replacing an earlier sketch that wrote `LP(chal_version)`.
+The two holder keys are separate: the signature key is what `holder` hashes, and
+the KEM key is what a `progress` payload is sealed to (spec §34.2).
 
 Every variable-length component is length-prefixed and every derivation is domain
 separated, per the encoding rule above. `u32_le(N)` rather than a decimal string,
@@ -483,12 +502,12 @@ the length is a per-challenge choice, not a format constant.
 | Role | Crate | Status |
 |---|---|---|
 | BLAKE3 | `blake3` | Reference implementation, SIMD-parallel; thread-parallel use deferred (`rayon` feature not enabled) |
-| Verified streaming | `bao` | Bao encoding lives here, not in `blake3` — audit its maturity before depending on it |
+| Verified streaming | `blake3::hazmat` chaining values | `bao` was audited and rejected in phase 1: adopting its encoding would make a second document normative for the Go implementation (`docs/ROADMAP.md`) |
 | AES-256-GCM, Ed25519 | `aws-lc-rs` | Audited, FIPS track, AES-NI |
-| STREAM chunking | `aead::stream` (RustCrypto) | Implements Hoang et al. directly |
-| ML-KEM-768 | `aws-lc-rs::kem` (stable), cross-checked against `libcrux-ml-kem` | libcrux is formally verified |
-| ML-DSA-65 | dedicated crate, exact version pinned | **Weakest link.** `aws-lc-rs` exposes ML-DSA only under its `unstable` feature, which is mutually exclusive with `fips` and carries no semver guarantee |
-| SLH-DSA | `slh-dsa` | For the archive suite only |
+| STREAM chunking | implemented directly on the suite's per-chunk AEAD | The nonce and AAD layout is the format's own (spec §20.2), not the `aead::stream` crate's |
+| ML-KEM-768 | RustCrypto `ml-kem`, with AWS-LC for the classical half | The two components come from independent implementations, which is the hybrid property the design wants |
+| ML-DSA-65 | RustCrypto `ml-dsa`, behind its own trait | **Weakest link.** Isolate it so `suite_id` can retire a suite without touching the container format |
+| SLH-DSA | not implemented | Suite 3's signature role reports `NotImplemented` (spec §14); the parameter set is fixed in spec §20.3 |
 
 ML-DSA is the least settled primitive in the whole design. Isolate it behind a single
 trait so `suite_id` can retire a suite without touching the container format. That
@@ -525,9 +544,10 @@ Determinism traps that the host MUST close:
   deterministic result. `Config::epoch_interruption` is cheaper but wall-clock
   driven, which makes the interruption point nondeterministic — a generator near
   the limit would pass ingest and fail in production, or vice versa.
-- Wasmtime's `rr` (record/replay) config *validates* that the determinism-relevant
-  settings above are set, and fails otherwise. Use it in the conformance suite as a
-  cross-check that the host was configured correctly.
+- The conformance suite validates those settings by running the same module on a
+  second engine (`wasmi`) and rejecting a disagreement (spec §23.6, G10). Agreement
+  between two engines catches a host configured differently from the one that was
+  tested; trusting one engine's settings would not.
 
 Ingest runs the generator twice with the reference seed and rejects the bundle if
 output roots differ. A challenge that would rot cannot be uploaded. Two runs in one
@@ -560,26 +580,28 @@ An append-only, hash-chained, signed log carried in the bundle instance:
 
 ```
 record {
-  seq          u32           primary ordering — authoritative
-  type         u8            grant | transfer | revoke | progress
-  challenge_id, subject_id
-  holder_pk_hash  [32]
-  prev_hash       [32]
-  timestamp       i64        platform-issued, ADVISORY ONLY
-  payload         …          e.g. sealed progress blob
-  sig_holder      hybrid     required for `transfer`
-  sig_platform    hybrid     always
+  seq          uint          primary ordering, authoritative
+  type         tstr          grant | transfer | revoke | progress
+  challenge    tstr          the manifest `id`
+  subject      tstr          the subject the record binds
+  holder       bstr[32]      holder public-key hash (spec §34.1)
+  prev         bstr[32]      32 zero bytes at genesis
+  root         bstr[32]      genesis grant only; the bundle's commitment root
+  timestamp    int           platform-issued, ADVISORY ONLY
+  payload      bstr          e.g. sealed progress blob
+  sig_holder   map           required for `transfer`, absent otherwise
+  sig_platform map           always
 }
 ```
 
 - `transfer` requires a signature from the **current** holder, making handoff
   non-repudiable — A cannot later claim B took it.
-- `progress` carries stage flags already earned, sealed to B's holder key, so a
+- `progress` carries stage flags already earned, sealed to B's holder KEM key, so a
   handoff mid-multi-stage challenge does not reset progress.
 - Ordering is by `seq`, never by `timestamp`. Clocks drift and clients lie; the
   timestamp is for humans and audit display only.
 - The genesis record MUST bind the **bundle commitment root**, not just
-  `challenge_id`. A challenge is re-packed whenever its `version` increments, and a
+  `challenge`. A challenge is re-packed whenever its `version` increments, and a
   chain that names only the challenge would validate against a bundle it was never
   issued for — letting a grant for version 3 be replayed as one for version 4.
 
@@ -665,7 +687,7 @@ Reject unknown keys rather than ignoring them. A typo'd `visibility` silently
 publishing a hidden challenge mid-event is a real incident, not a hypothetical.
 
 That strictness has to leave the manifest a way to grow, or the CBOR manifest
-becomes the one unextendable part of an otherwise extensible format (spec §11).
+becomes the one unextendable part of an otherwise extensible format (spec §7.3).
 The mechanism is an explicit criticality list, COSE-style: a `crit` array naming
 the keys a reader must understand, with unknown keys *not* listed being ignorable
 and unknown keys that *are* listed rejected. A typo is still rejected, because a
@@ -713,10 +735,10 @@ seal-release, entitlement/handoff audit log, verification status per challenge
 
 | Layer | Choice | Note |
 |---|---|---|
-| Core library | **Rust** | Zero-copy fixed tables via `zerocopy` (little-endian typed fields only — a native-endian cast is right on x86 by luck and wrong elsewhere), `memmap2`, `cargo-fuzz`, and the best crypto ecosystem for §7 |
+| Core library | **Rust** | Fixed-width tables read with little-endian `from_le_bytes`; the zero-copy cast is deferred in `docs/ROADMAP.md`. `memmap2` is used by the CLI, `cargo-fuzz` for the targets, and the crypto ecosystem for §7 |
 | WASM host | **Wasmtime** | Only engine exposing all of §8's determinism knobs; pooling allocator for sub-ms instantiation |
 | Determinism cross-check | `wasmi` | Second engine in the conformance suite. Two engines agreeing is a far stronger signal than one engine run twice |
-| Generator interface | WIT + `wit-bindgen` | One interface definition, guest bindings for Rust/Go/C/Python free. Buys R6 with standard-side complexity, which R6 explicitly authorizes |
+| Generator interface | WIT + Rust and C guest SDKs | `spec/generator.wit` is the interface's source of truth. The concrete ABI is the flattened core-module ABI of spec §23.2, not the component-model canonical ABI; Rust and C bindings exist in the tree |
 | CLI | Rust, `clap` | §10 |
 | Admin TUI | `ratatui` + `crossterm` | §10 |
 | Database | **Postgres**, deployed via **CloudNativePG** | Advisory locks for allocation, `LISTEN/NOTIFY` for status, JSONB for cached manifests |
@@ -752,7 +774,8 @@ downstream project's problem.
   lazily on first fetch. WASM makes this cheap; a Docker build per team would not.
 - `.ctf` collides with Compact C Type Format (`libctf`, `ctfdump`, magic `0xcff1`).
   Different magic bytes, so `file`/libmagic can disambiguate cleanly, but the
-  extension is shared. Noted, not blocking.
+  extension is shared. Noted, not blocking. The media type and the full collision
+  note are in [`MEDIA-TYPE.md`](MEDIA-TYPE.md).
 
 ## 13. Build order
 
@@ -771,13 +794,15 @@ Each phase ships something usable on its own.
 | 8 | Fuzzing, conformance suite, Go second implementation | See §14 |
 
 The TUI lands at phase 5 rather than phase 1 on purpose: until the offline gate
-exists there is nothing for an operator to decide, and a TUI over an unverified
-ingest path would only make a missing check look complete.
+existed there was nothing for an operator to decide, and a TUI over an unverified
+ingest path would only have made a missing check look complete.
 
 ## 14. Parser hardening — non-negotiable
 
 The reader is the attack surface, not the writer. Every item below has shipped as
-a CVE in some real format:
+a CVE in some real format. `docs/HARDENING-AUDIT.md` records the verdict on each
+item against the current tree; the two gaps it found were closed in 0.13.0 — the
+entitlement fuzz target (#107) and the independent Go implementation (#53).
 
 - **Never allocate from a length field before validating it against remaining
   bytes.** This is the single most common format-parser bug.
@@ -789,13 +814,16 @@ a CVE in some real format:
   of archive-format CVEs.
 - Depth cap on nested CBOR. Unbounded recursion is a stack-overflow DoS.
 - Absolute output cap and ratio cap on zstd decompression.
-- Reject duplicate section IDs and duplicate manifest keys. Ambiguity becomes a
+- Reject duplicate `name_id`s and duplicate manifest keys. Ambiguity becomes a
   parser-differential exploit.
-- Normalize and reject path-like names (`../`, absolute, symlink-shaped) in
-  artifact names.
-- Verify signatures and the commitment root **before** interpreting the manifest
-  semantically. Nothing acts on unauthenticated content.
-- Verify chunk authenticity before exposing chunk bytes (§6).
+- Reject path-like names (`../`, absolute, symlink-shaped) in `names` and `paths`
+  rather than normalizing them (spec §7.2, §13). A name that could escape a
+  directory is refused at the format boundary.
+- Verify the commitment root and the manifest section's `root` **before**
+  interpreting the manifest semantically (spec §10 step 7). Signature verification
+  is a separate caller step, and nothing acts on unauthenticated content
+  (spec §10 step 9).
+- Verify chunk authenticity before exposing chunk bytes (spec §9, §10).
 - Fuzz from day one: `cargo-fuzz` targets over header, section table, manifest,
   chunk index, and entitlement chain. Oracle: no panic, no OOM, and round-trip
   stability.
