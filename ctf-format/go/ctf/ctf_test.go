@@ -102,13 +102,50 @@ func TestCanonicalCBORRejects(t *testing.T) {
 }
 
 func TestCBORDepthCap(t *testing.T) {
-	b := make([]byte, 0, 40)
-	for i := 0; i < 17; i++ {
-		b = append(b, 0x81) // array(1)
+	// Depth counts from 0 at the outermost value (spec §7.1 M1h), so the boundary
+	// is: 16 containers plus a scalar are accepted, 17 containers plus a scalar
+	// are rejected, and 17 containers whose innermost value is empty are accepted.
+	nestedBytes := func(containers int, innermost byte) []byte {
+		b := make([]byte, 0, containers+1)
+		for i := 0; i < containers; i++ {
+			b = append(b, 0x81) // array(1)
+		}
+		return append(b, innermost)
 	}
-	b = append(b, 0x00)
-	if _, err := decodeCBOR(b); err == nil {
-		t.Fatal("17 levels accepted")
+	nestedValue := func(containers int, innermost Value) Value {
+		for i := 0; i < containers; i++ {
+			innermost = Array(innermost)
+		}
+		return innermost
+	}
+
+	accepted := []struct {
+		name string
+		b    []byte
+		v    Value
+	}{
+		{"16 containers plus a scalar", nestedBytes(16, 0x00), nestedValue(16, Uint(0))},
+		{"17 empty nested containers", nestedBytes(16, 0x80), nestedValue(16, Array())},
+	}
+	for _, c := range accepted {
+		if _, err := decodeCBOR(c.b); err != nil {
+			t.Errorf("%s: decode rejected: %v", c.name, err)
+		}
+		if _, err := encodeValue(c.v); err != nil {
+			t.Errorf("%s: encode rejected: %v", c.name, err)
+		}
+	}
+
+	rejected := struct {
+		name string
+		b    []byte
+		v    Value
+	}{"17 containers plus a scalar", nestedBytes(17, 0x00), nestedValue(17, Uint(0))}
+	if _, err := decodeCBOR(rejected.b); err == nil {
+		t.Errorf("%s: decode accepted", rejected.name)
+	}
+	if _, err := encodeValue(rejected.v); err == nil {
+		t.Errorf("%s: encode accepted", rejected.name)
 	}
 }
 
