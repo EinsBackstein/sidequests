@@ -2789,3 +2789,78 @@ fn an_empty_encrypted_compressed_section_round_trips() {
     assert_eq!(b.decrypt_section_bytes(&record, &key).unwrap(), b"");
     assert_eq!(b.verify_inline_sections().unwrap().mismatches.len(), 0);
 }
+
+/// An empty `enc = 1, comp = 1` body with **zero** chunks is the shape builds
+/// before §5.4 fixed the framing emitted. It is not the one-frame form the writer
+/// now produces, but it decodes to the same empty plaintext and its `root` commits
+/// to it, so a reader must keep accepting it or strand an existing file (§20.2).
+#[test]
+fn a_zero_chunk_empty_sealed_body_still_decrypts() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "legacy-empty",
+        "Legacy Empty",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let recipients = [Recipient {
+        context: "seal",
+        public_key: &recipient.public_key,
+    }];
+    let mut secret = SectionSpec::inline(
+        SectionKind::Artifact,
+        1,
+        SectionFlags(SectionFlags::SEALED),
+        b"",
+    )
+    .chunked(4096)
+    .encrypted(&recipients);
+    secret.comp = Compression::Zstd;
+    let mut legacy = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            secret,
+            SectionSpec::envelopes(SectionKind::Keys, 2),
+        ],
+    )
+    .unwrap();
+
+    let parsed = Bundle::parse(&legacy).unwrap();
+    let record = *parsed.section(1).unwrap();
+    let off = record.offset as usize;
+    let stored = record.len_stored as usize;
+    assert!(stored > 0, "the writer emits the one-frame body");
+    drop(parsed);
+
+    // Rebuild the earlier shape: no stored bytes, `len_stored = 0`, and T8-zero
+    // padding where the sealed chunk used to sit. The plaintext and its `root` do
+    // not change, so only the table and the commitment need repairing.
+    legacy[off..off + stored].fill(0);
+    let header = Header::parse(&legacy).unwrap();
+    let table = header.section_table_off as usize;
+    let at = table + SECTION_RECORD_LEN;
+    legacy[at + 16..at + 24].copy_from_slice(&0u64.to_le_bytes()); // OFF_LEN_STORED
+    let root = commitment_root(
+        &legacy[..HEADER_LEN as usize],
+        &legacy[table..table + header.section_table_count as usize * SECTION_RECORD_LEN],
+    );
+    let footer = header.footer_off as usize;
+    legacy[footer..footer + 32].copy_from_slice(&root);
+
+    let b = Bundle::parse(&legacy).unwrap();
+    let record = *b.section(1).unwrap();
+    assert_eq!(record.len_stored, 0);
+    assert_eq!(record.len_plain, 0);
+    let key = b
+        .section_content_key(&record, &recipient.secret_key, "seal")
+        .unwrap();
+    assert_eq!(
+        b.decrypt_section_bytes(&record, &key).unwrap(),
+        b"",
+        "a zero-chunk empty body decodes to the empty plaintext"
+    );
+}

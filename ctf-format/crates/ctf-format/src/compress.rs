@@ -88,8 +88,9 @@ pub fn compress(plain: &[u8], chunk_size: u32) -> Result<Vec<u8>> {
 /// encrypted path (`enc = 1` with `comp = 1`, spec §20.2) can seal each frame as
 /// its own STREAM chunk. `chunk_size = 0` yields a single frame; otherwise frame
 /// *i* covers `[i × chunk_size, min((i+1) × chunk_size, len(plain)))`. An empty
-/// plaintext is always that single frame, whatever the chunk size: zero frames
-/// would be a `comp = 1` section no reader can decode.
+/// plaintext is always that single frame, whatever the chunk size, so the
+/// unencrypted `comp = 1` body is always decodable; the zero-chunk compatibility
+/// form of an encrypted empty body is handled by the decryption path (§20.2).
 pub fn compress_frames(plain: &[u8], chunk_size: u32) -> Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     if chunk_size == 0 || plain.is_empty() {
