@@ -1433,18 +1433,18 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
     // about whether `pack` emitted module sections — it never does. The document's
     // module may fill in for a declaration the bundle makes; it must not resurrect
     // one the bundle does not.
-    let declares_generator = bundle
+    let declared_generator = bundle
         .manifest
         .declaration("generate")
         .and_then(|generate| generate.get("wasm"))
-        .and_then(Value::as_text)
-        .is_some();
-    let declares_solver = bundle
+        .and_then(Value::as_text);
+    let declared_solver = bundle
         .manifest
         .declaration("verify")
         .and_then(|verify| verify.get("solver"))
-        .and_then(Value::as_text)
-        .is_some();
+        .and_then(Value::as_text);
+    let declares_generator = declared_generator.is_some();
+    let declares_solver = declared_solver.is_some();
 
     // A bundle that carries the module is stricter than one that merely declares
     // it: its own bytes are the ones §25.5 says to run, and they win over the
@@ -1456,7 +1456,7 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
     let eager_generator = setup.generator.take();
     let eager_solver = setup.solver.take();
 
-    setup.generator = match bundle_module(bundle, SectionKind::Generator) {
+    setup.generator = match bundle_module(bundle, SectionKind::Generator, declared_generator) {
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) if declares_generator => match &modules {
             Some(modules) => modules.read(modules.generator.as_deref(), "generator")?,
@@ -1471,7 +1471,7 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
             );
         }
     };
-    setup.solver = match bundle_module(bundle, SectionKind::Solver) {
+    setup.solver = match bundle_module(bundle, SectionKind::Solver, declared_solver) {
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) if declares_solver => match &modules {
             Some(modules) => modules.read(modules.solver.as_deref(), "solver")?,
@@ -1502,15 +1502,42 @@ fn bundle_declared_version(generate: Option<&Value>, key: &str) -> Result<Option
     }
 }
 
-/// The bytes of `bundle`'s first section of `kind`, verified against its root.
+/// The bytes of the module `declared` names, verified against its root.
+///
+/// §7.6 makes `generate.wasm`/`verify.solver` name entries of `names`, and the
+/// entry's `name_id` is the section that carries the module. A section of the same
+/// kind under another name is not that module, and §25.6 says a module the bundle
+/// does not declare cannot be gated at all — so no declaration, or a declaration
+/// with no `names` entry, yields `Ok(None)` rather than the first section of the
+/// kind.
 ///
 /// `Ok(None)` means the bundle carries no such section, which is a §25.6 condition
 /// for `unverified`, not an error. `Err` means the section is present but this
 /// reading cannot hand out its plaintext — sealed, external, encrypted, or of a
 /// kind this build does not implement. The caller turns that into `unverified` and
 /// keeps the detail on stderr (rule S12).
-fn bundle_module(bundle: &Bundle<'_>, kind: SectionKind) -> Result<Option<Vec<u8>>, String> {
-    let Some(record) = bundle.sections.iter().find(|r| r.kind == kind) else {
+fn bundle_module(
+    bundle: &Bundle<'_>,
+    kind: SectionKind,
+    declared: Option<&str>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(name) = declared else {
+        return Ok(None);
+    };
+    let Some(name_id) = bundle
+        .manifest
+        .names()
+        .iter()
+        .position(|candidate| *candidate == name)
+        .and_then(|index| u16::try_from(index).ok())
+    else {
+        return Ok(None);
+    };
+    let Some(record) = bundle
+        .sections
+        .iter()
+        .find(|record| record.kind == kind && record.name_id == name_id)
+    else {
         return Ok(None);
     };
     bundle

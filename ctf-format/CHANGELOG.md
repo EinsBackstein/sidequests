@@ -7,6 +7,35 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.3] — 2026-10-27
+
+Gate-identity correction. **No byte-layout change:** `version_minor` stays `3`,
+both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and no
+header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — a declared module is resolved by its name
+
+- **A carried module section is the gate's module only when it is the one the bundle
+  declares.** `bundle_module` now resolves `generate.wasm`/`verify.solver` through
+  the manifest's `names` table and requires the section's `name_id` to match.
+  Previously it used the first section of the kind, so a bundle carrying a
+  `generator` section under another name — or carrying one with no `generate.wasm`
+  at all — could be gated and report `passed`, although §25.6 says a module the
+  bundle does not declare cannot be gated (§7.6). A declared-but-uncarried module
+  still falls back to the authoring document, and an absent file is `unverified`
+  with the existing fixed reason (S8, S12).
+- New test `a_generator_section_under_another_name_is_not_gated` carries a correct
+  generator under an unrelated `names` entry while the document names a missing
+  file: the gate must be `unverified`, not `passed`.
+- New test `the_declared_generator_wins_over_a_decoy_section` carries an invalid
+  decoy first and the declared generator second: only the declared one is run.
+
+### Spec — clarification
+
+- **§25.6:** a `solver` section is `SEALED` (R6) and therefore encrypted (R21), so a
+  gate that holds no key for it cannot run and is `unverified`. This states what the
+  status table already implied; the reference implementation holds no solver key.
+
 ## [0.13.2] — 2026-10-27
 
 Audit corrections to 0.13.1's gate handling. **No byte-layout change:**

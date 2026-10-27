@@ -13,7 +13,7 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.2. Phases 1–4
+**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.3. Phases 1–4
 complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
 `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
 49/50, 34 fixtures in `spec/vectors/conformance/`), the **independent Go
@@ -26,11 +26,13 @@ and §25.6/§25.6.1 fix the gate's record and the ingest artifact. Release **0.1
 is a post-release audit round (PRs #114–#118): every reader path that still
 disagreed with §4.4, §5.2, §5.4, §7.6, §10, §18, §23, §24, §25, or §34 was fixed,
 with no byte layout moved and both goldens unchanged. Release **0.13.2** closes the
-last gate-input path — a bundle that carries its own generator section is no longer
+document-veto path — a bundle that carries its own generator section is no longer
 vetoed by a document naming a missing module file (a carried solver section stays
 `unverified`, since R6/R21 force it sealed) — and a present non-integer
 `generate.interface`/`generate.profile` is `unverified` rather than run as `1`, with
-the same format version and goldens. The live gate is
+the same format version and goldens. Release **0.13.3** then makes the declaration
+identify the section: the gate resolves `generate.wasm`/`verify.solver` through
+`names` and never runs a section of the right kind under another name (§7.6, §25.6). The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 
