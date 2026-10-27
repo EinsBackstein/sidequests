@@ -269,9 +269,6 @@ func SealStream(suiteID, sectionID uint16, chunkSize uint32, contentKey, plainte
 	if !ok {
 		return nil, errf(CatUsage, "", "chunk count overflows")
 	}
-	if count < 1 {
-		count = 1 // empty plaintext still has one final chunk
-	}
 	body := make([]byte, 0, len(plaintext)+int(count)*(16+4))
 	for i := uint64(0); i < count; i++ {
 		start := i * uint64(chunkSize)
@@ -298,11 +295,29 @@ func SealStream(suiteID, sectionID uint16, chunkSize uint32, contentKey, plainte
 // OpenStream verifies and decrypts a STREAM body. Every chunk is authenticated
 // before any plaintext is returned (C7).
 func OpenStream(suiteID, sectionID uint16, chunkSize uint32, lenPlain uint64, contentKey, body []byte) ([]byte, error) {
+	// §20.2 divides the plaintext into ceil(len_plain / chunk_size) chunks of at
+	// most chunk_size bytes, so a body whose count or chunk sizes disagree with
+	// those two fields is malformed even if every tag verifies. The reference
+	// reader checks both; this one must too, or the two disagree on accept.
+	if chunkSize < MinChunkSize || chunkSize > MaxChunkSize || chunkSize&(chunkSize-1) != 0 {
+		return nil, errf(CatUsage, "R14", "illegal chunk_size %d", chunkSize)
+	}
 	suite, err := LookupSuite(suiteID)
 	if err != nil {
 		return nil, err
 	}
+	want, ok := chunkCount(lenPlain, uint64(chunkSize))
+	if !ok {
+		return nil, errf(CatSection, "§20.2", "chunk count overflows")
+	}
+	if len(body) == 0 {
+		if want != 0 {
+			return nil, errf(CatSection, "§20.2", "empty body for a %d-byte plaintext", lenPlain)
+		}
+		return []byte{}, nil
+	}
 	var out []byte
+	var count uint64
 	pos := 0
 	for i := uint32(0); ; i++ {
 		if pos+4 > len(body) {
@@ -325,10 +340,26 @@ func OpenStream(suiteID, sectionID uint16, chunkSize uint32, lenPlain uint64, co
 		if err != nil {
 			return nil, errf(CatSection, "§20.2", "chunk %d tag does not verify", i)
 		}
+		// Each chunk's plaintext is exactly min(chunk_size, len_plain − i·chunk_size).
+		start := uint64(i) * uint64(chunkSize)
+		thisLen := uint64(0)
+		if start < lenPlain {
+			thisLen = lenPlain - start
+			if thisLen > uint64(chunkSize) {
+				thisLen = uint64(chunkSize)
+			}
+		}
+		if uint64(len(pt)) != thisLen {
+			return nil, errf(CatSection, "§20.2", "chunk %d decrypted to %d bytes, want %d", i, len(pt), thisLen)
+		}
 		out = append(out, pt...)
+		count++
 		if final {
 			break
 		}
+	}
+	if count != want {
+		return nil, errf(CatSection, "§20.2", "body has %d chunks, want %d", count, want)
 	}
 	if uint64(len(out)) != lenPlain {
 		return nil, errf(CatSection, "§20.2", "plaintext length %d != declared %d", len(out), lenPlain)

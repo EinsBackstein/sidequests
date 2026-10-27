@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.7
+**Version:** 0.3 (major 0, minor 3); document revision 0.13.8
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
@@ -1962,6 +1962,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.13.5 | Correction to 0.13.4's record-boundary wording. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §25.6's new paragraph claimed that any run refusing an input before the gate writes no record, but `ctf verify` emits an `unverified` `gate` record when the authoring document does not describe the bundle, and `ctf run` does the same when a bundle declaration makes the gate unrunnable. The paragraph now states the rule at the level the code implements: `ctf run` writes no record when it cannot reach a gate outcome, writes `unverified` when it identifies the bundle but a declaration leaves the gate unrunnable, and refuses a bare document's own unrunnable declarations without a record. The corresponding 0.13.4 changelog bullet and §17 row are narrowed the same way, and the refusal test now asserts its earlier record is `passed`, not merely present. Every change states a rule the code already implements; no feature bit is spent (§15). |
 | 0.13.6 | Independent-implementation and corpus corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §7.1 now defines the M1h depth count normatively: depth is 0 at the outermost value, so 17 nested containers are accepted and a scalar inside them is rejected. The Go reader previously counted the outermost value as depth 1, and the Go writer had no cap, so Go rejected a manifest the reference accepts at that boundary and could emit bytes its own reader refused; both now count from 0. The corpus vector `unknown-enc-discriminant` mutated the manifest, so R20 could be the rejection and an `OPTIONAL` exemption from R10 would still pass; it now mutates an unknown-kind (kind 9) `OPTIONAL` section, which a reader must skip for serving but must still validate, and `unknown-comp-discriminant` covers the other field (§5.4). The Go conformance suite asserts the chunk-index refusal and inline verification for the unknown-kind vector that the index already claimed. Every change makes an existing rule explicit or enforces it in both implementations; no feature bit is spent (§15). |
 | 0.13.7 | Writer and record-definition corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Two `write_bundle` paths ignored `comp` on the stored side: a `keys` section written with `SectionSpec::envelopes(..).compressed()` stored raw envelope CBOR under a record saying `comp = 1`, and an empty plaintext with `chunk_size != 0` stored zero zstd frames; both produced a bundle `ctf verify` rejected with `DecompressionFailed`. The envelope payload is now compressed as §5.4 requires (`len_plain` and `root` stay over the uncompressed bytes), an empty plaintext is one empty frame, and §5.4 states that framing; the encrypted reader accepts both that one-chunk body and the zero-chunk body earlier builds emitted for an empty plaintext. §25.6 and §25.6.1 now state the shipped rule for `ctf verify`: an intact bundle with a requested gate that could not run is an `unverified` record with null determinism fields, not `null`; the no-record rule for `ctf run` is unchanged. Every change enforces or states a rule the text already implied; no feature bit is spent (§15). |
+| 0.13.8 | Independent-implementation and validation-scope corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Go's `SealStream`/`OpenStream` now implement §20.2 exactly: an empty `comp = 0` plaintext is zero chunks (Go previously forced one, so the two writers disagreed and each rejected the other's empty body), and `OpenStream` validates the chunk size, the derived chunk count, and each chunk's plaintext length instead of only the total. §20.2 now states chunk *i*'s exact plaintext length for `comp = 0`, which both readers already enforced. §18.4 now scopes its rules to a reader of the chain: hashing a section's bytes is not reading its chain, E1–E8 run wherever an `entitlement` section is decoded as records (`ctf transfer`, `entitlement.rs`), and a hash-only pass must not be described as having validated one. Documentation is aligned with the shipped tree: the ROADMAP's closed phase-8 gaps and the `wasmi` checkbox, the hardening audit's `-rss_limit_mb` follow-up, and HANDOFF's superseded notes for the solver gate, `ctf pack` paths, and phase-1 signature verification. No change rejects a body the text permits; no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2030,8 +2031,8 @@ player took the challenge.
 
 ### 18.4 Validation rules
 
-A reader that understands entitlement records MUST reject the section if any of the
-following holds.
+A reader that decodes an `entitlement` section's plaintext as entitlement records
+MUST reject the section if any of the following holds.
 
 | # | Rule |
 |---:|---|
@@ -2051,7 +2052,10 @@ holder named by the previous record. Both components of the suite's hybrid
 signature MUST verify over the §18.3 transcript (§20.3); a failure of either is a
 failure of the whole.
 E1–E8 establish structure and the genesis binding, **not** authenticity: a reader
-MUST NOT report a chain as authenticated until E9 has run with trusted keys.
+MUST NOT report a chain as authenticated until E9 has run with trusted keys. E1–E8
+run wherever an `entitlement` section is decoded as records (`ctf transfer`,
+`entitlement.rs`). A pass that only hashes the section's bytes against its `root`
+has not read the chain and MUST NOT be described as having validated one.
 
 ### 18.5 Offline validation
 
@@ -2198,9 +2202,9 @@ reaches the end of the body is the final one. A body whose last chunk was not se
 as final fails its tag, which is what makes truncation detectable.
 
 For `comp = 0`, the AEAD plaintext is the section plaintext, divided into
-`ceil(len_plain / chunk_size)` chunks of at most `chunk_size` bytes in address order.
-Chunk *i* is sealed with `chunk_index = i`, and
-`len_stored = len_plain + count × (16 + 4)`.
+`ceil(len_plain / chunk_size)` chunks in address order, where chunk *i* holds exactly
+`min(chunk_size, len_plain − i × chunk_size)` plaintext bytes. Chunk *i* is sealed
+with `chunk_index = i`, and `len_stored = len_plain + count × (16 + 4)`.
 
 For `comp = 1`, the AEAD plaintext is the concatenation of the zstd frames of §5.4,
 and **each frame is one chunk**, so `chunk_index` is the frame index. `len_plain` in

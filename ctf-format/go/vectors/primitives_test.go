@@ -401,3 +401,60 @@ func TestDerivedFlagShape(t *testing.T) {
 		t.Fatal("stage key is not deterministic 32 bytes")
 	}
 }
+
+// §20.2 divides a comp = 0 plaintext into ceil(len_plain / chunk_size) chunks.
+// The empty plaintext therefore has zero chunks, and a body whose chunk count or
+// chunk sizes disagree with the declared fields is malformed even when every tag
+// verifies. The reference reader enforces both; this one must agree.
+func TestAEADStreamEmptyAndChunkDivision(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	for _, suiteID := range []uint16{1, 2} {
+		body, err := cf.SealStream(suiteID, 7, 4096, key, nil)
+		if err != nil {
+			t.Fatalf("suite %d seal empty: %v", suiteID, err)
+		}
+		if len(body) != 0 {
+			t.Fatalf("suite %d sealed an empty plaintext as %d bytes; want zero chunks", suiteID, len(body))
+		}
+		got, err := cf.OpenStream(suiteID, 7, 4096, 0, key, body)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("suite %d open empty: got %d bytes, err %v", suiteID, len(got), err)
+		}
+		if _, err := cf.OpenStream(suiteID, 7, 4096, 1, key, body); err == nil {
+			t.Fatalf("suite %d accepted an empty body for a 1-byte plaintext", suiteID)
+		}
+		// Sealed as one 8 KiB chunk, opened while declaring 4 KiB chunks: the
+		// chunk sizes no longer divide the plaintext as §20.2 requires.
+		big, err := cf.SealStream(suiteID, 7, 8192, key, bytes.Repeat([]byte("x"), 5000))
+		if err != nil {
+			t.Fatalf("suite %d seal big: %v", suiteID, err)
+		}
+		if _, err := cf.OpenStream(suiteID, 7, 4096, 5000, key, big); err == nil {
+			t.Fatalf("suite %d accepted a body whose chunk sizes exceed chunk_size", suiteID)
+		}
+		// A plaintext that is not a multiple of chunk_size ends in a short final
+		// chunk: 4097 bytes at 4096 is two chunks, 4096 and 1.
+		odd := make([]byte, 4097)
+		for i := range odd {
+			odd[i] = byte(i)
+		}
+		oddBody, err := cf.SealStream(suiteID, 7, 4096, key, odd)
+		if err != nil {
+			t.Fatalf("suite %d seal odd: %v", suiteID, err)
+		}
+		got, err = cf.OpenStream(suiteID, 7, 4096, uint64(len(odd)), key, oddBody)
+		if err != nil || !bytes.Equal(got, odd) {
+			t.Fatalf("suite %d odd-length round-trip: err %v", suiteID, err)
+		}
+		// A chunk size outside the legal range is refused before any work, even
+		// for an empty body, where no chunk would otherwise reveal it.
+		for _, bad := range []uint32{0, 2048, 1 << 30} {
+			if _, err := cf.OpenStream(suiteID, 7, bad, 0, key, nil); err == nil {
+				t.Fatalf("suite %d accepted an illegal chunk_size %d", suiteID, bad)
+			}
+		}
+	}
+}
