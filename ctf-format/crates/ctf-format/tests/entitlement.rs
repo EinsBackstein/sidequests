@@ -16,13 +16,11 @@ use ctf_format::cbor::Value;
 use ctf_format::suite::{Role, Signature, SuiteError, suite};
 use ctf_format::{
     EntitlementChain, EntitlementRecord, HolderKeys, HybridPublicKey, RecordType, Timestamp,
-    sig_input,
+    holder_hash, sig_input,
 };
 
 const SUITE: u16 = 1;
 const GENESIS_ROOT: [u8; 32] = [0x11; 32];
-const HOLDER_A: [u8; 32] = [0xA1; 32];
-const HOLDER_B: [u8; 32] = [0xB2; 32];
 
 fn signature_role() -> &'static dyn Signature {
     suite(SUITE).unwrap().signature().unwrap()
@@ -35,13 +33,15 @@ fn build_signed_chain() -> (EntitlementChain, HybridPublicKey, HolderKeys) {
     let (platform_sk, platform_pk) = role.keypair().unwrap();
     let (holder_a_sk, holder_a_pk) = role.keypair().unwrap();
     let (_holder_b_sk, holder_b_pk) = role.keypair().unwrap();
+    let holder_a = holder_hash(&holder_a_pk);
+    let holder_b = holder_hash(&holder_b_pk);
 
     let mut genesis = EntitlementRecord {
         seq: 0,
         record_type: RecordType::Grant,
         challenge: "bird".into(),
         subject: "alice".into(),
-        holder: HOLDER_A,
+        holder: holder_a,
         prev: [0u8; 32],
         root: Some(GENESIS_ROOT),
         timestamp: Some(Timestamp::Uint(1_700_000_000)),
@@ -54,7 +54,7 @@ fn build_signed_chain() -> (EntitlementChain, HybridPublicKey, HolderKeys) {
         record_type: RecordType::Transfer,
         challenge: "bird".into(),
         subject: "alice".into(),
-        holder: HOLDER_B,
+        holder: holder_b,
         prev: [0u8; 32],
         root: None,
         timestamp: None,
@@ -67,7 +67,7 @@ fn build_signed_chain() -> (EntitlementChain, HybridPublicKey, HolderKeys) {
         record_type: RecordType::Progress,
         challenge: "bird".into(),
         subject: "alice".into(),
-        holder: HOLDER_B,
+        holder: holder_b,
         prev: [0u8; 32],
         root: None,
         timestamp: Some(Timestamp::Nint(5)),
@@ -85,8 +85,8 @@ fn build_signed_chain() -> (EntitlementChain, HybridPublicKey, HolderKeys) {
     progress.sign(SUITE, &platform_sk, None).unwrap();
 
     let mut holders = HolderKeys::new();
-    holders.insert(HOLDER_A, holder_a_pk);
-    holders.insert(HOLDER_B, holder_b_pk);
+    holders.insert(holder_a, holder_a_pk);
+    holders.insert(holder_b, holder_b_pk);
 
     (
         EntitlementChain::from_records(vec![genesis, transfer, progress]),
@@ -128,16 +128,41 @@ fn both_signatures_verify_and_a_wrong_key_fails() {
 
     let (_sk, wrong_holder) = signature_role().keypair().unwrap();
     let mut bad_holders = HolderKeys::new();
-    bad_holders.insert(HOLDER_A, wrong_holder);
+    // Filed under the genuine holder-A label, but the key does not hash to it.
+    bad_holders.insert(chain.records()[0].holder, wrong_holder);
     let err = chain
         .verify_signatures(SUITE, &platform_pk, &bad_holders)
         .unwrap_err();
+    // KD2: a pair whose label is not the key's holder hash never resolves, so this
+    // is an unresolved holder (E9), not a signature that happens to fail to verify.
     assert_eq!(
         err,
-        SuiteError::VerificationFailed {
-            component: "classical"
+        SuiteError::InvalidKey {
+            role: Role::Signature
         }
     );
+}
+
+/// KD2 (§34.1): a pair inserted under the key's own holder hash resolves.
+#[test]
+fn a_holder_key_resolves_under_its_own_hash() {
+    let (_sk, pk) = signature_role().keypair().unwrap();
+    let mut holders = HolderKeys::new();
+    holders.insert(holder_hash(&pk), pk.clone());
+    assert_eq!(holders.get(&holder_hash(&pk)), Some(&pk));
+}
+
+/// KD2 (§34.1): the label is not authoritative. A pair whose label differs from the
+/// key's holder hash does not resolve, even though that is the label it was filed
+/// under.
+#[test]
+fn a_pair_under_a_foreign_label_does_not_resolve() {
+    let (_sk, pk) = signature_role().keypair().unwrap();
+    let (_, other_pk) = signature_role().keypair().unwrap();
+    let mislabelled = holder_hash(&other_pk);
+
+    let holders = HolderKeys::from_pairs([(mislabelled, pk)]);
+    assert!(holders.get(&mislabelled).is_none());
 }
 
 #[test]
