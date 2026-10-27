@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.3
+**Version:** 0.3 (major 0, minor 3); document revision 0.13.4
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
@@ -1954,6 +1954,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.13.1 | Post-release audit round. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Closes reader paths that still disagreed with the text: an unknown section kind is never decompressed, served, or decrypted; §4.4's read-only refusal is automatic for re-signing, seal, entitlement append, and seal release; D1/D2 apply to a compressed encrypted section's declared totals before decryption, not per chunk; an `EXTERNAL` section's chunk index survives a rewrite; `HolderKeys` resolves a key only under `holder_hash(key)` (KD2); `ctf verify` takes `runtime`, `verify.offline`, `generate.wasm`, and `verify.solver` from the bundle; G6/G7 are enforced before a module runs; a progress envelope's `name_id` is 0; and a rejected file runs no gate. Clarifies §5.4 (frame alignment is a writer obligation), §7.6 (module declarations name `names` entries and the section carries the module), §18.4 E2 (unknown record keys and signature-map keys), §18.5 (the genesis root names the version the grant was issued for, never the containing file), §23.8 G10 (exemption for a second engine that cannot load a module the primary accepted), and §25.6/§25.6.1 (which declarations the gate reads, and the `null`/`false` record fields). Every change enforces or states a rule the text already implied; no feature bit is spent (§15). |
 | 0.13.2 | Post-release audit corrections to 0.13.1. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Closes the remaining case where a document's module files could veto a bundle's own module bytes: `ctf verify` and `ctf run --bundle` no longer read the authoring document's module files eagerly, so a bundle that carries a `generator` section is gated on that section even when the document names a file that is absent; a carried `solver` section is `unverified` because R6/R21 force it sealed and this build holds no key. A module resolved from the document is still read when the bundle declares it and carries no section — the authoring input legitimately supplies those bytes (§25.6) — and an unreadable file is `unverified` with a fixed, path-free reason (S8, S12). A present `generate.interface` or `generate.profile` that is not a non-negative integer is `unverified` rather than silently read as absent (and therefore `1`), as G6/G7 require. Removes an unreachable refusal for an `EXTERNAL` record carrying `enc`: `Bundle::parse` already rejects that state under R22. Every change enforces a rule the text already stated; no feature bit is spent (§15). |
 | 0.13.3 | Gate-identity correction. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §7.6 makes `generate.wasm`/`verify.solver` name entries of `names`, so the gate now resolves the module's `name_id` through that table and uses only a section carrying the declared name. Previously a bundle with a `generator` section under another name — or with a carried generator section and no `generate.wasm` at all — could run that section and report `passed`, although §25.6 says a module the bundle does not declare cannot be gated. A declared-but-uncarried module still falls back to the authoring document, and an absent file is `unverified` (S8). Clarifies §25.6 that a gate holding no key cannot run a sealed solver section and is `unverified` (R6, R21). Every change enforces a rule the text already stated; no feature bit is spent (§15). |
+| 0.13.4 | Gate-record completeness. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. A solver-stage failure after the determinism stage succeeded now keeps the `generator_root`, `cross_engine`, and `runs` the stage produced, instead of serializing them as `null`; §25.6 reserves `null` for a gate that did not run or a determinism stage that did not complete, now stated explicitly (including two engines that disagreed). `ctf run` also persists the `failed` record for a hard stage failure wherever it would write a record (`--status` or `--bundle`), where previously it exited 1 without one, and §25.6 now states that a run refusing an input before the gate writes no record and leaves an earlier one untouched. Every change enforces a rule the text already stated; no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2738,11 +2739,18 @@ commitment root.
 ```
 
 `generator_root`, `cross_engine`, and `runs` are `null` when the gate did not run,
-or when the §25.5 determinism stage failed before producing them. `runs` is the
-number of primary-engine runs. `cross_engine` is `true` when the second-engine
-cross-check ran and agreed, `false` when the second engine cannot load the module's
-feature set (G10's exemption, §23.8), and `null` when the cross-check did not run.
+or when the §25.5 determinism stage did not complete; once that stage completes, a
+later solver-stage failure keeps them. `runs` is the number of primary-engine runs.
+`cross_engine` is `true` when the second-engine cross-check ran and agreed, `false`
+when the second engine cannot load the module's feature set (G10's exemption,
+§23.8), and `null` when the determinism stage did not complete (including two engines
+that disagreed).
 `challenge` and `subject` are JSON strings with `"` and `\` escaped.
+
+A run that refuses an input before the gate — a bundle that does not parse, or an
+authoring document that does not describe the bundle — writes no record, and removes
+no earlier one: the record describes a gate run, and none ran. A consumer MUST NOT
+treat a record as current merely because the file exists.
 
 ### 25.6.1 The ingest verification artifact
 

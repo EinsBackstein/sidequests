@@ -200,6 +200,23 @@ pub struct GateError {
     pub stage: GateStage,
     /// The underlying sandbox, ABI, or determinism failure.
     pub source: GeneratorError,
+    /// What the determinism stage produced before a later stage failed.
+    ///
+    /// `None` when the determinism stage itself failed, or when the gate never
+    /// reached it. §25.6's record carries these values when they exist, so a
+    /// solver-stage failure does not erase that the generator ran and agreed.
+    pub determinism: Option<DeterminismSummary>,
+}
+
+/// What §25.5's determinism stage produced, when a later stage failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeterminismSummary {
+    /// The output root every run agreed on (§23.4).
+    pub output_root: [u8; 32],
+    /// How many in-process runs agreed.
+    pub runs: usize,
+    /// Whether the second engine agreed (G10; `false` is its exemption).
+    pub cross_engine: bool,
 }
 
 impl core::fmt::Display for GateError {
@@ -255,18 +272,26 @@ pub fn offline_gate(
         determinism_gate(generator_wasm, input.seed, limits, 2).map_err(|source| GateError {
             stage: GateStage::Determinism,
             source,
+            determinism: None,
         })?;
     let artifact_count = gate.outputs.outputs.len();
+    let determinism = DeterminismSummary {
+        output_root: gate.output_root,
+        runs: gate.runs,
+        cross_engine: gate.cross_engine,
+    };
     let artifacts = ArtifactBlock::from_generator(&gate.outputs);
     let solver = Solver::new(solver_wasm).map_err(|source| GateError {
         stage: GateStage::Solver,
         source,
+        determinism: Some(determinism),
     })?;
     let flag = solver
         .run(&artifacts.encode(), limits)
         .map_err(|source| GateError {
             stage: GateStage::Solver,
             source,
+            determinism: Some(determinism),
         })?;
     let status = if flag == input.expected_flag {
         GateStatus::Passed
