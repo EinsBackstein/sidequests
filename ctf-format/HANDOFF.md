@@ -13,7 +13,7 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.1. Phases 1–4
+**Last updated:** 2026-10-27, at format version 0.3 / release 0.13.2. Phases 1–4
 complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
 `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
 49/50, 34 fixtures in `spec/vectors/conformance/`), the **independent Go
@@ -23,9 +23,13 @@ fixtures), the **rerunnable ingest artifact** (ticket 64, `ctf verify`, spec
 entitlement target** (tickets 51/107). **The specification has no gaps** (ticket
 55): §34 fixes trusted-key distribution, §20.3 fixes suite 3's SLH-DSA parameters,
 and §25.6/§25.6.1 fix the gate's record and the ingest artifact. Release **0.13.1**
-is a post-release audit round (PRs #114–#117): every reader path that still
-disagreed with §4.4, §5.2, §5.4, §10, §18, §23, §24, §25, or §34 was fixed, with no
-byte layout moved and both goldens unchanged. The live gate is
+is a post-release audit round (PRs #114–#118): every reader path that still
+disagreed with §4.4, §5.2, §5.4, §7.6, §10, §18, §23, §24, §25, or §34 was fixed,
+with no byte layout moved and both goldens unchanged. Release **0.13.2** closes the
+last gate-input path — a bundle that carries a module section is no longer vetoed by
+a document naming a missing module file, and a present non-integer
+`generate.interface`/`generate.profile` is `unverified` rather than run as `1` — with
+the same format version and goldens. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 

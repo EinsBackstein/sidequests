@@ -7,9 +7,47 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.2] — 2026-10-27
+
+Audit corrections to 0.13.1's gate handling. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved.
+
+### Fixed — the bundle owns its gate
+
+- **A document's module files can no longer decide a bundle's verdict.**
+  `load_gate_setup_inner` now distinguishes `DeclarationSource::Document` from
+  `DeclarationSource::Bundle`; in bundle mode it records the module *names* and
+  reads no file. `apply_bundle_declarations` resolves each module as bundle section
+  bytes first, then the deferred document file only when the bundle declares that
+  module and carries no section, and an unreadable deferred file is `unverified`
+  with a fixed, path-free reason (§25.6, S8, S12). Previously a self-contained
+  bundle could be reported `unverified` — or leave `ctf run --bundle` with no record
+  — because the authoring document named a module file that was absent.
+- **A present non-integer `generate.interface`/`generate.profile` is `unverified`.**
+  `bundle_declared_version` distinguishes absent (still `1`) from present-but-not-a-
+  non-negative-integer; reading the latter as absent would run the module at version
+  `1` and could report `passed` for a version the bundle never declared (§7.6,
+  G6/G7, §23.8).
+- **Removed an unreachable refusal.** `embed_entitlement` no longer carries a guard
+  for an `EXTERNAL` record with `enc != None`: `Bundle::parse` returns
+  `LegacyContainer` for a pre-`CONTAINER_V1` file and R22 rejects the combination on
+  every parsed bundle, so the guard could never fire. Nothing observable changes.
+- New tests pin the three cases: a self-contained bundle whose document names
+  missing module files still passes, a declared module with a missing document file
+  is `unverified` with a path-free reason, and a text-valued `generate.interface` is
+  `unverified` rather than `passed`.
+
+### Docs — release metadata
+
+- The 0.13.1 entry above now attributes PRs #114–#118, and its `ctf run` statements
+  are qualified by `--bundle`; §17 gains this row; HANDOFF and HARDENING-AUDIT
+  record release 0.13.2.
+
 ## [0.13.1] — 2026-10-27
 
-Post-release audit round (PRs #114–#117), together with the release-metadata and
+Post-release audit round (PRs #114–#118), together with the release-metadata and
 documentation fixes that landed after the 0.13.0 tag (#110–#113). **No byte-layout
 change:** `version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf`
 4344 B, `demo.ctf` 18328 B), and no header, section, footer, commitment root, or
@@ -58,10 +96,13 @@ implied or fixes an internal inconsistency, so no feature bit is spent (§15).
   manifest, not the authoring document (§25.6). A bundle that carries a
   `generator`/`solver` section is gated on that section's bytes; otherwise the
   document's module is used only for a module the bundle declares, so a document can
-  no longer resurrect a declaration the bundle omits. `ctf run` stays document-only.
+  no longer resurrect a declaration the bundle omits. `ctf run` without `--bundle`
+  stays document-only.
 - **G6/G7 are enforced.** An unimplemented `generate.interface` or
   `generate.profile` is refused before a module runs: `ctf verify` reports
-  `unverified` naming the version, `ctf run` fails with it (§23.5, §23.8).
+  `unverified` naming the version; `ctf run` fails with it unless `--bundle` supplies
+  the declarations, in which case the run is recorded `unverified` and the module is
+  not executed (§23.5, §23.8).
 - **`ctf run --bundle` describes that bundle.** The bundle's declarations and module
   sections are applied, and the id/version cross-checked, before a record is written
   beside a file (§25.6/S10). A bundle declaring `runtime`, no offline gate, or an
