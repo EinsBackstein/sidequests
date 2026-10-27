@@ -24,8 +24,8 @@ entitlement target** (tickets 51/107). **The specification has no gaps** (ticket
 55): §34 fixes trusted-key distribution, §20.3 fixes suite 3's SLH-DSA parameters,
 and §25.6/§25.6.1 fix the gate's record and the ingest artifact. Release **0.13.1**
 is a post-release audit round (PRs #114–#117): every reader path that still
-disagreed with §4.4, §5.2, §5.4, §10, §18, §24, §25, or §34 was fixed, with no byte
-layout moved and both goldens unchanged. The live gate is
+disagreed with §4.4, §5.2, §5.4, §10, §18, §23, §24, §25, or §34 was fixed, with no
+byte layout moved and both goldens unchanged. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
 

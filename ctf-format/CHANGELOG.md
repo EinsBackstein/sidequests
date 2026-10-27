@@ -9,12 +9,12 @@ minor release may break it.
 
 ## [0.13.1] — 2026-10-27
 
-Post-release audit round: four conformance PRs (#114–#117) closing reader paths
-that still disagreed with the text they implement. **No byte-layout change:**
-`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
-`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
-transcript moved. Every spec edit either states a rule the text already implied or
-fixes an internal inconsistency, so no feature bit is spent (§15).
+Post-release audit round (PRs #114–#117), together with the release-metadata and
+documentation fixes that landed after the 0.13.0 tag (#110–#113). **No byte-layout
+change:** `version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf`
+4344 B, `demo.ctf` 18328 B), and no header, section, footer, commitment root, or
+signature transcript moved. Every spec edit either states a rule the text already
+implied or fixes an internal inconsistency, so no feature bit is spent (§15).
 
 ### Fixed — unknown kinds, read-only files, and decompression caps
 
@@ -26,9 +26,9 @@ fixes an internal inconsistency, so no feature bit is spent (§15).
   does not implement the kind.
 - **§4.4 read-only refusal is automatic on every rewrite.** `sign_bundle`,
   `ctf seal`, `ctf transfer`, and `ctf release` refuse a header carrying an
-  unimplemented `feat_ro_compat` bit before touching a section. `ctf release` is
-  included because §4.4 names seal release a rewrite; the refusal lives in
-  `release_at_event_end`, so a caller cannot forget it.
+  unimplemented `feat_ro_compat` bit before any rewrite output is produced.
+  `ctf release` is included because §4.4 names seal release a rewrite; the refusal
+  lives in `release_at_event_end`, so a caller cannot forget it.
 - **D1/D2 are section-level.** `decrypt_section_bytes` applies the caps once to the
   declared `len_plain`/`len_stored` before decrypting, instead of per chunk after
   decompression, so a bomb spread across chunks is refused before any key is used
@@ -62,8 +62,11 @@ fixes an internal inconsistency, so no feature bit is spent (§15).
 - **G6/G7 are enforced.** An unimplemented `generate.interface` or
   `generate.profile` is refused before a module runs: `ctf verify` reports
   `unverified` naming the version, `ctf run` fails with it (§23.5, §23.8).
-- **`ctf run --bundle` describes that bundle.** The id and version are cross-checked
-  before a record is written beside a file (§25.6/S10).
+- **`ctf run --bundle` describes that bundle.** The bundle's declarations and module
+  sections are applied, and the id/version cross-checked, before a record is written
+  beside a file (§25.6/S10). A bundle declaring `runtime`, no offline gate, or an
+  unimplemented interface/profile is persisted `unverified`, never `passed`. Without
+  `--bundle`, `ctf run` stays document-only.
 - `offline_gate` names a missing module before a missing `verify.offline` when both
   hold; §25.6's list is unordered.
 - A progress payload's envelope must carry `name_id = 0`; any other value is
@@ -86,6 +89,16 @@ fixes an internal inconsistency, so no feature bit is spent (§15).
   `runs` are `null` when the gate did not run or the determinism stage failed;
   `cross_engine` is `false` for G10's exemption. A rejected file does not run the
   gate, and `gate` stays `null`.
+
+### Docs — stale claims aligned with the tree (#110–#113)
+
+The 0.13.0 tag predates the commits that finished its release metadata, so 0.13.1
+carries them: the spec document revision (#111), two phase-6 roadmap items ticked
+(#112), and the 0.13.0 README/ROADMAP claim about inline markers removed (#110).
+A further pass (#113) corrected four drifts between the documentation and the
+implementation: §25.6.1 now says `gate` is `null` when a rejected bundle skips the
+gate, the roadmap's target layout and dependency inventory match the tree, and the
+hardening audit cites the right Go test and roadmap line.
 
 ## [0.13.0] — 2026-10-27
 
