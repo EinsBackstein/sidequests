@@ -207,10 +207,26 @@ func TestVerifyAllChecksCapsBeforeSkippingAnEncryptedSection(t *testing.T) {
 }
 
 // Spec §10: a kind this build does not implement must never be decompressed, so
-// an unknown-kind comp=1 section is unverifiable, not a finding.
+// an unknown-kind comp=1 section is unverifiable, not a finding. The root is made
+// wrong on purpose: if the skip were deleted, the plain path would hash the stored
+// bytes and this test would then see a root-mismatch finding.
 func TestVerifyAllSkipsUnknownKindCompressedSection(t *testing.T) {
-	data := minimalWithSection(t, 99, FlagOptional)
+	m := NewManifest()
+	m.Set("id", Text("verify-unknown"))
+	m.Set("name", Text("Verify Unknown"))
+	m.Set("names", Array(Text("manifest"), Text("section")))
+	m.Set("spec", Uint(1))
+	data, err := WriteBundle(m, []Section{{
+		Kind:      99,
+		NameID:    1,
+		Flags:     FlagOptional,
+		Plaintext: []byte("stored bytes that are not the root"),
+	}}, WriteOptions{})
+	if err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
 	data = setRecordComp(t, data, 1, CompZstd)
+	data = setRecordRoot(t, data, 1, 0xaa)
 	b, err := Parse(data)
 	if err != nil {
 		t.Fatalf("parse unknown-kind bundle: %v", err)

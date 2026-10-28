@@ -21,19 +21,19 @@ totals. Go's `VerifyAll` returned no findings for the committed
 `verify_inline_sections` would have counted an over-cap encrypted section as merely
 `unverifiable`. D1/D2 are a MUST on the authenticated declaration and apply to an
 encrypted section's totals without a key, so both now run the caps on every
-non-external compressed section before the encryption or decoder skip. An encrypted
-section this build cannot open, an unknown-kind compressed section, and an in-cap
-compressed section it cannot expand stay unverifiable and are not findings; only a
-declaration that itself breaks D1 or D2 is refused.
+non-external compressed section before the encryption or decoder skip. Each then
+skips only what it cannot open or expand — an encrypted section without a key, an
+unknown-kind compressed section, or, in Go, any compressed section, since it has no
+zstd decoder — and only a declaration that itself breaks D1 or D2 is refused.
 
-### Fixed — `ctf validate`/`ctf pack` wrote a raw control from a description (§13)
+### Fixed — `ctf validate`/`ctf pack`/`ctf run` wrote a raw control from a description (§13)
 
 §13 requires free-form manifest text written to a terminal to be escaped, but the
 O2 origin quoted from `description` was printed verbatim, so a C0 ESC could clear or
 spoof the operator's terminal during preflight. Issue and error text now go through
 the same escaping as `ctf inspect`'s tables (C0/C1, DEL, and the bidi-format marks
-`check_name` permits). The schema-error path is escaped as well, so the CLI never
-relies on the parser having escaped a key it echoes.
+`check_name` permits). A schema error's echoed key is escaped on the same paths, so
+the CLI does not rely on the parser having done it.
 
 ## [0.13.13] — 2026-10-28
 

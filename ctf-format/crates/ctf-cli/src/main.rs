@@ -884,12 +884,12 @@ fn run_gate(args: &RunArgs) -> ExitCode {
         Ok(s) => s,
         Err(GateSetupError::Issues(issues)) => {
             for issue in &issues {
-                eprintln!("ctf: {path}: {issue}");
+                eprintln!("ctf: {path}: {}", escape_terminal(&issue.to_string()));
             }
             return ExitCode::FAILURE;
         }
         Err(GateSetupError::Message(message)) => {
-            eprintln!("ctf: {path}: {message}");
+            eprintln!("ctf: {path}: {}", escape_terminal(&message));
             return ExitCode::FAILURE;
         }
     };
