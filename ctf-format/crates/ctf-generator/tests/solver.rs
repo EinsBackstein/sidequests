@@ -452,10 +452,15 @@ fn a_missing_seed_file_is_reported_not_guessed() {
 
 #[test]
 fn the_generator_flag_must_match_the_injected_flag() {
-    assert!(check_flag("abc", "abc").is_ok());
+    assert!(check_flag("abc", Some("abc")).is_ok());
     assert!(
-        check_flag("abc", "").is_ok(),
+        check_flag("abc", None).is_ok(),
         "no injected flag means no check"
     );
-    assert!(check_flag("abc", "wrong").is_err());
+    assert!(
+        check_flag("abc", Some("")).is_err(),
+        "a present-but-empty flag is a value the generator must match (§26 I4)"
+    );
+    assert!(check_flag("", Some("")).is_ok());
+    assert!(check_flag("abc", Some("wrong")).is_err());
 }

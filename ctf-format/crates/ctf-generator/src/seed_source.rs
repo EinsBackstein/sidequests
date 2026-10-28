@@ -55,9 +55,16 @@ impl core::fmt::Display for SeedError {
 impl core::error::Error for SeedError {}
 
 /// The seed from `CTF_SEED`, as 64 lowercase hex digits.
+///
+/// Only an *absent* environment variable is [`SeedError::Missing`]. A present
+/// value that is not Unicode is malformed, not absent: falling through to the
+/// mount would generate from a seed the orchestrator did not inject (§26 I3).
 pub fn seed_from_env() -> Result<[u8; 32], SeedError> {
-    let value = std::env::var(SEED_ENV).map_err(|_| SeedError::Missing)?;
-    parse_seed(value.trim())
+    match std::env::var(SEED_ENV) {
+        Ok(value) => parse_seed(value.trim()),
+        Err(std::env::VarError::NotPresent) => Err(SeedError::Missing),
+        Err(std::env::VarError::NotUnicode(_)) => Err(SeedError::BadValue("CTF_SEED is not UTF-8")),
+    }
 }
 
 /// The seed from a file: either 32 raw bytes, or 64 hex digits.
@@ -84,21 +91,42 @@ pub fn seed_from_file(path: &Path) -> Result<[u8; 32], SeedError> {
 /// the file is the documented fallback. Absent both, this is [`SeedError::Missing`]
 /// — never a default seed.
 pub fn resolve_seed() -> Result<[u8; 32], SeedError> {
+    resolve_seed_with(None)
+}
+
+/// Resolve the seed from the environment, then from `path` if given, then from
+/// [`SEED_PATH`].
+///
+/// §26.1 and §26 I3: the environment variable takes precedence over the mount
+/// when both are present, and `--seed-file` names a mount-like explicit path
+/// rather than an override of the environment. Only an **absent** `CTF_SEED`
+/// falls through, so a platform that injects both does not silently generate
+/// from the wrong seed.
+pub fn resolve_seed_with(path: Option<&Path>) -> Result<[u8; 32], SeedError> {
     match seed_from_env() {
         Ok(seed) => Ok(seed),
-        Err(SeedError::Missing) => seed_from_file(Path::new(SEED_PATH)),
+        Err(SeedError::Missing) => seed_from_file(path.unwrap_or(Path::new(SEED_PATH))),
         Err(e) => Err(e),
     }
 }
 
 /// The derived flag from `CTF_FLAG`, falling back to `FLAG_PATH`.
-pub fn resolve_flag() -> Result<String, SeedError> {
-    if let Ok(flag) = std::env::var(FLAG_ENV) {
-        return Ok(flag);
+///
+/// §26 I4: presence, not non-emptiness, is what matters. A present-but-empty
+/// `CTF_FLAG` or zero-length `/ctf/flag` is `Some("")` — an injected value the
+/// generator must match — not "nothing was injected". Only both absent is
+/// `None`.
+pub fn resolve_flag() -> Result<Option<String>, SeedError> {
+    match std::env::var(FLAG_ENV) {
+        Ok(flag) => return Ok(Some(flag)),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(SeedError::BadValue("CTF_FLAG is not UTF-8"));
+        }
     }
     match std::fs::read_to_string(FLAG_PATH) {
-        Ok(flag) => Ok(flag.trim_end_matches(['\n', '\r']).to_owned()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Ok(flag) => Ok(Some(flag.trim_end_matches(['\n', '\r']).to_owned())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(SeedError::Io(e.to_string())),
     }
 }
@@ -107,15 +135,15 @@ pub fn resolve_flag() -> Result<String, SeedError> {
 ///
 /// A challenge whose generator and platform oracle disagree would hand out
 /// artifacts that do not solve; failing at start is better than failing for the
-/// first player. An empty injected flag means none was provided, so nothing is
-/// checked.
-pub fn check_flag(generated: &str, injected: &str) -> Result<(), SeedError> {
-    if injected.is_empty() || generated == injected {
-        Ok(())
-    } else {
-        Err(SeedError::BadValue(
+/// first player. `None` means no flag was injected, so nothing is checked; a
+/// present empty flag (`Some("")`) is a real value and must match.
+pub fn check_flag(generated: &str, injected: Option<&str>) -> Result<(), SeedError> {
+    match injected {
+        None => Ok(()),
+        Some(flag) if flag == generated => Ok(()),
+        Some(_) => Err(SeedError::BadValue(
             "the generator's flag does not match the injected CTF_FLAG",
-        ))
+        )),
     }
 }
 

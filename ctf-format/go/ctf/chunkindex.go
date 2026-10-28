@@ -187,25 +187,28 @@ func (b *Bundle) VerifyChunk(nameID uint16, i uint64) ([]byte, error) {
 	if i >= uint64(len(entries)) {
 		return nil, errf(CatChunkIndex, "C5", "chunk %d outside index of %d entries", i, len(entries))
 	}
+	// The section's plaintext is rec.LenPlain bytes at rec.Offset. Bound that
+	// payload against the file once; plaintext offsets are never compared to file
+	// offsets. sectionChunkCV takes the whole plaintext and selects chunk i, so
+	// the leaf counter is i*(chunkSize/1024) and the bytes are the chunk.
+	payloadEnd, ok := checkedAdd(rec.Offset, rec.LenPlain)
+	if !ok || payloadEnd > uint64(len(b.raw)) {
+		return nil, errf(CatChunkIndex, "C5", "section %d payload beyond file", nameID)
+	}
 	start := i * uint64(rec.ChunkSize)
+	if start >= rec.LenPlain {
+		return nil, errf(CatChunkIndex, "C5", "chunk %d outside plaintext of %d bytes", i, rec.LenPlain)
+	}
+	plaintext := b.raw[rec.Offset:payloadEnd]
+	got := sectionChunkCV(plaintext, uint64(rec.ChunkSize), i)
+	if got != entries[i] {
+		return nil, errf(CatChunkIndex, "C5", "chunk %d does not match its index entry", i)
+	}
 	end := start + uint64(rec.ChunkSize)
 	if end > rec.LenPlain {
 		end = rec.LenPlain
 	}
-	if end > uint64(len(b.raw)) || start > rec.Offset {
-		return nil, errf(CatChunkIndex, "C5", "chunk %d range invalid", i)
-	}
-	payloadStart := rec.Offset + start
-	payloadEnd := rec.Offset + end
-	if payloadEnd > uint64(len(b.raw)) {
-		return nil, errf(CatChunkIndex, "C5", "chunk %d beyond file", i)
-	}
-	chunk := b.raw[payloadStart:payloadEnd]
-	got := sectionChunkCV(chunk, uint64(rec.ChunkSize), i)
-	if got != entries[i] {
-		return nil, errf(CatChunkIndex, "C5", "chunk %d does not match its index entry", i)
-	}
-	return chunk, nil
+	return plaintext[start:end], nil
 }
 
 // VerifyExternal streams an external payload through BLAKE3, checking the exact
