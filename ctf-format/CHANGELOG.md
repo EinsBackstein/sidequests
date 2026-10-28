@@ -20,7 +20,10 @@ declared still ran the determinism gate, so a generator whose output varies per 
 was recorded `failed` ("generator run 1 differed") instead of not being gated at
 all. The gate now returns `unverified` for `none` and `flag_only` before touching
 either module, and §23.7 and §25.6 state that §25.5's first stage cannot run in
-those modes. An absent declaration is still not a suppression.
+those modes. A `determinism` value outside the three modes was silently read as
+absent, so a typo could run the gate and be recorded `passed`; it is now
+`unverified` too, because no host can know whether it may run. An absent declaration
+is still not a suppression.
 
 ### Fixed — G8's declared-output rule is enforced (§23.3, §23.8)
 

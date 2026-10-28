@@ -1058,10 +1058,10 @@ struct GateSetup {
     runtime_declared: bool,
     /// Whether the gate's manifest declares `verify.offline`.
     offline_declared: bool,
-    /// The `generate.determinism` mode the gate will use (§23.7): the document's, or
-    /// the bundle's when one is supplied. `None` is absent, which does not suppress
-    /// the gate.
-    determinism: Option<ctf_generator::DeterminismMode>,
+    /// The `generate.determinism` declaration the gate will use (§23.7): the
+    /// document's, or the bundle's when one is supplied. `Absent` does not suppress
+    /// the gate; a present but unrecognised value is `unverified`.
+    determinism: ctf_generator::DeterminismDeclaration,
     /// The output names `generate.outputs` declares (§7.6, G8), likewise. Every name
     /// the generator emits must be a member.
     declared_outputs: Vec<String>,
@@ -1285,13 +1285,22 @@ fn load_gate_setup_inner(
     let expected = derive::flag(&seed);
 
     // §23.7/G8: the document's declarations, unless a bundle supplies them (then
-    // [`apply_bundle_declarations`] overwrites both before a gate runs).
+    // [`apply_bundle_declarations`] overwrites both before a gate runs). The
+    // document's `determinism` is a required string, so only the mode name can be
+    // missing; `parse` failing is still a present-but-unrecognised declaration. The
+    // authoring validator restricts it, but the gate must not assume it did.
     let (determinism, declared_outputs) = match source {
         DeclarationSource::Document => {
             let generate = doc.generate.as_ref();
-            let determinism = generate
-                .map(|g| g.determinism.as_str())
-                .and_then(ctf_generator::DeterminismMode::parse);
+            let determinism = match generate {
+                None => ctf_generator::DeterminismDeclaration::Absent,
+                Some(generate) => {
+                    match ctf_generator::DeterminismMode::parse(&generate.determinism) {
+                        Some(mode) => ctf_generator::DeterminismDeclaration::Mode(mode),
+                        None => ctf_generator::DeterminismDeclaration::Unrecognized,
+                    }
+                }
+            };
             let declared_outputs = generate
                 .map(|g| g.outputs.iter().map(|o| o.name.clone()).collect())
                 .unwrap_or_default();
@@ -1299,7 +1308,7 @@ fn load_gate_setup_inner(
         }
         // The bundle's declarations decide (§25.6). These placeholders are never
         // used: every bundle path applies the bundle's values first.
-        DeclarationSource::Bundle => (None, Vec::new()),
+        DeclarationSource::Bundle => (ctf_generator::DeterminismDeclaration::Absent, Vec::new()),
     };
 
     Ok(GateSetup {
@@ -1470,13 +1479,22 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
     // the module at 1 and could report `passed` for a version the bundle never
     // declared. The reason is fixed and path-free (S12).
     let generate = bundle.manifest.declaration("generate");
-    // §23.7: the bundle's determinism mode decides whether a gate exists. Absent —
-    // or text this build does not know — is not a suppression: the gate runs. This
-    // overrides the document's value unconditionally (§25.6).
-    setup.determinism = generate
-        .and_then(|generate| generate.get("determinism"))
-        .and_then(Value::as_text)
-        .and_then(ctf_generator::DeterminismMode::parse);
+    // §23.7: the bundle's determinism declaration decides whether a gate exists.
+    // Absent is not a suppression: the gate runs. A present value that is not text,
+    // or text this build does not define, is likewise not absent — it is
+    // unrecognised, and the gate reports `unverified` rather than running a stage it
+    // cannot know is permitted (§25.6). This overrides the document's value
+    // unconditionally (§25.6).
+    setup.determinism = match generate.and_then(|generate| generate.get("determinism")) {
+        None => ctf_generator::DeterminismDeclaration::Absent,
+        Some(value) => match value
+            .as_text()
+            .and_then(ctf_generator::DeterminismMode::parse)
+        {
+            Some(mode) => ctf_generator::DeterminismDeclaration::Mode(mode),
+            None => ctf_generator::DeterminismDeclaration::Unrecognized,
+        },
+    };
     // G8/§23.3: the declared output names are the bundle's too. An absent list
     // declares no output, so a module that names one is rejected rather than passed
     // on the document's say-so.

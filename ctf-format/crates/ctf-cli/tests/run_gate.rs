@@ -10,6 +10,9 @@
 
 use std::process::Command;
 
+use ctf_format::cbor::Value;
+use ctf_format::{Bundle, SectionFlags, SectionKind, SectionSpec, write_bundle};
+
 const BIN: &str = env!("CARGO_BIN_EXE_ctf");
 
 struct TempDir(std::path::PathBuf);
@@ -395,4 +398,107 @@ fn run_refuses_to_attach_the_record_to_another_challenge() {
         !std::path::Path::new(&format!("{bundle}.status.json")).exists(),
         "a refused attribution writes no record"
     );
+}
+
+/// Replace or insert `key` inside a decoded manifest's `generate` map.
+fn set_generate_key(manifest: &mut Value, key: &str, value: Value) {
+    let Value::Map(entries) = manifest else {
+        panic!("a manifest is a map");
+    };
+    let (_, generate) = entries
+        .iter_mut()
+        .find(|(k, _)| k.as_text() == Some("generate"))
+        .expect("the fixture declares generate");
+    let Value::Map(inner) = generate else {
+        panic!("`generate` is a map");
+    };
+    match inner.iter_mut().find(|(k, _)| k.as_text() == Some(key)) {
+        Some((_, slot)) => *slot = value,
+        None => inner.push((Value::Text(key.to_owned()), value)),
+    }
+}
+
+/// The gate fixture's bundle with its manifest `generate.determinism` replaced.
+///
+/// `ctf pack` cannot produce an unrecognised mode — the authoring validator rejects
+/// it — so the bundle is rebuilt through `ctf_format` from the packed manifest. The
+/// document still names the modules, and a bundle that declares them without
+/// carrying them is gated on the document's bytes (§25.6).
+fn bundle_with_determinism(
+    dir: &TempDir,
+    tag: &str,
+    expected: &str,
+    mode: Value,
+) -> (String, String, String) {
+    let source = fixture(dir, tag, expected);
+    let packed = dir.path(&format!("{tag}-packed.ctf"));
+    let (ok, stdout, stderr) = run(&["pack", &source, "--out", &packed]);
+    assert!(ok, "pack failed: {stdout}{stderr}");
+    let file = std::fs::read(&packed).unwrap();
+    let parsed = Bundle::parse(&file).unwrap();
+    let record = parsed
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .expect("a bundle has a manifest");
+    let mut manifest = Value::decode(&parsed.section_bytes(record).unwrap()).unwrap();
+    set_generate_key(&mut manifest, "determinism", mode);
+    let manifest_bytes = manifest.encode().unwrap();
+    let bundle = dir.path(&format!("{tag}-patched.ctf"));
+    let bytes = write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &manifest_bytes,
+        )],
+    )
+    .unwrap();
+    std::fs::write(&bundle, bytes).unwrap();
+    (source, packed, bundle)
+}
+
+/// Spec §23.7/§25.6: a `determinism` value that is not one of the three modes is not
+/// a mode. A bundle that would otherwise pass — generator, solver, `verify.offline`,
+/// no `runtime` — must be `unverified`, never `passed`, on the bundle-override path.
+#[test]
+fn run_reports_an_unrecognised_determinism_mode_as_unverified() {
+    let dir = TempDir::new("determinism-unrecognised");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, control, bundle) = bundle_with_determinism(
+        &dir,
+        "unrecognised",
+        &expected,
+        Value::Text("nope".to_owned()),
+    );
+
+    // The packed bundle declares `strict`, so the same fixture passes; only the
+    // replaced value can explain a non-`passed` outcome.
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &control]);
+    assert!(ok, "the control gate passes: {stdout}{stderr}");
+    assert!(stdout.contains("gate          passed"), "{stdout}");
+
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert!(ok, "unverified is not a failure: {stdout}{stderr}");
+    assert!(stdout.contains("gate          unverified"), "{stdout}");
+    assert!(!stdout.contains("gate          passed"), "{stdout}");
+    assert!(
+        stdout.contains("not a mode"),
+        "the reason names the condition: {stdout}"
+    );
+    assert!(
+        !stderr.contains("not deterministic"),
+        "the gate must not have run: {stderr}"
+    );
+
+    let record = std::fs::read_to_string(format!("{bundle}.status.json")).unwrap();
+    assert!(record.contains("\"status\": \"unverified\""), "{record}");
+    assert!(
+        record.contains("not a mode"),
+        "the record says why: {record}"
+    );
+    assert!(record.contains("\"generator_root\": null"), "{record}");
+    assert!(record.contains("\"runs\": null"), "{record}");
 }

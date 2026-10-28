@@ -4,8 +4,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use ctf_generator::{
-    DeterminismMode, GateStage, GateStatus, GeneratorError, Limits, OfflineGate, SeedError, Solver,
-    UnverifiedReason, check_flag, offline_gate, parse_seed, seed_from_file,
+    DeterminismDeclaration, DeterminismMode, GateStage, GateStatus, GeneratorError, Limits,
+    OfflineGate, SeedError, Solver, UnverifiedReason, check_flag, offline_gate, parse_seed,
+    seed_from_file,
 };
 
 fn wat(source: &str) -> Vec<u8> {
@@ -99,7 +100,7 @@ fn a_correct_solver_passes_the_offline_gate() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(ctf_generator::DeterminismMode::Strict),
+            determinism: DeterminismDeclaration::Mode(ctf_generator::DeterminismMode::Strict),
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -126,7 +127,7 @@ fn a_failing_solver_fails_the_gate_and_blocks_publication() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(ctf_generator::DeterminismMode::Strict),
+            determinism: DeterminismDeclaration::Mode(ctf_generator::DeterminismMode::Strict),
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -145,7 +146,7 @@ fn a_runtime_bearing_bundle_is_unverified_never_passed() {
             expected_flag: "abc",
             runtime_declared: true,
             offline_declared: true,
-            determinism: Some(ctf_generator::DeterminismMode::Strict),
+            determinism: DeterminismDeclaration::Mode(ctf_generator::DeterminismMode::Strict),
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -169,7 +170,7 @@ fn a_bundle_with_no_generator_or_solver_is_unverified() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(ctf_generator::DeterminismMode::Strict),
+            determinism: DeterminismDeclaration::Mode(ctf_generator::DeterminismMode::Strict),
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -190,7 +191,7 @@ fn every_emitted_output_must_be_declared_by_generate_outputs() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(DeterminismMode::Strict),
+            determinism: DeterminismDeclaration::Mode(DeterminismMode::Strict),
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -222,7 +223,7 @@ fn an_emitted_subset_of_the_declared_outputs_is_legal() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(DeterminismMode::Strict),
+            determinism: DeterminismDeclaration::Mode(DeterminismMode::Strict),
             declared_outputs: &["chal".to_owned(), "key.pem".to_owned()],
         },
         &Limits::default(),
@@ -244,7 +245,7 @@ fn determinism_none_is_unverified_and_does_not_run_the_generator() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(DeterminismMode::None),
+            determinism: DeterminismDeclaration::Mode(DeterminismMode::None),
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -284,7 +285,7 @@ fn determinism_flag_only_is_unverified_rather_than_no_generator() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: Some(DeterminismMode::FlagOnly),
+            determinism: DeterminismDeclaration::Mode(DeterminismMode::FlagOnly),
             declared_outputs: &[],
         },
         &Limits::default(),
@@ -310,7 +311,7 @@ fn an_absent_determinism_declaration_still_runs_the_gate() {
             expected_flag: "abc",
             runtime_declared: false,
             offline_declared: true,
-            determinism: None,
+            determinism: DeterminismDeclaration::Absent,
             declared_outputs: &["chal".to_owned()],
         },
         &Limits::default(),
@@ -321,6 +322,49 @@ fn an_absent_determinism_declaration_still_runs_the_gate() {
         matches!(err.source, GeneratorError::Nondeterministic { run: 1 }),
         "{err:?}"
     );
+}
+
+/// §23.7/§25.6: a declaration that is present but not one of the three modes is not
+/// absent. The gate cannot tell whether it may run, so it does not: the status is
+/// `unverified` with [`UnverifiedReason::DeterminismUnrecognized`]. The generator
+/// would fail G9 if it ran, so observing `unverified` proves neither module ran.
+#[test]
+fn an_unrecognised_determinism_declaration_is_unverified_and_runs_nothing() {
+    let report = offline_gate(
+        OfflineGate {
+            // Contradictory on purpose (§7.6 is not validated by the container): a
+            // module is supplied to prove the gate does not run it.
+            generator: Some(&wat(STATEFUL)),
+            solver: Some(&wat(SOLVER_CORRECT)),
+            seed: b"reference-seed",
+            expected_flag: "abc",
+            runtime_declared: true,
+            offline_declared: true,
+            determinism: DeterminismDeclaration::Unrecognized,
+            declared_outputs: &["chal".to_owned()],
+        },
+        &Limits::default(),
+    )
+    .unwrap();
+    assert_eq!(report.status, GateStatus::Unverified);
+    assert_eq!(
+        report.unverified_reason,
+        Some(UnverifiedReason::DeterminismUnrecognized)
+    );
+    // The determinism declaration is checked first, before `runtime`: an
+    // unrecognised mode is named even when another condition also holds.
+    assert!(report.generator_root.is_none());
+    assert!(report.generator_runs.is_none());
+    assert!(report.cross_engine.is_none());
+    assert!(report.artifact_count.is_none());
+    assert!(report.solver_flag.is_none());
+    let reason = report.unverified_reason.unwrap().to_string();
+    assert!(reason.contains("§23.7"), "the section is named: {reason}");
+    assert!(
+        reason.contains("not a mode"),
+        "the condition is named: {reason}"
+    );
+    assert!(!reason.contains('/'), "the reason is path-free: {reason}");
 }
 
 #[test]
