@@ -109,8 +109,9 @@ impl<'a> Bundle<'a> {
         // §19.2 S2/S3: the first point a primitive is needed is the commitment
         // root, so this is where `suite_id` is resolved through the registry. An id
         // absent from it is rejected here, naming the suite; §19.2 S1 is preserved
-        // because nothing earlier in this function (or in `Header::parse`) consults
-        // the registry.
+        // because nothing earlier in this function (or in `Header::parse`) rejects
+        // an unknown suite — F10 above reads the registry only to compare slot
+        // lengths when the suite *does* resolve.
         crate::suite::suite(header.suite_id)?;
 
         // 6. The commitment root, over the header and table bytes exactly as they

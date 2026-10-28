@@ -342,6 +342,45 @@ fn a_control_character_in_a_name_is_escaped() {
     );
 }
 
+/// A bidi-format mark `check_name` permits (LRM) is escaped too: it cannot inject a
+/// newline, but it can reorder the rest of a table cell (spec §13).
+#[test]
+fn a_bidi_format_mark_in_a_name_is_escaped() {
+    let name = "evil\u{200e}verify PASSED";
+    let m = Manifest::build("chal", "Title", &["manifest", name], vec![]).unwrap();
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &m.encode().unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"x",
+            ),
+        ],
+    )
+    .unwrap();
+    let t = TempFile::new("bidi-name");
+    std::fs::write(t.path(), &file).unwrap();
+
+    let (ok, out) = inspect(t.path(), &[]);
+    assert!(ok, "{out}");
+    assert!(
+        !out.contains('\u{200e}'),
+        "raw bidi mark reached the terminal:\n{out:?}"
+    );
+    assert!(
+        out.contains("\\u{200e}"),
+        "the bidi mark should be visible as text:\n{out}"
+    );
+}
+
 /// The escaping applies only to control characters: an ordinary name is printed
 /// exactly as authored.
 #[test]

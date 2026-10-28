@@ -2940,7 +2940,14 @@ fn flag_names(f: SectionFlags) -> String {
 fn truncate(s: &str, n: usize) -> String {
     let mut escaped = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() {
+        // C0/C1 controls, and the bidi-format marks `check_name` does not reject
+        // (LRM, RLM, ALM): all of them can move or hide text around a table cell.
+        if c.is_control()
+            || matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+        {
             escaped.extend(c.escape_default());
         } else {
             escaped.push(c);

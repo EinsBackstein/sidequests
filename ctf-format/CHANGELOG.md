@@ -45,8 +45,8 @@ a DF4 diagnostic. Stage 1 and 2 vectors are unchanged.
 
 `check_name` rejects C0 and DEL but permits C1 controls such as U+0085, and
 `ctf inspect` printed manifest names verbatim in its tables. Table cells now escape
-control characters before truncating, so a legal bundle cannot spoof the tool's own
-output.
+C0/C1 controls and the bidi-format marks `check_name` permits before truncating, so a
+control or bidi character in a legal name cannot spoof the tool's own output.
 
 ### Fixed — an out-of-range runtime port was dropped from the descriptor (§29.1)
 
