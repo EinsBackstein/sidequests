@@ -98,9 +98,11 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
-      # `DATABASE_URL` makes the query macros compile against this Postgres rather
-      # than the committed `.sqlx/` cache, so a stale cache fails here. The tests
-      # themselves use `CTF_TEST_DATABASE_URL`.
+      # With `DATABASE_URL` set and no `SQLX_OFFLINE`, the query macros compile
+      # against this Postgres rather than the committed `.sqlx/` cache, so a stale
+      # cache fails here. That needs the schema to exist *before* the crate is
+      # compiled, which is what the migration step below does. The tests
+      # themselves use `CTF_TEST_DATABASE_URL` and each create their own schema.
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/ctf
       CTF_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/ctf
     steps:
@@ -112,6 +114,11 @@ jobs:
         with:
           workspaces: ctf-format
           key: postgres
+      - name: Migrate the compile-time schema
+        # `sqlx::migrate!` embeds the same files, but it only runs once the crate
+        # has compiled, and the macros need the tables first. Applying the SQL
+        # directly is enough: the tests create their own schemas.
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f crates/ctf-tui/migrations/0001_initial.sql
       - name: Migrations, ingest pipeline, serving rule
         run: cargo test -p ctf-tui --test db
       - name: Admin TUI state machine and rendering
