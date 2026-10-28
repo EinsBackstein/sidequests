@@ -196,3 +196,70 @@ fn a_second_positional_is_an_error() {
         "the extra argument must be rejected: {err}"
     );
 }
+
+/// Spec §13: `description` is free-form text, and the origin a diagnostic quotes
+/// from it is still a terminal write. A raw ESC must appear as `\u{1b}`, not as
+/// the start of a terminal escape sequence.
+#[test]
+fn an_escape_in_a_description_is_not_written_raw() {
+    let body = "\
+spec: 1
+id: escape-desc
+name: Escape
+description: \"see http://evil\\u001b[2J.invalid/\"
+";
+    let t = TempYaml::new("escape-desc", body);
+    let (_ok, _out, err) = validate(t.path(), &[]);
+    assert!(
+        !err.as_bytes().contains(&0x1b),
+        "raw escape byte reached the terminal:\n{err:?}"
+    );
+    assert!(
+        err.contains("\\u{1b}"),
+        "the escape should be visible as text:\n{err}"
+    );
+}
+
+/// A bidi-format mark `check_name` permits (LRM) is escaped in a description
+/// diagnostic too: it can reorder the rest of the line around the origin.
+#[test]
+fn a_bidi_mark_in_a_description_is_not_written_raw() {
+    let body = "\
+spec: 1
+id: bidi-desc
+name: Bidi
+description: \"see http://evil\\u200e.invalid/\"
+";
+    let t = TempYaml::new("bidi-desc", body);
+    let (_ok, _out, err) = validate(t.path(), &[]);
+    assert!(
+        !err.contains('\u{200e}'),
+        "raw bidi mark reached the terminal:\n{err:?}"
+    );
+    assert!(
+        err.contains("\\u{200e}"),
+        "the bidi mark should be visible as text:\n{err}"
+    );
+}
+
+/// The escaping applies only when a character can act on the terminal: an
+/// ordinary description is quoted unchanged.
+#[test]
+fn a_normal_description_is_printed_unchanged() {
+    let body = "\
+spec: 1
+id: normal-desc
+name: Normal
+description: \"see http://example.test/asset.png\"
+";
+    let t = TempYaml::new("normal-desc", body);
+    let (_ok, _out, err) = validate(t.path(), &[]);
+    assert!(
+        err.contains("http://example.test"),
+        "the origin should be quoted verbatim:\n{err}"
+    );
+    assert!(
+        !err.contains("\\u{"),
+        "nothing should have been escaped:\n{err}"
+    );
+}

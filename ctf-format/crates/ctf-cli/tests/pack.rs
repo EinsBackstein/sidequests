@@ -258,3 +258,90 @@ artifacts:
         );
     }
 }
+
+/// Spec §13: `ctf pack` prints the descriptor's description warning before it
+/// writes the bundle, so the origin must not carry a raw ESC to the terminal.
+#[test]
+fn an_escape_in_a_description_is_not_written_raw() {
+    let dir = TempDir::new("escape-desc");
+    let source = yaml(
+        &dir,
+        "escape.yaml",
+        "\
+spec: 1
+id: escape-desc
+name: Escape
+description: \"see http://evil\\u001b[2J.invalid/\"
+",
+    );
+    let out = dir.path("escape.ctf");
+
+    let (ok, _stdout, stderr) = pack(&source, &out);
+    assert!(ok, "warning-only description must pack: {stderr}");
+    assert!(
+        !stderr.as_bytes().contains(&0x1b),
+        "raw escape byte reached the terminal:\n{stderr:?}"
+    );
+    assert!(
+        stderr.contains("\\u{1b}"),
+        "the escape should be visible as text:\n{stderr}"
+    );
+}
+
+/// A C1 control such as U+0085 is permitted by `check_name` and by the seed
+/// rules, so `pack` must escape it when quoting a description origin.
+#[test]
+fn a_c1_control_in_a_description_is_not_written_raw() {
+    let dir = TempDir::new("c1-desc");
+    let source = yaml(
+        &dir,
+        "c1.yaml",
+        "\
+spec: 1
+id: c1-desc
+name: C1
+description: \"see http://evil\\u0085.invalid/\"
+",
+    );
+    let out = dir.path("c1.ctf");
+
+    let (ok, _stdout, stderr) = pack(&source, &out);
+    assert!(ok, "warning-only description must pack: {stderr}");
+    assert!(
+        !stderr.contains('\u{85}'),
+        "raw C1 control reached the terminal:\n{stderr:?}"
+    );
+    assert!(
+        stderr.contains("\\u{85}"),
+        "the control character should be visible as text:\n{stderr}"
+    );
+}
+
+/// An ordinary description is quoted unchanged; escaping must not rewrite text
+/// that has no terminal effect.
+#[test]
+fn a_normal_description_is_printed_unchanged() {
+    let dir = TempDir::new("normal-desc");
+    let source = yaml(
+        &dir,
+        "normal.yaml",
+        "\
+spec: 1
+id: normal-desc
+name: Normal
+description: \"see http://example.test/asset.png\"
+",
+    );
+    let out = dir.path("normal.ctf");
+
+    let (ok, _stdout, stderr) = pack(&source, &out);
+    assert!(ok, "normal description must pack: {stderr}");
+    assert!(
+        stderr.contains("http://example.test"),
+        "the origin should be quoted verbatim:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("\\u{"),
+        "nothing should have been escaped:\n{stderr}"
+    );
+}

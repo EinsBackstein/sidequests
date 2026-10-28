@@ -553,10 +553,13 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
     let mut errors: Vec<String> = issues
         .iter()
         .filter(|i| i.is_error())
-        .map(ToString::to_string)
+        .map(|i| escape_terminal(&i.to_string()))
         .collect();
     for issue in issues.iter().filter(|i| !i.is_error()) {
-        eprintln!("ctf: {path}: warning: {issue}");
+        eprintln!(
+            "ctf: {path}: warning: {}",
+            escape_terminal(&issue.to_string())
+        );
     }
     // `ctf validate` is the author's pre-flight, so it runs the descriptor's
     // policy checks too (§29.1): `ctf pack` refuses an out-of-range port or a
@@ -567,12 +570,20 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
         match pack::descriptor_for(&doc) {
             Ok(_) => {}
             Err(PackError::Policy(policy_issues)) => {
-                errors.extend(policy_issues.iter().map(ToString::to_string));
+                errors.extend(
+                    policy_issues
+                        .iter()
+                        .map(|i| escape_terminal(&i.to_string())),
+                );
             }
             Err(PackError::Invalid(validation_issues)) => {
-                errors.extend(validation_issues.iter().map(ToString::to_string));
+                errors.extend(
+                    validation_issues
+                        .iter()
+                        .map(|i| escape_terminal(&i.to_string())),
+                );
             }
-            Err(PackError::Format(e)) => errors.push(e.to_string()),
+            Err(PackError::Format(e)) => errors.push(escape_terminal(&e.to_string())),
         }
     }
     if errors.is_empty() {
@@ -613,7 +624,10 @@ fn run_pack(args: &PackArgs) -> ExitCode {
     // Warnings do not block packing (spec §7.8); report them before the bundle so
     // an author sees them even on success.
     for issue in doc.warnings() {
-        eprintln!("ctf: {path}: warning: {issue}");
+        eprintln!(
+            "ctf: {path}: warning: {}",
+            escape_terminal(&issue.to_string())
+        );
     }
     // Artifact `source` paths are relative to the authoring document, not to the
     // operator's shell (spec §7.8). A bare filename has no parent, so `.` is the
@@ -626,18 +640,18 @@ fn run_pack(args: &PackArgs) -> ExitCode {
         Ok(f) => f,
         Err(PackError::Invalid(issues)) => {
             for issue in &issues {
-                eprintln!("ctf: {path}: {issue}");
+                eprintln!("ctf: {path}: {}", escape_terminal(&issue.to_string()));
             }
             return ExitCode::FAILURE;
         }
         Err(PackError::Policy(issues)) => {
             for issue in &issues {
-                eprintln!("ctf: {path}: {issue}");
+                eprintln!("ctf: {path}: {}", escape_terminal(&issue.to_string()));
             }
             return ExitCode::FAILURE;
         }
         Err(PackError::Format(e)) => {
-            eprintln!("ctf: {path}: {e}");
+            eprintln!("ctf: {path}: {}", escape_terminal(&e.to_string()));
             return ExitCode::FAILURE;
         }
     };
@@ -2950,19 +2964,16 @@ fn flag_names(f: SectionFlags) -> String {
     }
 }
 
-/// Truncate to `n` characters for a fixed-width column, escaping control
-/// characters first (spec §13).
+/// Escape the characters that can act on the operator's terminal (spec §13).
 ///
-/// A manifest `name` may contain C1 controls such as U+0085 — `check_name` rejects
-/// C0 and DEL, but not every Unicode control — and a table cell is still a terminal
-/// write. Escaping before truncating makes the injected text visible instead of
-/// letting it act on the operator's terminal; escaping after would count the escape
-/// sequence against the column budget.
-fn truncate(s: &str, n: usize) -> String {
+/// `name`, `category`, `description`, and mirror URLs are free-form text, and a
+/// diagnostic that echoes one is still a terminal write. C0/C1 controls, DEL,
+/// and the bidi-format marks `check_name` does not reject (LRM, RLM, ALM) can
+/// move, hide, or execute text around the output, so each becomes its visible
+/// `escape_default` form. Everything else is copied unchanged.
+fn escape_terminal(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len());
     for c in s.chars() {
-        // C0/C1 controls, and the bidi-format marks `check_name` does not reject
-        // (LRM, RLM, ALM): all of them can move or hide text around a table cell.
         if c.is_control()
             || matches!(
                 c,
@@ -2974,6 +2985,19 @@ fn truncate(s: &str, n: usize) -> String {
             escaped.push(c);
         }
     }
+    escaped
+}
+
+/// Truncate to `n` characters for a fixed-width column, escaping control
+/// characters first (spec §13).
+///
+/// A manifest `name` may contain C1 controls such as U+0085 — `check_name` rejects
+/// C0 and DEL, but not every Unicode control — and a table cell is still a terminal
+/// write. Escaping before truncating makes the injected text visible instead of
+/// letting it act on the operator's terminal; escaping after would count the escape
+/// sequence against the column budget.
+fn truncate(s: &str, n: usize) -> String {
+    let escaped = escape_terminal(s);
     if escaped.chars().count() <= n {
         return escaped;
     }
