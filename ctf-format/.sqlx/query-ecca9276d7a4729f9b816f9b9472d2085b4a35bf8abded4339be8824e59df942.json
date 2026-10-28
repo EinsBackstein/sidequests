@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, bundle_id, name_id, name, kind, flags, comp, enc, len_plain, len_stored, byte_offset AS \"offset\", root, chunk_size, chunk_index_off, player_visible, sealed, external FROM sections WHERE bundle_id = $1 ORDER BY name_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "bundle_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "name_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "kind",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "flags",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "comp",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "enc",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "len_plain",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "len_stored",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "offset",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "root",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 12,
+        "name": "chunk_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "chunk_index_off",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "player_visible",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 15,
+        "name": "sealed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 16,
+        "name": "external",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ecca9276d7a4729f9b816f9b9472d2085b4a35bf8abded4339be8824e59df942"
+}

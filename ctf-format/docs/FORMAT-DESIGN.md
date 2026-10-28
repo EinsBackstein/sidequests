@@ -371,7 +371,9 @@ Identical, with XChaCha20-Poly1305 as AEAD.
 
 Adds SLH-DSA (FIPS 205) alongside. Hash-based, conservative, large signatures.
 Worth it for the permanent archive copy where ML-DSA's relative youth is a real
-consideration; not worth it for in-event bundles.
+consideration; not worth it for in-event bundles. The third component is
+implemented in both implementations: `sig_pq` holds `ML-DSA-65 ‖ SLH-DSA-SHA2-128s`
+and is split at 3309 bytes (spec §20.3).
 
 ### Encoding rule for every derivation input — read first
 
@@ -507,7 +509,7 @@ the length is a per-challenge choice, not a format constant.
 | STREAM chunking | implemented directly on the suite's per-chunk AEAD | The nonce and AAD layout is the format's own (spec §20.2), not the `aead::stream` crate's |
 | ML-KEM-768 | RustCrypto `ml-kem`, with AWS-LC for the classical half | The two components come from independent implementations, which is the hybrid property the design wants |
 | ML-DSA-65 | RustCrypto `ml-dsa`, behind its own trait | **Weakest link.** Isolate it so `suite_id` can retire a suite without touching the container format |
-| SLH-DSA | not implemented | Suite 3's signature role reports `NotImplemented` (spec §14); the parameter set is fixed in spec §20.3 |
+| SLH-DSA | RustCrypto `slh-dsa` in Rust; `cloudflare/circl/sign/slhdsa` in Go | Suite 3's third signature component (spec §19, §20.3): `sig_pq` is `ML-DSA-65 (3309) ‖ SLH-DSA-SHA2-128s (7856) = 11165` bytes, split at 3309, and all three components verify. Implemented in both the Rust and Go implementations |
 
 ML-DSA is the least settled primitive in the whole design. Isolate it behind a single
 trait so `suite_id` can retire a suite without touching the container format. That
@@ -755,7 +757,9 @@ Two notes on that table:
 - The Go second implementation is not redundancy for its own sake. §14 wants a spec
   unambiguous enough that a different language with a different crypto stack produces
   byte-identical output. Go's stdlib `crypto/mlkem` makes it a genuinely independent
-  path rather than a rewrite against the same libraries.
+  path rather than a rewrite against the same libraries. It covers the container,
+  zstd `comp = 1`, the §18 entitlement chain, and all three crypto suites, including
+  suite 3's SLH-DSA-SHA2-128s component.
 
 Deliberately **not** in this repo: container orchestration, scheduling, port
 allocation, TTL reaping, object storage for external payloads. See §2's scope

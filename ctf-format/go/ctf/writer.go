@@ -50,8 +50,9 @@ func (o WriteOptions) minor() uint16 {
 }
 
 type writeSection struct {
-	rec  SectionRecord
-	data []byte // inline payload, or nil for EXTERNAL
+	rec   SectionRecord
+	plain []byte // plaintext, before comp
+	data  []byte // inline stored payload, or nil for EXTERNAL
 }
 
 // WriteBundle emits a complete .ctf file. It reproduces the §11 minimal bundle
@@ -78,16 +79,34 @@ func WriteBundle(m *Manifest, sections []Section, opts WriteOptions) ([]byte, er
 			Enc:    EncNone,
 			Comp:   CompNone,
 		},
-		data: manifestBytes,
+		plain: manifestBytes,
+		data:  manifestBytes,
 	})
 	for i, s := range sections {
 		if s.Kind == KindManifest {
 			return nil, errf(CatUsage, "", "section %d: manifest section is emitted by WriteBundle", i)
 		}
-		if s.Enc != EncNone || s.Comp != CompNone {
-			return nil, errf(CatUsage, "", "section %d: this writer implements enc=0 comp=0 only", i)
+		if s.Enc != EncNone {
+			return nil, errf(CatUsage, "", "section %d: this writer implements enc=0 only", i)
+		}
+		if s.Comp != CompNone && s.Comp != CompZstd {
+			return nil, errf(CatUsage, "R10", "section %d: comp %d not assigned", i, s.Comp)
+		}
+		if s.Flags&FlagExternal != 0 && s.Comp != CompNone {
+			return nil, errf(CatUsage, "R22", "section %d: EXTERNAL carries comp=%d", i, s.Comp)
 		}
 		ws := writeSection{data: s.Plaintext}
+		plain := s.Plaintext
+		stored := plain
+		if s.Comp == CompZstd {
+			var err error
+			stored, err = compressSection(plain, s.ChunkSize)
+			if err != nil {
+				return nil, err
+			}
+		}
+		ws.data = stored
+		ws.plain = plain
 		ws.rec = SectionRecord{
 			Kind:      s.Kind,
 			NameID:    s.NameID,
@@ -100,6 +119,7 @@ func WriteBundle(m *Manifest, sections []Section, opts WriteOptions) ([]byte, er
 			ws.rec.LenPlain = s.ExternalSize
 			ws.rec.Root = s.ExternalRoot
 			ws.data = nil
+			ws.plain = nil
 		}
 		all = append(all, ws)
 	}
@@ -117,8 +137,8 @@ func WriteBundle(m *Manifest, sections []Section, opts WriteOptions) ([]byte, er
 		}
 		all[i].rec.Offset = off
 		all[i].rec.LenStored = uint64(len(all[i].data))
-		all[i].rec.LenPlain = uint64(len(all[i].data))
-		sum := blake3.Sum256(all[i].data)
+		all[i].rec.LenPlain = uint64(len(all[i].plain))
+		sum := blake3.Sum256(all[i].plain)
 		all[i].rec.Root = [RootLen]byte(sum)
 		pos = off + uint64(len(all[i].data))
 
@@ -141,7 +161,7 @@ func WriteBundle(m *Manifest, sections []Section, opts WriteOptions) ([]byte, er
 			if !ok {
 				return nil, errf(CatUsage, "", "chunk index offset overflows")
 			}
-			entries, err := BuildChunkIndex(all[i].data, all[i].rec.ChunkSize)
+			entries, err := BuildChunkIndex(all[i].plain, all[i].rec.ChunkSize)
 			if err != nil {
 				return nil, err
 			}

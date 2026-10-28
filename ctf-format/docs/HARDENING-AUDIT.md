@@ -1,7 +1,7 @@
 # Audit — parser hardening checklist (design §14)
 
 **Date:** 2026-10-28
-**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.14
+**Format version:** 0.3 (`version_minor` 3) · **Release:** 1.0.0
 **Source checklist:** `docs/FORMAT-DESIGN.md` §14, lines 800–831.
 **Method:** every claim below was verified by reading the enforcement site and the
 tests that pin it in the current tree, not inferred from the design text. Line
@@ -12,16 +12,16 @@ numbers are against this commit.
 | # | Checklist item | Where enforced | Test(s) | Verdict | Ticket |
 |---:|---|---|---|---|---|
 | 1 | Never allocate from a length field before validating it against remaining bytes | `header.rs:134-141` (`TooManySections`, `MAX_SECTIONS` at `lib.rs:180`); `section.rs:694-713` (`count × 128` checked before `with_capacity`); `cbor.rs:321-358` (array/map grow by consumed bytes, never `with_capacity(arg)`); `chunk.rs:194-239` (`count` derived, never read); `footer.rs:74-77,154-161` (`MAX_SIG_LEN` before slot lengths); `compress.rs:114-124` (declared length bounded by `take`, no `with_capacity`) | `container.rs:288` `header_rejects_section_count_over_cap`; `cbor.rs:237` `a_huge_length_field_does_not_allocate`; `container.rs:656` `record_rejects_range_overflow`; `container.rs:328` `header_rejects_table_overflowing_u64` | Satisfied | — |
-| 2 | Bounds-check every offset; reject backwards, into the header, or overlapping | `header.rs:143-226` (`section_table_off ≥ HEADER_LEN`, alignment, `footer_off ≥ table_end`, `check_file_len`); `section.rs:501-520` (`offset ≥ HEADER_LEN`, alignment, `offset + len_stored` overflow); `section.rs:570-598` (index offset bounds, R19); `section.rs:727-798` `validate_layout` (payload/index past `footer_off`, pairwise overlap, table overlap); `bundle.rs:509-523` `slice` | `container.rs:298` `header_rejects_table_inside_header`; `container.rs:637` `record_rejects_misaligned_payload_offset`; `container.rs:647` `record_rejects_payload_inside_header`; `container.rs:969,988,1027,1050` overlap/bounds; `container.rs:1006` unknown-optional participation | Satisfied | — |
-| 3 | Reject trailing bytes; file ends at the footer; `total_len` equals real length | `footer.rs:20-26,170-199` (F5 exact `footer_len`, F6 magic, F7 `total_len`); `bundle.rs:90-91` (footer parsed against whole file); `cbor.rs:80-90` (`CborTrailing`); `chunk.rs:202-224` (exact `count × 32`) | `bundle.rs:607` `rejects_trailing_bytes`; `bundle.rs:647` `rejects_footer_slack`; `bundle.rs:634` `rejects_a_wrong_total_len`; `cbor.rs:189` `rejects_trailing_bytes`; `chunk.rs:217` `index_rejects_trailing_bytes` | Satisfied | — |
+| 2 | Bounds-check every offset; reject backwards, into the header, or overlapping | `header.rs:143-226` (`section_table_off ≥ HEADER_LEN`, alignment, `footer_off ≥ table_end`, `check_file_len`); `section.rs:501-520` (`offset ≥ HEADER_LEN`, alignment, `offset + len_stored` overflow); `section.rs:570-598` (index offset bounds, R19); `section.rs:727-798` `validate_layout` (payload/index past `footer_off`, pairwise overlap, table overlap); `bundle.rs:652-665` `slice` | `container.rs:298` `header_rejects_table_inside_header`; `container.rs:637` `record_rejects_misaligned_payload_offset`; `container.rs:647` `record_rejects_payload_inside_header`; `container.rs:969,988,1027,1050` overlap/bounds; `container.rs:1006` unknown-optional participation | Satisfied | — |
+| 3 | Reject trailing bytes; file ends at the footer; `total_len` equals real length | `footer.rs:20-26,170-199` (F5 exact `footer_len`, F6 magic, F7 `total_len`); `bundle.rs:91` (footer parsed against whole file); `cbor.rs:80-90` (`CborTrailing`); `chunk.rs:202-224` (exact `count × 32`) | `bundle.rs:607` `rejects_trailing_bytes`; `bundle.rs:647` `rejects_footer_slack`; `bundle.rs:634` `rejects_a_wrong_total_len`; `cbor.rs:189` `rejects_trailing_bytes`; `chunk.rs:217` `index_rejects_trailing_bytes` | Satisfied | — |
 | 4 | Depth cap on nested CBOR | `cbor.rs:45-51` (`MAX_DEPTH = 16`), `cbor.rs:154-157` (encode), `cbor.rs:304-307` (decode) | `cbor.rs:220` `rejects_nesting_past_the_depth_cap` (both encoder and decoder) | Satisfied | — |
 | 5 | Absolute output cap and ratio cap on zstd decompression, checked before decode | `compress.rs:27-70` (`MAX_DECOMPRESSED_SECTION`, `MAX_DECOMPRESSION_RATIO`, `check_caps`); `compress.rs:114-135` (`check_caps` first, then bounded `take`, exact-length check) | `compression.rs:108` `caps_reject_a_bomb_before_decompression`; `compression.rs:128` `a_wrong_declared_length_is_rejected` | Satisfied | — |
 | 6 | Reject duplicate section IDs and duplicate manifest keys | `section.rs:740-746` (T2 duplicate `name_id`); `cbor.rs:175-190` (encode) and `cbor.rs:333-358` (decode strictly-increasing keys ⇒ `CborDuplicateKey`/`CborUnsortedKeys`); `manifest.rs:267-277` (`names`), `manifest.rs:311-321` (`paths`) | `container.rs:951` `layout_rejects_duplicate_name_id`; `cbor.rs:92` `encoder_rejects_duplicate_keys`; `cbor.rs:175` `rejects_unsorted_and_duplicate_map_keys`; `bundle.rs:1346` `m16_duplicate_names_are_rejected`; `bundle.rs:967` `paths_reject_traversal_and_duplicates` | Satisfied | — |
-| 7 | Normalize and reject path-like names (`../`, absolute, symlink-shaped) | `manifest.rs:701-738` (`check_name`/`check_path`: separators, `.`/`..`, C0/DEL and bidi-override chars, empty components); applied at `manifest.rs:252-322`; authoring side `pack.rs:143-151` | `bundle.rs:1088` `manifest_rejects_path_like_names`; `bundle.rs:1125` `manifest_rejects_bidi_controls_in_names`; `bundle.rs:1160` `manifest_accepts_right_to_left_script_in_names`; `bundle.rs:967` `paths_reject_traversal_and_duplicates` | Satisfied | — |
-| 8 | Verify signatures and the commitment root before interpreting the manifest semantically | Commitment root: `bundle.rs:90-112` (footer → root recomputed → `verified_bytes` over the manifest record) and `bundle.rs:441-469`; signatures: deliberately a separate caller step, `bundle.rs:132-143` `Bundle::verify_signatures` | Commitment: `bundle.rs:414` `section_bytes_are_verified_before_they_are_returned`; `bundle.rs:452,481` byte-flip breaks root; `bundle.rs:558` `commitment_root_is_the_documented_construction`; `bundle.rs:2193` `t8_does_not_reach_into_claimed_regions` (manifest payload byte fails at parse with `SectionRootMismatch { name_id: 0 }`). Signatures: `bundle.rs:2254,2289,2328,2340` | Satisfied by design | — |
-| 9 | Verify chunk authenticity before exposing chunk bytes | `chunk.rs:255-362` (`ChunkIndex::verify_root` consumes the index and yields `VerifiedChunkIndex`; no method returns chunk bytes), `compile_fail` doctests at `chunk.rs:274-280,321-326`; serving boundary `bundle.rs:231-250` (C8) | `chunk.rs:116` `a_chunk_cannot_be_checked_against_an_unverified_index`; `chunk.rs:137,155,183` tamper/swap/forge; `chunk.rs:350` `c7_chunk_bytes_are_never_exposed_without_passing_c5`; `bundle.rs:1962,1979` C8 | Satisfied | — |
+| 7 | Normalize and reject path-like names (`../`, absolute, symlink-shaped) | `manifest.rs:701-738` (`check_name`/`check_path`: separators, `.`/`..`, C0/DEL and bidi-override chars, empty components); applied at `manifest.rs:252-322`; authoring side `pack.rs:177-184` | `bundle.rs:1088` `manifest_rejects_path_like_names`; `bundle.rs:1125` `manifest_rejects_bidi_controls_in_names`; `bundle.rs:1160` `manifest_accepts_right_to_left_script_in_names`; `bundle.rs:967` `paths_reject_traversal_and_duplicates` | Satisfied | — |
+| 8 | Verify signatures and the commitment root before interpreting the manifest semantically | Commitment root: `bundle.rs:91-135` (footer → root recomputed → `verified_bytes` over the manifest record) and `bundle.rs:567-610`; signatures: deliberately a separate caller step, `bundle.rs:162-167` `Bundle::verify_signatures` | Commitment: `bundle.rs:414` `section_bytes_are_verified_before_they_are_returned`; `bundle.rs:504,542` byte-flip breaks root; `bundle.rs:558` `commitment_root_is_the_documented_construction`; `bundle.rs:2193` `t8_does_not_reach_into_claimed_regions` (manifest payload byte fails at parse with `SectionRootMismatch { name_id: 0 }`). Signatures: `crypto_signature.rs:36,50,63,80` | Satisfied by design | — |
+| 9 | Verify chunk authenticity before exposing chunk bytes | `chunk.rs:255-362` (`ChunkIndex::verify_root` consumes the index and yields `VerifiedChunkIndex`; no method returns chunk bytes), `compile_fail` doctests at `chunk.rs:274-280,321-326`; serving boundary `bundle.rs:249-266` (C8) | `chunk.rs:116` `a_chunk_cannot_be_checked_against_an_unverified_index`; `chunk.rs:137,155,183` tamper/swap/forge; `chunk.rs:350` `c7_chunk_bytes_are_never_exposed_without_passing_c5`; `bundle.rs:2023,2040` C8 | Satisfied | — |
 | 10 | Fuzz from day one (header, section table, manifest, chunk index, entitlement chain); oracle no panic, no OOM, round-trip stable | `fuzz/fuzz_targets/{bundle,header,section_table,manifest,chunk_index,entitlement}.rs`; `fuzz/Cargo.toml:27-67`; stable-toolchain mirror `tests/fuzzmirror.rs:19-170`; mutation oracle `tests/mutation.rs:110-147,221-239`. No-OOM oracle is not a fuzzer memory cap; see Notes | `fuzzmirror.rs:208` `fuzz_targets_still_compile_and_run` over every committed seed, including `fuzz/corpus/entitlement/chain.cbor` (accepted-and-re-encoded branch asserted at `fuzzmirror.rs:239-244`); `mutation.rs:152,174,188,205,221` flips/truncation/corruption/arbitrary/sub-parsers | Satisfied | #107 |
-| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions it can run without suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (`demo.ctf` byte-for-byte), `go/ctf/ctf_test.go` (`minimal.ctf`); `go/conformance` (all 35 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
+| 11 | Write an independent second implementation from the spec text alone | `go/` — the §10 read path (H1–H14, R1–R22, T1–T8, M1–M25, F1–F10, C1–C8), a byte-identical writer, the §20–§24 constructions including suite 3, and `go/AMBIGUITIES.md` recording every place the text admitted more than one reading | `go/ctf/golden_test.go` (`demo.ctf` byte-for-byte), `go/ctf/ctf_test.go` (`minimal.ctf`); `go/conformance` (all 35 corpus fixtures); `go/vectors` (primitive vectors); `go test ./...` in `.github/workflows/ctf-go.yml` | Satisfied | #53 |
 
 ## Gaps
 
@@ -53,8 +53,8 @@ Tracked by issue #107 ("Fuzz the entitlement chain"), now closed.
 `spec/SPEC.md` alone. `ctf-format/go/` is that implementation, and it was written
 without reading the Rust crates. It implements the §10 read path (H1–H14, R1–R22,
 T1–T8, M1–M25, F1–F10, C1–C8), a writer that reproduces both committed goldens
-byte-for-byte, the primitive vectors, and the §20–§24 constructions it can run
-without suite 3. `go/conformance` executes the same 35-fixture corpus the Rust
+byte-for-byte, the primitive vectors, and the §20–§24 constructions including
+suite 3. `go/conformance` executes the same 35-fixture corpus the Rust
 runner does and fails if a fixture on disk is missing from `corpus.json`.
 
 `go/AMBIGUITIES.md` records the places where the text admitted more than one
@@ -74,14 +74,14 @@ puts them in different places on purpose:
 
 - **Commitment root** is verified during `Bundle::parse`: after parsing the footer
   (`bundle.rs:91`) the root is recomputed over the file's own header and table bytes
-  (`bundle.rs:93-101`), then the manifest record's stored bytes are hashed against
-  its section `root` by `verified_bytes` (`bundle.rs:441-469`) **before** `Manifest::decode`
-  runs (`bundle.rs:110-111`). Spec §10 step 7 fixes this order: "verify its `root`
+  (`bundle.rs:117-125`), then the manifest record's stored bytes are hashed against
+  its section `root` by `verified_bytes` (`bundle.rs:567-610`) **before** `Manifest::decode`
+  runs (`bundle.rs:134-135`). Spec §10 step 7 fixes this order: "verify its `root`
   against its stored bytes, then decode it". Nothing acts on unauthenticated content.
 - **Signature verification** is deliberately *not* part of `Bundle::parse`. Keys are
   out of band and never carried in the bundle (spec §8.2: "The signature *verification*
   keys are not carried in the footer"), so authenticity is a separate caller step,
-  `Bundle::verify_signatures` (`bundle.rs:132-143`), corresponding to spec §10 step 9:
+  `Bundle::verify_signatures` (`bundle.rs:162-167`), corresponding to spec §10 step 9:
   "If the caller supplies a trusted public key and needs authenticity, verify both
   signatures". Until that step runs, a parsed bundle is *intact* only, and `Signing`
   reports `Present`/`Unsigned`, never "verified". Signature production and checking are
@@ -113,9 +113,12 @@ Adding `-rss_limit_mb` to CI remains a hardening follow-up; the phase-8
 
 ### Scope
 
-This audit reflects the tree at release 0.13.14; the post-0.13.0 audit rounds
+This audit reflects the tree at release 1.0.0; the post-0.13.0 audit rounds
 (#114–#118) changed reader behaviour, and the 0.13.2–0.13.4 gate corrections changed
-CLI gate resolution and its record (0.13.5 corrects 0.13.4's record-boundary wording), not any invariant this checklist tracks. It
-records gaps as tickets; no code was changed. Trailing-byte rejection, the CBOR
-depth cap, the zstd caps, and the `VerifiedChunkIndex` type were all confirmed
-against their implementations and tests, not against the design text.
+CLI gate resolution and its record (0.13.5 corrects 0.13.4's record-boundary wording), not any invariant this checklist tracks. 1.0.0 added suite 3's
+SLH-DSA role, Go parity, `external:` authoring, and the Phase 5 platform; the
+`bundle.rs` and `pack.rs` citations above were refreshed against the current
+tree, and no verdict changed. It records gaps as tickets; no code was changed.
+Trailing-byte rejection, the CBOR depth cap, the zstd caps, and the
+`VerifiedChunkIndex` type were all confirmed against their implementations and
+tests, not against the design text.

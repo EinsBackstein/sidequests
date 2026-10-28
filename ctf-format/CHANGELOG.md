@@ -4,8 +4,69 @@ All notable changes to the `.ctf` challenge transport format and its reference
 implementation. Format follows [Keep a Changelog](https://keepachangelog.com/1.1.0/);
 versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-While the major version is `0`, the on-disk byte layout is **not** frozen and any
-minor release may break it.
+From 1.0.0 the 0.3 on-disk byte layout is **frozen**. A breaking change to it
+requires a new format major version, not a minor release; the *format* version
+remains 0.3 while this document and the crates are revised at 1.0.0.
+
+## [1.0.0] — 2026-10-28
+
+v1.0.0 freeze. **No byte-layout change:** `version_minor` stays `3` and both
+goldens are byte-identical (`minimal.ctf` 4344 B `a23cd1b3…`, `demo.ctf` 18328 B
+`ce1a930e…`); no header, section, footer, commitment root, or signature transcript
+moved. 1.0.0 is the first release where the 0.3 byte layout is declared stable.
+
+### Added — suite 3's SLH-DSA role in both implementations
+
+Suite 3's signature is now complete in Rust and Go. `sig_pq` is
+`ML-DSA-65 (3309) ‖ SLH-DSA-SHA2-128s (7856) = 11165` bytes, split at 3309;
+`pk_pq` is `1952 + 32 = 1984`. All three components verify over the identical
+§8.4 transcript, and a failure of any is a failure of the whole (§19.2, §20.3).
+No format byte changed: the slot layout §20.3 fixed in 0.12.0 is now implemented
+rather than merely specified.
+
+### Added — `external:` authoring (design §10)
+
+The authoring document accepts an `external:` list. Each entry is validated
+(unique name, a 64-hex BLAKE3 root, and at least one mirror), compiled
+to the manifest `external` map for its `name_id`, and written as an `EXTERNAL`
+section record; `ctf init forensics` emits a real block so its scaffold packs
+without hand-editing mirror metadata. The record remains authoritative over the
+manifest copy (§5.7, §7.4, M21).
+
+### Added — Phase 5 platform: Postgres 17 + admin TUI
+
+`crates/ctf-tui` is the operator surface design §10 calls for: a Postgres 17
+schema with `sqlx` migrations (compiled in, applied on connect), an ingest
+pipeline that runs validate → verify → offline gate → store as one transaction,
+and a `ratatui` admin TUI with six screens (challenges, ingest, bundle inspector,
+seal release, verification, entitlements/audit) plus a per-chunk verification
+progress bar. Serving is default-deny with two independent checks:
+`player_visible` allowlist **and** `sealed` never visible. Queries are checked at
+compile time with `sqlx::query!`/`query_as!` against a committed `.sqlx` offline
+cache, and CI gains a Postgres-backed database job.
+
+### Changed — Go parity for zstd, §18, and suite 3
+
+The independent Go implementation now decodes and encodes `comp = 1` with D1/D2
+applied to the authenticated totals before the decoder runs, implements the §18
+entitlement chain E1–E9 with the §34 trust roles, and resolves suite 3's
+signature slot and SLH-DSA component. Both goldens and the conformance corpus
+remain byte-identical.
+
+### Changed — §14 states only the two external items
+
+The specification's "specified but not implemented here" list is now the live
+solvability gate and trusted-key provisioning. Both are external by design — the
+gate is the orchestrator project's (§32.4), and keys are a deployment input
+(§34.3) — and neither is implemented in this repository. Their absence is
+reported as `unverified`, never as `passed`.
+
+### Fixed — stale suite-3 `NotImplemented` status
+
+The suite registry no longer resolves suite 3's signature role to
+`NotImplemented`. Documentation in `SPEC.md`, `FORMAT-DESIGN.md`, `ROADMAP.md`,
+and `HANDOFF.md` now states the implemented slot split instead of describing it
+as outstanding.
 
 ## [0.13.14] — 2026-10-28
 

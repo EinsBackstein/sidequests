@@ -3,7 +3,7 @@
 Companion to [FORMAT-DESIGN.md](FORMAT-DESIGN.md). Phases follow design §13. Each
 phase must end with something runnable — no phase exists purely to enable the next.
 
-## Repository layout (target)
+## Repository layout
 
 ```
 Cargo.toml                workspace root
@@ -12,7 +12,7 @@ crates/
   ctf-format/             core library: container, crypto
   ctf-generator/          generator host: wasmtime, wasmi, seed source
   ctf-cli/                `ctf` binary (clap)
-  ctf-tui/                admin TUI (ratatui) — phase 5
+  ctf-tui/                admin TUI (ratatui) — present
   ctf-conformance/        vector runner + cross-engine checks — phase 8
 spec/
   SPEC.md                 normative byte-level spec, extracted from the design doc
@@ -21,12 +21,13 @@ go/                       independent second implementation — phase 8
 docs/
 ```
 
-`ctf-format`, `ctf-cli`, `ctf-generator`, `ctf-conformance`, `sdk/`, and `fuzz/`
-exist today. The generator host is its own crate rather than part of `ctf-format`,
-so the container library stays free of the Wasmtime dependency. Remaining crates get
-created when their phase starts, not before. `spec/vectors/conformance/` holds the
-committed golden `.ctf` fixtures the runner executes; `spec/vectors/` already held
-the primitive vectors of ticket 17.
+`ctf-format`, `ctf-cli`, `ctf-generator`, `ctf-tui`, `ctf-conformance`, `sdk/`,
+and `fuzz/` all exist today. The generator host is its own crate rather than part
+of `ctf-format`, so the container library stays free of the Wasmtime dependency,
+and the platform crate is separate so it does not pull Postgres, `sqlx`, or a
+terminal UI into the container library. `spec/vectors/conformance/`
+holds the committed golden `.ctf` fixtures the runner executes; `spec/vectors/`
+also holds the primitive vectors of ticket 17.
 
 ---
 
@@ -140,8 +141,9 @@ R1 is mandated, so this lands before generators.
 - [x] Suite registry + `suite_id` dispatch behind one trait per primitive role
       — **landed in 0.5.0** (ticket 9, spec §19). One trait per role; the registry
       maps `suite_id` to a suite; header parsing never consults it, so an unknown
-      suite fails where a primitive is first needed. Only the BLAKE3 `hash` role is
-      implemented; the other roles report `NotImplemented` until their tickets land.
+      suite fails where a primitive is first needed. The BLAKE3 `hash` role landed
+      first; `kdf`, `kem`, `aead`, and `signature` followed in 0.6.0–0.8.0, and
+      suite 3's SLH-DSA component in 1.0.0.
 - [x] zstd compression with an absolute output cap and an expansion-ratio cap
       — **landed in 0.5.0** (ticket 19, spec §5.4, D1–D2). Both caps are checked
       before the decoder runs, and chunk-aligned frames keep a section seekable. It
@@ -153,7 +155,9 @@ R1 is mandated, so this lands before generators.
 - [x] Hybrid signature: Ed25519 + ML-DSA-65, **both** must verify
       — **verification landed in 0.6.0** (ticket 10, spec §20.3); **production and
       the signing command landed in 0.7.0** (ticket 13, `bundle::sign_bundle`).
-      Suite 3's SLH-DSA role stays `NotImplemented`.
+      Suite 3's SLH-DSA-SHA2-128s component landed in **1.0.0** in Rust and Go:
+      `sig_pq = ML-DSA-65 (3309) ‖ SLH-DSA (7856) = 11165`, split at 3309, with
+      all three components verified.
 - [x] AEAD-STREAM chunked encryption (`aead::stream`), `final_flag` on last chunk
       — **landed in 0.6.0** (ticket 12, spec §20.2), implemented directly on the
       per-chunk AEAD rather than via the `aead::stream` crate, because the design's
@@ -220,8 +224,8 @@ its trait; `suite_id` exists so a suite can be retired without a format change.
       the default and it carries most challenges.
 - [x] `ctf init <archetype>` scaffolds a working generator per archetype
       — **landed in 0.10.0** (`scaffold.rs`, `ctf init`). osint is generator-free;
-      rev emits a generator; pwn/web declare a runtime; forensics notes the
-      authoring `external` gap.
+      rev emits a generator; pwn/web declare a runtime; forensics declares its
+      evidence image with `external:`.
 - [x] **Authoring-time schema validation** — `ctf pack` rejects unknown YAML keys
       (0.5.0–0.7.0, tickets 32–35).
 - [x] Generator output → `names` mapping and the `generate.interface`/`profile`
@@ -327,18 +331,19 @@ project's work.
 
 ---
 
-## Phase 5 — Platform: Postgres + admin TUI
+## Phase 5 — Platform: Postgres + admin TUI ▸ *done*
 
-First point at which the system is operable end to end.
+First point at which the system is operable end to end. Shipped in **1.0.0** as
+`crates/ctf-tui`.
 
-- [ ] Postgres schema: challenges, bundles, sections, verification status,
+- [x] Postgres schema: challenges, bundles, sections, verification status,
       entitlement records
-- [ ] `sqlx` migrations; plain SQL only, no CloudNativePG awareness in code
-- [ ] Ingest pipeline: validate → verify → offline gate → store
-- [ ] `ratatui` screens: challenge list, ingest, bundle inspector, seal release,
+- [x] `sqlx` migrations; plain SQL only, no CloudNativePG awareness in code
+- [x] Ingest pipeline: validate → verify → offline gate → store
+- [x] `ratatui` screens: challenge list, ingest, bundle inspector, seal release,
       verification status, entitlement audit log
-- [ ] Chunk-verification progress bar (a 40 GB ingest needs one)
-- [ ] Serving rule enforced with two independent checks: `player_visible` allowlist
+- [x] Chunk-verification progress bar (a 40 GB ingest needs one)
+- [x] Serving rule enforced with two independent checks: `player_visible` allowlist
       **and** `sealed` never visible. Never "everything except"
 
 **Done when** an operator can ingest, inspect, and release a bundle without
@@ -434,8 +439,8 @@ deliberately disabled in the test.
       the Rust source — **landed in 0.13.0** (ticket 53). `ctf-format/go/` is an
       independent module (`crypto/mlkem`, `crypto/mldsa`, `crypto/ed25519`,
       `lukechampine.com/blake3`) that implements the §10 read path, a byte-identical
-      writer, the chunk index, the primitives, and the §20–§24 constructions it can
-      run without suite 3. `go/AMBIGUITIES.md` records every place the text admitted
+      writer, the chunk index, the primitives, and the §20–§24 constructions,
+      including suite 3. `go/AMBIGUITIES.md` records every place the text admitted
       more than one reading; the one real ambiguity it surfaced (§8.2 F4 versus the
       unsigned footer) is now stated explicitly in the spec, and the rest are
       non-normative authoring choices.
@@ -450,6 +455,31 @@ deliberately disabled in the test.
 clarification needed. Any clarification required is a spec bug, and the spec gets
 fixed rather than the Go code. Both conditions hold: 35/35 fixtures pass in both
 implementations, and the goldens are byte-identical.
+
+---
+
+## Phase 9 — v1.0.0 freeze ▸ *done*
+
+Release checklist for 1.0.0. Every item is complete; the 0.3 byte layout is
+declared stable from this release.
+
+- [x] Suite 3's SLH-DSA-SHA2-128s role implemented in Rust and Go
+- [x] Go parity: zstd `comp = 1` with D1/D2 before the decoder, the §18
+      entitlement chain with §34 trust roles, and suite 3
+- [x] `external:` authoring: validated, compiled to the manifest `external` map
+      and `EXTERNAL` records, and emitted by `ctf init forensics`
+- [x] Phase 5 platform: Postgres 17 schema, `sqlx` migrations, ingest pipeline,
+      `ratatui` admin TUI, dual serving checks, CI database job
+- [x] Documentation and hygiene: SPEC, CHANGELOG, HANDOFF, ROADMAP, design doc,
+      and hardening audit current at 1.0.0
+- [x] Both goldens unchanged (`minimal.ctf` 4344 B `a23cd1b3…`, `demo.ctf`
+      18328 B `ce1a930e…`); `version_minor` stays `3`
+- [x] 1.0.0 release
+
+The two remaining non-implementations are external by design and are not release
+blockers: the live solvability gate (§32.4, orchestrator project) and trusted-key
+provisioning (§34.3, deployment). An absent gate or trust set is reported as
+`unverified`, never `passed`.
 
 ---
 

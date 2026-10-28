@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (b.id) b.id AS bundle_id, c.slug, c.version, v.status, v.reason, v.checked_at::text AS \"checked_at!\" FROM verification v JOIN bundles b ON b.id = v.bundle_id JOIN challenges c ON c.id = b.challenge_id ORDER BY b.id, v.checked_at DESC, v.id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bundle_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "version",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "checked_at!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "efca1ccb1d228f1aab7f761e81c8d21279dab81d712ccf8716ccfb371e5c97a1"
+}

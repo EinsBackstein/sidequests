@@ -8,17 +8,18 @@ import "fmt"
 type Category string
 
 const (
-	CatHeader     Category = "header"
-	CatSection    Category = "section"
-	CatTable      Category = "table"
-	CatFooter     Category = "footer"
-	CatCommitment Category = "commitment"
-	CatManifest   Category = "manifest"
-	CatCBOR       Category = "cbor"
-	CatChunkIndex Category = "chunk-index"
-	CatExternal   Category = "external"
-	CatLegacy     Category = "legacy"
-	CatUsage      Category = "usage"
+	CatHeader      Category = "header"
+	CatSection     Category = "section"
+	CatTable       Category = "table"
+	CatFooter      Category = "footer"
+	CatCommitment  Category = "commitment"
+	CatManifest    Category = "manifest"
+	CatCBOR        Category = "cbor"
+	CatChunkIndex  Category = "chunk-index"
+	CatExternal    Category = "external"
+	CatLegacy      Category = "legacy"
+	CatUsage       Category = "usage"
+	CatEntitlement Category = "entitlement"
 )
 
 // Error is the single error type returned by this package. Detail contains

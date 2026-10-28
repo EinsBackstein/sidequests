@@ -24,6 +24,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-14]
     runs-on: ${{ matrix.os }}
+    env:
+      # The query macros read `.sqlx/`, not a live server. These runners have no
+      # Postgres; the `database` job below is what revalidates against one.
+      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -71,3 +75,51 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo build --release --target wasm32-unknown-unknown
         working-directory: ctf-format/sdk/sample-generator
+
+  database:
+    # The ingest and serving tests need a real Postgres: they execute the
+    # migration and every statement in `db.rs`/`ingest.rs`, including the
+    # default-deny serving query and the entitlement upsert. The `test` matrix
+    # above stays database-free (the DB tests skip without the variable), so
+    # macOS coverage and runtime are unchanged.
+    name: Postgres ingest, migrations, serving rule
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ctf
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ctf"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # With `DATABASE_URL` set and no `SQLX_OFFLINE`, the query macros compile
+      # against this Postgres rather than the committed `.sqlx/` cache, so a stale
+      # cache fails here. That needs the schema to exist *before* the crate is
+      # compiled, which is what the migration step below does. The tests
+      # themselves use `CTF_TEST_DATABASE_URL` and each create their own schema.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/ctf
+      CTF_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/ctf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ctf-format
+          key: postgres
+      - name: Migrate the compile-time schema
+        # `sqlx::migrate!` embeds the same files, but it only runs once the crate
+        # has compiled, and the macros need the tables first. Applying the SQL
+        # directly is enough: the tests create their own schemas.
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f crates/ctf-tui/migrations/0001_initial.sql
+      - name: Migrations, ingest pipeline, serving rule
+        run: cargo test -p ctf-tui --test db
+      - name: Admin TUI state machine and rendering
+        run: cargo test -p ctf-tui --test ui

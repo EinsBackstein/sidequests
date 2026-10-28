@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT subject, seq, record, prev_hash, hash, recorded_at::text AS \"recorded_at!\" FROM entitlements ORDER BY recorded_at DESC, subject, seq DESC LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "subject",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "seq",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "record",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "prev_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 4,
+        "name": "hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 5,
+        "name": "recorded_at!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "ede78a394d936eba49599de2c1ed86bf5f018513b43b874c13adebb161f69dab"
+}

@@ -362,16 +362,16 @@ func (b *Bundle) Verify() error {
 	return nil
 }
 
-// VerifyAll checks all plain inline sections and returns every mismatch, so an
+// VerifyAll checks all inline sections and returns every mismatch, so an
 // operator is not left to bisect a large bundle (spec §13).
 //
 // An EXTERNAL section's bytes are absent by design, so it is skipped. D1 and D2
 // are applied to every non-external compressed section before anything else: the
 // caps are a MUST, they need no decoder, and §5.4 makes them apply to an
 // encrypted section's declared totals too. After that, an encrypted section
-// cannot be checked without the content key, and this build has no zstd decoder,
-// so a compressed section is unverifiable and skipped rather than silently
-// verified.
+// cannot be checked without the content key. A compressed section of a kind this
+// build does not implement is unverifiable rather than a finding: §10 forbids
+// decompressing it, and `root` commits to the plaintext.
 func (b *Bundle) VerifyAll() []error {
 	var errs []error
 	for _, r := range b.Sections {
@@ -387,10 +387,8 @@ func (b *Bundle) VerifyAll() []error {
 		if r.Enc != EncNone {
 			continue
 		}
-		// Spec §10 forbids decompressing a kind this build does not implement, and
-		// this build has no zstd decoder at all, so any compressed section is
-		// unverifiable once its caps have been checked above.
-		if r.Comp != CompNone {
+		// Spec §10 forbids decompressing a kind this build does not implement.
+		if r.Comp != CompNone && !r.Understood() {
 			continue
 		}
 		stored, err := b.storedBytes(r)
@@ -398,7 +396,15 @@ func (b *Bundle) VerifyAll() []error {
 			errs = append(errs, err)
 			continue
 		}
-		sum := blake3.Sum256(stored)
+		plain := stored
+		if r.Comp == CompZstd {
+			plain, err = decompressExact(stored, r.LenPlain)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		sum := blake3.Sum256(plain)
 		if [RootLen]byte(sum) != r.Root {
 			errs = append(errs, errf(CatSection, "", "section %d root mismatch", r.NameID))
 		}
@@ -408,37 +414,18 @@ func (b *Bundle) VerifyAll() []error {
 
 // SectionBytes returns a section's plaintext only after its root verifies. It
 // refuses SEALED sections and kinds this implementation does not understand
-// (§10, C7). Encryption and compression are handled by SectionPlaintext.
+// (§10, C7). A comp = 1 section is decompressed transparently; encryption still
+// requires SectionPlaintext's key parameter.
 func (b *Bundle) SectionBytes(nameID uint16) ([]byte, error) {
-	r, ok := b.Section(nameID)
-	if !ok {
-		return nil, errf(CatUsage, "", "no section with name_id %d", nameID)
-	}
-	if r.Has(FlagSealed) {
-		return nil, errf(CatUsage, "", "section %d is SEALED", nameID)
-	}
-	if !r.Understood() {
-		return nil, errf(CatUsage, "", "section %d kind %d is not understood", nameID, r.Kind)
-	}
-	if r.External() {
-		return nil, errf(CatUsage, "", "section %d is EXTERNAL; use VerifyExternal with a reader", nameID)
-	}
-	if r.Enc != EncNone || r.Comp != CompNone {
-		return nil, errf(CatUsage, "", "section %d needs a key or decompressor; use SectionPlaintext", nameID)
-	}
-	stored, err := b.storedBytes(r)
-	if err != nil {
-		return nil, err
-	}
-	sum := blake3.Sum256(stored)
-	if [RootLen]byte(sum) != r.Root {
-		return nil, errf(CatSection, "", "section %d root mismatch", nameID)
-	}
-	return stored, nil
+	return b.SectionPlaintext(nameID, nil)
 }
 
 // SectionPlaintext returns a plaintext after verifying it against the record's
 // root. contentKey may be nil only when enc = 0.
+//
+// For comp = 1, D1 and D2 are applied to the declared totals before the decoder
+// runs, and the decoder output must be exactly len_plain (§5.4). The root check
+// is over the plaintext, so compression is invisible to the commitment.
 func (b *Bundle) SectionPlaintext(nameID uint16, contentKey []byte) ([]byte, error) {
 	r, ok := b.Section(nameID)
 	if !ok {
@@ -453,8 +440,20 @@ func (b *Bundle) SectionPlaintext(nameID uint16, contentKey []byte) ([]byte, err
 	if r.External() {
 		return nil, errf(CatUsage, "", "section %d is EXTERNAL", nameID)
 	}
-	if r.Enc == EncNone && r.Comp == CompNone {
-		return b.SectionBytes(nameID)
+	if r.Enc == EncNone {
+		stored, err := b.storedBytes(r)
+		if err != nil {
+			return nil, err
+		}
+		plain, err := decodeSection(r, stored)
+		if err != nil {
+			return nil, err
+		}
+		sum := blake3.Sum256(plain)
+		if [RootLen]byte(sum) != r.Root {
+			return nil, errf(CatSection, "", "section %d root mismatch", nameID)
+		}
+		return plain, nil
 	}
 	// D1 and D2 must be applied before any decompressor is invoked (§5.4).
 	// They are checked on the authenticated declaration alone, so a bomb is
@@ -464,7 +463,7 @@ func (b *Bundle) SectionPlaintext(nameID uint16, contentKey []byte) ([]byte, err
 			return nil, err
 		}
 	}
-	return nil, errf(CatUsage, "", "section %d uses enc/comp; use the crypto helpers", nameID)
+	return nil, errf(CatUsage, "", "section %d uses enc; use the crypto helpers", nameID)
 }
 
 // decompressionCaps enforces D1 and D2 from spec §5.4. Both checks use only

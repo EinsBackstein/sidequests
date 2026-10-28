@@ -158,6 +158,126 @@ chunk index whose contents are wrong. C8 and C4 are use-time rules.
 is why `parses_unknown_optional` and `chunk_index_error` are distinct
 expectation kinds in the corpus.
 
+## A11. §5.4/§10: where the zstd decoder sits relative to D1, D2, and the kind gate
+
+**Text.** §5.4 and §10 say a reader MUST apply D1 and D2 "before invoking a
+decompressor" and MUST reject output that is not exactly `len_plain`. §10 also
+says a reader MUST NOT decompress a section "whose kind it does not implement".
+The two requirements meet on a `comp = 1` section of an unknown kind: the caps
+are stated for every compressed section, but the decoder may never run for that
+one.
+
+**Chosen reading.** The two rules have different subjects and compose without
+conflict. `decompressionCaps` is a pure function of the authenticated section
+record (`len_plain`, `len_stored`) and is applied before anything else, including
+before reading stored bytes, on every non-external `comp = 1` section.
+Decompression is a *later* step and is skipped entirely when the kind is not
+implemented. So `VerifyAll` reports a D1/D2 violation on an unknown-kind
+compressed section but does not report "unverifiable-but-possibly-corrupt" for
+one that passes the caps; §10 forbids the decode, and `root` commits to the
+plaintext the reader may not produce. `SectionPlaintext`/`SectionBytes` refuse
+the unknown kind before any decode, as C8 requires.
+
+**Consequence.** The decoder itself is additionally defensive: it is read through
+`io.LimitReader(len_plain+1)` and configured with `WithDecoderMaxMemory`, so even a
+frame that lies about its decoded size cannot expand past the declaration, and an
+output shorter or longer than `len_plain` is rejected rather than truncated. No
+allocation is ever sized from the declared length. D2's product is checked for
+overflow: an overflowing `len_stored × ratio` is larger than any `uint64`
+`len_plain` and so cannot be a violation. Compression level is a writer choice,
+not a format rule: zstd frames are self-describing, and the default (`Comp: 0`)
+path is unchanged, so the goldens stay byte-identical.
+
+## A12. §20.3: suite 3's two-in-one `sig_pq` slot and F10
+
+**Text.** §20.3 gives the footer two slots and says suite 3 puts
+`ML-DSA-65 ‖ SLH-DSA-SHA2-128s` in `sig_pq`, "split at the ML-DSA-65 length".
+§8.2 F10 rejects a declared length that disagrees with §20.3's slot lengths.
+At the time this reading was chosen, §19.2 and §20.3's trailing note said SLH-DSA
+"is not implemented in this version", which described the reference build at the
+time, not a prohibition on another implementation. Those status notes were removed
+in 1.0.0, when both implementations began resolving suite 3.
+
+**Chosen reading.** §20.3's tables are the normative bytes; the "not implemented"
+sentences were status notes and did not narrow what a reader may accept. For
+`suite_id = 3`, `sig_pq_len` must be exactly `3309 + 7856 = 11165`, and F10
+enforces that like any other slot length. `sig_pq` is split at 3309; all three
+components (Ed25519, ML-DSA-65, SLH-DSA-SHA2-128s) verify over the identical
+§8.4 transcript, and a failure of any one is a failure of the whole. The suite-3
+public key is `Ed25519 (32) ‖ ML-DSA-65 (1952) ‖ SLH-DSA pk (32)`, and the holder
+hash of §34.1 hashes exactly those bytes in that order.
+
+**Consequence.** `Suite.ImplementsSignatureRole()` is true for suites 1, 2, and 3,
+so F10 applies to suite 3 too. Length errors name the role and the expected and
+got lengths (e.g. `pq: expected 11165 bytes, got N`), never the input bytes.
+Suite 3's SLH-DSA secret key is a different width from its public key; it is held
+as an opaque suite-specific key, not a container structure.
+
+## A13. §18: "canonical CBOR per §7.1" for records, and the record-id preimage
+
+**Text.** §18 says an `entitlement` section's plaintext is "a single canonical
+CBOR array ... decoded under the same rules as the manifest", and the record id is
+`BLAKE3(label ‖ cbor)` where `cbor` is "the canonical encoding of the record map
+with both `sig_*` keys removed". §7.1's canonical form fixes key ordering, and
+§7.3 elsewhere lets the manifest carry unknown keys. §18.4 E2, by contrast,
+explicitly rejects "a field not listed in §18.1". The text does not spell out how
+removing two keys interacts with key ordering, nor whether an unknown record key
+is carried (manifest-style) or rejected (E2-style).
+
+**Chosen reading.** E2 is specific to records and wins: an unknown record key is a
+rejection, unlike the manifest's carried-unknown rule. Canonicality is checked the
+manifest way — decode, re-encode, and require the bytes to match — because §18
+says "same rules as the manifest"; a value that decodes but does not round-trip is
+E1. For the record id, the preimage is the canonical encoding of the map built
+*without* `sig_holder`/`sig_platform`. Canonical CBOR sorts keys, and deleting
+entries cannot disturb the relative order of the survivors, so this is identical
+to deleting the two keys from the full canonical map; the implementation does the
+former, which cannot depend on how a caller ordered the input.
+
+**Consequence.** `timestamp` is preserved with its sign (major type 0 or 1) so it
+round-trips, but it is never compared, subtracted, or used for ordering — E3 and
+§18.2 make `seq` authoritative. `payload` is opaque bytes and presence is tracked
+separately from emptiness, so an absent payload and a present zero-length payload
+do not collapse and the record id stays stable.
+
+## A14. §18.5/§34: validating an embedded chain against its own file's root
+
+**Text.** §18.2 says the genesis `root` is "the commitment root of the bundle
+version it was issued for", and §18.5 explains that a chain embedded in a bundle
+"can never name that bundle's own root", because the root covers the table, which
+covers the section root, which covers the plaintext carrying the genesis root. It
+does not say what the validator should do when it is handed the containing file's
+root.
+
+**Chosen reading.** `EntitlementChain.Validate` applies E1–E8 only; it cannot know
+which version the grant was issued for and must not invent one. A separate
+`ValidateAgainstRoot(commitmentRoot)` exists for a caller that holds the issued
+version, and it compares the genesis `root` to *that* root with E5. The section
+helper `Bundle.EntitlementSection` deliberately uses the E1–E8 path, because
+applying `ValidateAgainstRoot` to the containing bundle's own commitment root
+would demand the hash fixed point §18.5 says is impossible. `VerifySignatures`
+runs E9 and is separate from both, so "passed E1–E8" is never reported as
+"authentic".
+
+## A15. §34.2/§34.3: role separation and holder lookup
+
+**Text.** §34.2 says `root` and `platform` "may be the same key", and KD4 says a
+key trusted for one role "MUST NOT be accepted for another role". KD2 says
+`holder` is computed from the holder's signature public key, and KD3 says a
+transfer's `sig_holder` verifies against "the key the previous record's `holder`
+resolves to". The text does not prescribe a data structure for the trust set.
+
+**Chosen reading.** `TrustSet` keeps one lookup per role: `Root` for footer
+signatures, `Platform` for `sig_platform`, and a private map keyed by the
+*computed* §34.1 holder hash for holders. The two may hold the same key material,
+but a caller must register it under each role it should serve; a platform key is
+never consulted for a holder and vice versa. `AddHolder` computes the hash from
+the key it is given (KD2), so a caller cannot register a key under a hash it does
+not produce. A `transfer` resolves the *predecessor's* `holder` (KD3), so a
+missing or untrusted predecessor key is an E9 failure, not E2/E5; a chain whose
+genesis `holder` is unknown can still pass, because the genesis record carries no
+`sig_holder`.
+
 ## A10. Writer option defaults (API convention, not a container rule)
 
 The zero value of `WriteOptions` cannot express `suite_id = 0` or

@@ -12,8 +12,19 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"github.com/cloudflare/circl/sign/slhdsa"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
+)
+
+// Signature component lengths fixed by §20.3.
+const (
+	Ed25519PublicKeyLen    = 32
+	Ed25519SignatureLen    = 64
+	MLDSA65PublicKeyLen    = 1952
+	MLDSA65SignatureLen    = 3309
+	SLHDSA128sPublicKeyLen = 32
+	SLHDSA128sSignatureLen = 7856
 )
 
 // Suite is one row of the crypto suite registry (§19.1).
@@ -22,16 +33,15 @@ type Suite struct {
 	AEAD     string // "aes-256-gcm" or "xchacha20-poly1305"
 	NonceLen int
 	PQSigLen int // 3309 for suites 1 and 2; 11165 for suite 3
-	// HasSLHDSA marks suite 3's signature role. This build does not implement
-	// SLH-DSA (§19.1), so the role resolves to ErrNotImplemented and the suite's
-	// slot lengths are not a parse-time check (F10, §8.2).
+	// HasSLHDSA marks suite 3's signature role, which adds SLH-DSA-SHA2-128s as
+	// a third component sharing the pq slot (§20.3).
 	HasSLHDSA bool
 }
 
 // ImplementsSignatureRole reports whether this build can verify the suite's
-// signature role. F10 is limited to a suite the reader implements (§8.2), and
-// suite 3's SLH-DSA half is `ErrNotImplemented`.
-func (s Suite) ImplementsSignatureRole() bool { return !s.HasSLHDSA }
+// signature role. All three registered suites are implemented, so F10 (§8.2)
+// applies to each of them.
+func (s Suite) ImplementsSignatureRole() bool { return true }
 
 // LookupSuite resolves a suite_id at the point a primitive is needed (S2, S3).
 func LookupSuite(id uint16) (Suite, error) {
@@ -369,20 +379,35 @@ func OpenStream(suiteID, sectionID uint16, chunkSize uint32, lenPlain uint64, co
 
 // ---- Hybrid signatures (§20.3) ----
 
-// HybridPublicKey is Ed25519 ‖ ML-DSA-65 (32 + 1952 bytes).
+// HybridPublicKey is the hybrid signature public key of §20.3:
+// Ed25519 ‖ ML-DSA-65, plus SLH-DSA-SHA2-128s for suite 3.
 type HybridPublicKey struct {
 	Ed    []byte
 	MLDSA []byte
+	SLH   []byte // suite 3 only; 32 bytes
 }
 
-// HybridPrivateKey is the pair of signing keys.
+// HybridPrivateKey is the pair (or triple) of signing keys.
 type HybridPrivateKey struct {
 	Ed    []byte
 	MLDSA *mldsa.PrivateKey
+	SLH   *slhdsa.PrivateKey // suite 3 only
 }
 
-// GenerateHybridKey generates an Ed25519 key and an ML-DSA-65 key.
+// GenerateHybridKey generates the suites 1 and 2 signature keypair:
+// Ed25519 plus ML-DSA-65.
 func GenerateHybridKey() (*HybridPrivateKey, *HybridPublicKey, error) {
+	return GenerateHybridKeyForSuite(SuiteDefault)
+}
+
+// GenerateHybridKeyForSuite generates the signature keypair a suite's
+// signature role needs. Suite 3 adds SLH-DSA-SHA2-128s, which occupies the
+// second half of the pq public key (§20.3).
+func GenerateHybridKeyForSuite(suiteID uint16) (*HybridPrivateKey, *HybridPublicKey, error) {
+	suite, err := LookupSuite(suiteID)
+	if err != nil {
+		return nil, nil, err
+	}
 	edPub, edPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -391,53 +416,96 @@ func GenerateHybridKey() (*HybridPrivateKey, *HybridPublicKey, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return &HybridPrivateKey{Ed: edPriv, MLDSA: mpriv},
-		&HybridPublicKey{Ed: edPub, MLDSA: mpriv.PublicKey().Bytes()}, nil
+	priv := &HybridPrivateKey{Ed: edPriv, MLDSA: mpriv}
+	pub := &HybridPublicKey{Ed: edPub, MLDSA: mpriv.PublicKey().Bytes()}
+	if suite.HasSLHDSA {
+		spub, spriv, err := slhdsa.GenerateKey(rand.Reader, slhdsa.SHA2_128s)
+		if err != nil {
+			return nil, nil, err
+		}
+		encoded, err := spub.MarshalBinary()
+		if err != nil {
+			return nil, nil, errf(CatUsage, "§20.3", "bad SLH-DSA-SHA2-128s public key")
+		}
+		pub.SLH = encoded
+		priv.SLH = &spriv
+	}
+	return priv, pub, nil
 }
 
-// SignHybrid signs the transcript with both components. Suites 1 and 2 are
-// supported; suite 3 is reported as not implemented rather than reduced (S5).
+// SignHybrid signs the transcript with every component of the suite's
+// signature role. The pq slot is ML-DSA-65 for suites 1 and 2, and
+// ML-DSA-65 ‖ SLH-DSA-SHA2-128s for suite 3 (§20.3).
 func SignHybrid(suiteID uint16, key *HybridPrivateKey, transcript []byte) (classical, pq []byte, err error) {
 	suite, err := LookupSuite(suiteID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if suite.HasSLHDSA {
-		return nil, nil, errf(CatUsage, "", "suite %d adds SLH-DSA, which is not implemented", suiteID)
+	if key == nil || key.MLDSA == nil {
+		return nil, nil, errf(CatUsage, "§20.3", "no ML-DSA-65 signing key for suite %d", suiteID)
 	}
 	classical = ed25519.Sign(key.Ed, transcript)
 	pq, err = key.MLDSA.Sign(nil, transcript, nil)
 	if err != nil {
 		return nil, nil, err
 	}
+	if suite.HasSLHDSA {
+		if key.SLH == nil {
+			return nil, nil, errf(CatUsage, "§20.3", "no SLH-DSA-SHA2-128s signing key for suite %d", suiteID)
+		}
+		ss, err := slhdsa.SignDeterministic(key.SLH, slhdsa.NewMessage(transcript), nil)
+		if err != nil {
+			return nil, nil, errf(CatUsage, "§20.3", "SLH-DSA-SHA2-128s signing failed")
+		}
+		pq = append(pq, ss...)
+	}
 	return classical, pq, nil
 }
 
-// VerifyHybrid verifies both components over the identical transcript. A
-// failure of either is a failure of the whole.
+// VerifyHybrid verifies every component of the suite's signature role over the
+// identical transcript. A failure of either (or, for suite 3, any) component is
+// a failure of the whole.
 func VerifyHybrid(suiteID uint16, pk *HybridPublicKey, transcript, classical, pq []byte) error {
 	suite, err := LookupSuite(suiteID)
 	if err != nil {
 		return err
 	}
-	if suite.HasSLHDSA {
-		return errf(CatUsage, "", "suite %d adds SLH-DSA, which is not implemented", suiteID)
+	if pk == nil {
+		return errf(CatUsage, "§20.3", "no public key for suite %d", suiteID)
 	}
-	if len(classical) != 64 {
-		return errf(CatUsage, "§20.3", "classical signature is %d bytes, need 64", len(classical))
+	if len(pk.Ed) != Ed25519PublicKeyLen {
+		return errf(CatUsage, "§20.3", "Ed25519 public key is %d bytes, need %d", len(pk.Ed), Ed25519PublicKeyLen)
+	}
+	if len(pk.MLDSA) != MLDSA65PublicKeyLen {
+		return errf(CatUsage, "§20.3", "ML-DSA-65 public key is %d bytes, need %d", len(pk.MLDSA), MLDSA65PublicKeyLen)
+	}
+	if suite.HasSLHDSA && len(pk.SLH) != SLHDSA128sPublicKeyLen {
+		return errf(CatUsage, "§20.3", "SLH-DSA-SHA2-128s public key is %d bytes, need %d", len(pk.SLH), SLHDSA128sPublicKeyLen)
+	}
+	if len(classical) != Ed25519SignatureLen {
+		return errf(CatUsage, "§20.3", "Ed25519 signature is %d bytes, need %d", len(classical), Ed25519SignatureLen)
 	}
 	if len(pq) != suite.PQSigLen {
-		return errf(CatUsage, "§20.3", "PQ signature is %d bytes, need %d", len(pq), suite.PQSigLen)
+		return errf(CatUsage, "§20.3", "pq signature slot is %d bytes, suite %d needs %d", len(pq), suiteID, suite.PQSigLen)
 	}
 	if !ed25519.Verify(pk.Ed, transcript, classical) {
 		return errf(CatUsage, "§20.3", "Ed25519 component does not verify")
 	}
 	mpk, err := mldsa.NewPublicKey(mldsa.MLDSA65(), pk.MLDSA)
 	if err != nil {
-		return errf(CatUsage, "§20.3", "bad ML-DSA public key")
+		return errf(CatUsage, "§20.3", "bad ML-DSA-65 public key")
 	}
-	if err := mldsa.Verify(mpk, transcript, pq, nil); err != nil {
+	if err := mldsa.Verify(mpk, transcript, pq[:MLDSA65SignatureLen], nil); err != nil {
 		return errf(CatUsage, "§20.3", "ML-DSA-65 component does not verify")
+	}
+	if suite.HasSLHDSA {
+		spk := slhdsa.PublicKey{ID: slhdsa.SHA2_128s}
+		if err := spk.UnmarshalBinary(pk.SLH); err != nil {
+			return errf(CatUsage, "§20.3", "bad SLH-DSA-SHA2-128s public key")
+		}
+		if !slhdsa.Verify(&spk, slhdsa.NewMessage(transcript), pq[MLDSA65SignatureLen:], nil) {
+			return errf(CatUsage, "§20.3", "SLH-DSA-SHA2-128s component does not verify")
+		}
 	}
 	return nil
 }

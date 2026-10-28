@@ -478,13 +478,35 @@ impl<'a> Bundle<'a> {
     /// ([`VerifyReport::chunk_indices`]) so a caller is not left assuming this pass
     /// checked them.
     pub fn verify_inline_sections(&self) -> Result<VerifyReport> {
+        self.verify_inline_sections_with_progress(|_, _| {})
+    }
+
+    /// [`Bundle::verify_inline_sections`] with a per-section progress callback.
+    ///
+    /// The callback receives `(done, total)` after **every** section, including the
+    /// ones the pass skips (an `EXTERNAL` section, an encrypted one counted as
+    /// unverifiable). Reporting only the sections that were hashed would leave a bar
+    /// stuck below 100% for a normal forensics bundle; an operator watching a 40 GB
+    /// ingest needs to see the pass advance through what it decided about, not
+    /// through what it happened to hash.
+    ///
+    /// A callback cannot change the verdict: it is called for its side effect and
+    /// returns nothing. The returned [`VerifyReport`] is exactly what
+    /// [`Bundle::verify_inline_sections`] returns for the same bytes.
+    pub fn verify_inline_sections_with_progress<F>(&self, mut on_section: F) -> Result<VerifyReport>
+    where
+        F: FnMut(usize, usize),
+    {
         let mut report = VerifyReport::default();
-        for r in &self.sections {
+        let total = self.sections.len();
+        for (index, r) in self.sections.iter().enumerate() {
+            let done = index.saturating_add(1);
             if r.chunk_index_off != 0 {
                 report.chunk_indices += 1;
             }
             if r.flags.contains(SectionFlags::EXTERNAL) {
                 report.external += 1;
+                on_section(done, total);
                 continue;
             }
             // §5.4 D1/D2 are a MUST on the authenticated declaration, and they apply
@@ -496,12 +518,14 @@ impl<'a> Bundle<'a> {
             }
             if r.enc != crate::Encryption::None {
                 report.unverifiable += 1;
+                on_section(done, total);
                 continue;
             }
             // Spec §10 forbids decompressing a kind this build does not implement.
             // Hashing its stored bytes is still allowed, so only the codec is skipped.
             if !r.kind.is_known() && r.comp != Compression::None {
                 report.unverifiable += 1;
+                on_section(done, total);
                 continue;
             }
             match Self::verified_bytes(self.file, r, self.header.suite_id) {
@@ -515,6 +539,7 @@ impl<'a> Bundle<'a> {
                 Err(Error::SectionRootMismatch { name_id }) => report.mismatches.push(name_id),
                 Err(e) => return Err(e),
             }
+            on_section(done, total);
         }
         Ok(report)
     }

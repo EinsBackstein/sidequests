@@ -1,0 +1,43 @@
+[package]
+name = "ctf-tui"
+version = "1.0.0"
+description = "Admin TUI and Postgres ingest pipeline for the .ctf format"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ctf-admin"
+path = "src/main.rs"
+
+[dependencies]
+ctf-format = { path = "../ctf-format" }
+# The offline solvability gate (design §3 pillar 5, spec §25). The TUI runs the
+# same `offline_gate` the CLI does rather than shelling out, so an operator can
+# ingest, inspect, and release from one foreground process.
+ctf-generator = { path = "../ctf-generator" }
+# Plain SQL, no ORM (design §11). Every production statement in `db.rs` and
+# `ingest.rs` uses the compile-time `query!`/`query_as!` macros; the checked
+# metadata lives in the committed `.sqlx/` cache so a build needs no database.
+# See `crates/ctf-tui/README.md` for the prepare workflow. Migrations are
+# compiled in by `sqlx::migrate!`, which needs `migrate` and not `macros`.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "migrate",
+    "macros",
+    "json",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "fs", "time"] }
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The DB tests are gated on `CTF_TEST_DATABASE_URL`; `sqlx` above already
+# provides everything they need. `tempfile` writes key fixtures for the release
+# path without leaking them into the repository.
+tempfile = "3"
+
+[lints]
+workspace = true

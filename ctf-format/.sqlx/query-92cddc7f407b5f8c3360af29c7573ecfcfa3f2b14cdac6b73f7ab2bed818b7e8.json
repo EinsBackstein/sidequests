@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.slug, c.version, c.name, c.category, c.created_at::text AS \"created_at!\", c.updated_at::text AS \"updated_at!\", COUNT(b.id)::bigint AS \"bundle_count!\", (SELECT v.status FROM verification v JOIN bundles b2 ON b2.id = v.bundle_id WHERE b2.challenge_id = c.id ORDER BY v.checked_at DESC, v.id DESC LIMIT 1) AS latest_status, (SELECT v.checked_at::text FROM verification v JOIN bundles b2 ON b2.id = v.bundle_id WHERE b2.challenge_id = c.id ORDER BY v.checked_at DESC, v.id DESC LIMIT 1) AS latest_at FROM challenges c LEFT JOIN bundles b ON b.challenge_id = c.id GROUP BY c.id ORDER BY c.slug, c.version DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "slug",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "version",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "category",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "bundle_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "latest_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "latest_at",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "92cddc7f407b5f8c3360af29c7573ecfcfa3f2b14cdac6b73f7ab2bed818b7e8"
+}

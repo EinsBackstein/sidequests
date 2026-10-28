@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.14
+**Version:** 0.3 (major 0, minor 3); document revision 1.0.0
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
@@ -11,8 +11,14 @@ progress payload (§24), the offline solvability gate (§25), the seed/flag inje
 ABI (§26), sealed release (§27), the serving manifest (§28), the platform ingest
 descriptor (§29), the OCI artifact (§30), the base image contract (§31), the live
 gate socket contract (§32), the WTFlag adapter (§33), and the trusted-key interface
-(§34). Nothing in this version is left unspecified; §14 states what is specified but
-not implemented in this repository.
+(§34). Suite 3's SLH-DSA-SHA2-128s signature role is implemented in both the Rust
+reference implementation and the independent Go implementation. The Go
+implementation now covers zstd `comp = 1`, the §18 entitlement chain with the §34
+trust roles, and suite 3, in addition to the §10 read path and the byte-identical
+writer. The Phase 5 platform — the Postgres 17 schema and `sqlx` migrations, the
+ingest pipeline, and the `ratatui` admin TUI in `crates/ctf-tui` — ships in this
+repository. Nothing in this version is left unspecified; §14 states what is
+specified but not implemented in this repository.
 **Reference implementation:** `crates/ctf-format`.
 **Rationale, threat model, and design history:** `docs/FORMAT-DESIGN.md`. Where
 that document and this one disagree, this one wins.
@@ -1800,7 +1806,7 @@ with media type `application/vnd.ctf.bundle.v1` (§30).
 ## 14. What is specified but not implemented here
 
 Every structure and procedure this document describes is specified: an
-implementation does not have to guess at any behaviour. Three items are
+implementation does not have to guess at any behaviour. Two items are
 **specified but not implemented in this repository**, and an implementation that
 lacks them MUST report that honestly rather than approximate them:
 
@@ -1809,13 +1815,13 @@ lacks them MUST report that honestly rather than approximate them:
   key-management service: obtaining and provisioning the keys is a deployment
   concern. Verification takes the trust set as an input; it is never read from the
   file (§8.2).
-- **Suite 3's SLH-DSA signature role.** §20.3 fixes its parameter set and slot
-  layout, but the reference implementation resolves that role to `NotImplemented`
-  at the point of use rather than silently reducing the hybrid signature to two of
-  its three components.
 - **The live solvability gate's implementation.** Its socket contract is specified
   in §32, but no implementation of it ships in this repository; until one does, a
   `runtime`-bearing bundle is recorded `unverified` (§25.6).
+
+Both are external by design (design §2's scope boundary): the trust set is a
+deployment input (§34.3) and the gate is the orchestrator project's work (§32.4).
+Their absence is reported honestly as `unverified`, never as `passed`.
 
 An implementation MUST NOT claim conformance to a later version by guessing at
 behaviour this document does not specify, and MUST NOT report a role it did not
@@ -1939,6 +1945,12 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 
 ## 17. Version history
 
+**Stability at 1.0.0.** The 0.3 byte layout is frozen as of release 1.0.0: a
+breaking change requires a new format major version under §15, not a minor
+release. The *format* version stays 0.3 (`version_major` 0, `version_minor` 3),
+while 1.0.0 is the revision of this document and of the crates. The two numbers
+answer different questions: 1.0.0 declares the layout stable and changes no byte.
+
 | Version | Change |
 |---|---|
 | 0.1 | Initial specification: header and section table frozen. |
@@ -1969,6 +1981,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.13.12 | Third post-release audit round. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. The independent Go implementation did not yet enforce §19.2 S2/S3: `Parse` computed the commitment root with BLAKE3 without resolving the registry first, so a suite-99 bundle with no signed footer (F10 never looking the suite up) parsed and `VerifyAll` reported no findings; it now resolves the registry before the root, as the reference reader does. Go's `VerifyChunk` passed an already-sliced chunk to a helper that sliced again at `i*chunk_size`, so chunk 1 of `demo.ctf` wrongly failed C5 and chunk 2 panicked; it now hashes the whole section plaintext and returns the chunk, and the plaintext/file offset confusion is gone. §26 I3 was inverted by the runtime's `--seed-file`: an explicit path bypassed `CTF_SEED`, so a file won over the environment; the environment now wins. §26 I4 skipped an empty injection, so `CTF_FLAG=` (or an empty `/ctf/flag`) started a challenge no submission could solve; presence is now distinguished from absence and an empty value fails the start. §23.7 was honoured only by the ingest gate: the runtime host always ran two G9 runs, so a `none` challenge whose generator varies per call could not start. It takes the mode from its operator (`--determinism`), runs `none` once without a comparison, refuses `flag_only`, and defaults to `strict` when not told. Every change enforces or makes explicit a rule the text already implied; no change rejects a valid container, and no feature bit is spent (§15). |
 | 0.13.13 | Fourth post-release audit round. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. The independent Go implementation's §24 helper accepted a caller-supplied content key, so two payloads could share the zero-nonce `(key, nonce)` pair, and it never checked the envelope's `name_id`; `SealProgress` now draws a fresh 32-byte key per payload, `Open` refuses a non-zero `name_id`, and a new `DecodeProgress` enforces §24.1's exactly-two-key shape. §29.1's projection read a projected port with an unsigned accessor, so a CBOR nint vanished instead of failing the range check; a negative `runtime.ports[0].container` or `runtime.readiness.tcp` is now the policy error the text names. §29.3's origin scan matched `http://` literally, so an uppercase scheme skipped O2; scheme matching is now case-insensitive. `ctf validate` ran only the schema/semantic pass, so a document `ctf pack` refused for an out-of-range port or a zero PID limit reported `ok`; it now runs the descriptor policy pass too. Every change enforces a rule the text already stated; no change rejects a valid container, and no feature bit is spent (§15). |
 | 0.13.14 | Fifth post-release audit round. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Both implementations skipped a compressed section before testing its declared totals: the independent Go implementation's `VerifyAll` verified the committed `compressed-output-cap` and `compressed-ratio-cap` fixtures clean instead of failing D1 or D2, and Rust's verification pass counted an over-cap encrypted section as merely unverifiable. The caps are a MUST on the authenticated declaration and apply to an encrypted section's totals without a key (§5.4), so both now check every non-external compressed section before the encryption or decoder skip; each then skips only what it cannot open or expand (an encrypted section without a key, an unknown-kind compressed section, or, in Go, any compressed section, since it has no zstd decoder), and only a declaration that itself breaks D1 or D2 is refused. §13 requires a tool that writes free-form manifest text to a terminal to escape control characters, but several diagnostics passed it through: `ctf validate` and `ctf pack` printed the §29.3 origin taken from `description`, `ctf run` and `ctf verify` printed the key echoed by a schema error, a gate's module-read failure quoted the document's module path, and `ctf release` printed a destination built from a sealed member's name, so a control reached the operator's terminal; all now escape with the same character set `ctf inspect` uses — C0/C1 controls, DEL, Unicode format characters (zero-width and bidi marks among them), and line/paragraph separators — rather than trusting the parser or validation to have removed the hazard, and the inspector escapes a zero-width mark in a `check_name`-valid name too. Every change enforces a rule the text already stated; no change rejects a valid container, and no feature bit is spent (§15). |
+| 1.0.0 | **2026-10-28.** v1.0.0 freeze declaration. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B `a23cd1b3…`, `demo.ctf` 18328 B `ce1a930e…`); no header, section, footer, commitment root, or signature transcript moved. Suite 3's SLH-DSA-SHA2-128s signature role is implemented in both the Rust and Go implementations: `sig_pq = ML-DSA-65 (3309) ‖ SLH-DSA-SHA2-128s (7856) = 11165`, split at 3309, with `pk_pq = 1952 + 32 = 1984`, and all three components verified over the §8.4 transcript. The Go implementation reaches parity for zstd `comp = 1` (D1/D2 before the decoder), the §18 entitlement chain E1–E9 with the §34 trust roles, and suite 3. The authoring surface gains `external:` (design §10): each entry is validated, compiled to the manifest `external` map and an `EXTERNAL` section record, and emitted by `ctf init forensics`. Phase 5 ships in this repository: `crates/ctf-tui`, the Postgres 17 schema and `sqlx` migrations with a committed offline cache, the ingest pipeline (validate → verify → offline gate → store), the `ratatui` admin TUI (six screens plus chunk progress), the dual serving checks, and a CI database job. §14 shrinks to the two items that are external by design. **1.0.0 is the first release where the 0.3 byte layout is declared stable:** every change here adds implementation or tooling and narrows nothing, so no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2119,17 +2132,17 @@ suite this version does not implement.
 | S5 | A suite selects **all** roles; mixing roles across suites MUST be rejected. |
 
 This section specifies the registry and its failure timing. The `hash`, `kdf`,
-`kem`, `aead`, and `signature` roles are implemented for suites 1 and 2 (§20). Suite
-3's signature role includes SLH-DSA, which is not implemented, so resolving it
-reports that the role is not implemented at the point of use — a suite is not
+`kem`, `aead`, and `signature` roles are implemented for suites 1, 2, and 3 (§20).
+Suite 3's signature role places `ML-DSA-65 ‖ SLH-DSA-SHA2-128s` in `sig_pq` and
+splits it at 3309 bytes; all three components must verify. A suite is never
 silently reduced to a subset of its hybrid signature.
 
 ## 20. Cryptographic constructions
 
 This section specifies the phase 2 constructions behind the suite roles of §19: the
 hybrid KEM combiner (§20.1), the chunked AEAD (§20.2), and the hybrid signature
-(§20.3). They are normative for `suite_id` 1 and 2. Suite 3's signature is specified
-by §19 as adding SLH-DSA; that role is not implemented in this version (§14).
+(§20.3). They are normative for `suite_id` 1, 2, and 3. Suite 3's signature adds
+SLH-DSA as a third component (§20.3).
 
 Every `‖` below joins **fixed-width fields only**, except where `LP` length-prefixes
 a variable-length input:
@@ -2282,10 +2295,9 @@ components; a failure of any is a failure of the whole, exactly as for suites 1
 and 2. Section §19.1's suite table assigns the `signature` role; this section fixes
 the bytes that role produces, so a suite-3 verifier need not guess them.
 
-SLH-DSA is not implemented in this version, so a suite-3 file cannot be
-authenticated by the reference implementation; resolving the role reports the suite
-and the role rather than silently reducing the hybrid to two of its three
-components.
+All three components are implemented for suite 3 in both the Rust and Go
+implementations. The public key a suite-3 verifier is supplied is `Ed25519 (32) ‖
+ML-DSA-65 (1952) ‖ SLH-DSA-SHA2-128s (32)`, so `pk_pq` is 1984 bytes (§34).
 
 ## 21. Key envelopes
 
