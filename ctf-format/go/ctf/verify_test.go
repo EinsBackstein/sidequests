@@ -122,25 +122,19 @@ func TestVerifyAllAcceptsPlainAndExternalSections(t *testing.T) {
 	}
 }
 
-// A compressed section inside the caps is not silently verified: this build has
-// no zstd decoder, so VerifyAll must report that the section was not checked.
-func TestVerifyAllReportsCompressedSectionWithinCaps(t *testing.T) {
+// A compressed section inside the caps is unverifiable, not invalid: this build
+// has no zstd decoder, so the section is skipped the way the reference counts it
+// `unverifiable` (spec §5.4/§10). The caps are still checked first; the bomb
+// cases above prove that.
+func TestVerifyAllTreatsInCapCompressedAsUnverifiable(t *testing.T) {
 	data := minimalWithSection(t, KindArtifact, FlagPlayerVisible)
 	data = setRecordComp(t, data, 1, CompZstd)
 	b, err := Parse(data)
 	if err != nil {
 		t.Fatalf("parse compressed bundle: %v", err)
 	}
-	errs := b.VerifyAll()
-	if len(errs) != 1 {
-		t.Fatalf("VerifyAll returned %d errors, want 1: %v", len(errs), errs)
-	}
-	var ce *Error
-	if !errors.As(errs[0], &ce) || ce.Rule != "" || ce.Category != CatUsage {
-		t.Fatalf("want a usage refusal, got %v", errs[0])
-	}
-	if !strings.Contains(errs[0].Error(), "section 1 uses enc/comp") {
-		t.Fatalf("error does not name the refusal: %v", errs[0])
+	if errs := b.VerifyAll(); len(errs) != 0 {
+		t.Fatalf("in-cap compressed section was reported as a finding: %v", errs)
 	}
 }
 

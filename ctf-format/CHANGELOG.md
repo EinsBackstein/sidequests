@@ -17,10 +17,10 @@ no header, section, footer, commitment root, or signature transcript moved.
 
 `VerifyAll` skipped every encrypted or compressed section, so the committed
 `compressed-output-cap` and `compressed-ratio-cap` fixtures returned no findings
-instead of failing D1 or D2. It now applies both caps before any decoder would run,
-and reports a compressed section of a kind this build cannot expand rather than
-claiming it verified. An encrypted section it cannot open is still unverifiable and
-skipped.
+instead of failing D1 or D2. It now applies both caps before any decoder would run
+and only then skips a section this build cannot expand. An encrypted section it
+cannot open and an unknown-kind compressed section stay unverifiable, as §10
+requires; neither is reported as a finding.
 
 ### Fixed — `ctf validate`/`ctf pack` wrote a raw control from a description (§13)
 

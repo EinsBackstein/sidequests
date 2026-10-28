@@ -366,13 +366,12 @@ func (b *Bundle) Verify() error {
 // operator is not left to bisect a large bundle (spec §13).
 //
 // An EXTERNAL section's bytes are absent by design, so it is skipped. An
-// encrypted section cannot be checked without the content key, and a compressed
+// encrypted section cannot be checked without the content key, a compressed
 // section of a kind this build does not implement must not be decompressed
-// (spec §10), so both are unverifiable rather than silently verified. A
-// compressed section of a kind this build does implement is subject to D1 and
-// D2 before any decoder would run; because this build has no zstd decoder, the
-// caps are enforced and then the section is reported rather than claimed
-// verified.
+// (spec §10), and this build has no zstd decoder, so all three are unverifiable
+// rather than silently verified. D1 and D2 are still applied to every compressed
+// section before it is skipped: the caps are a MUST, and checking the
+// authenticated declaration needs no decoder (§5.4).
 func (b *Bundle) VerifyAll() []error {
 	var errs []error
 	for _, r := range b.Sections {
@@ -385,10 +384,7 @@ func (b *Bundle) VerifyAll() []error {
 		if r.Comp != CompNone {
 			if err := decompressionCaps(r); err != nil {
 				errs = append(errs, err)
-				continue
 			}
-			errs = append(errs, errf(CatUsage, "",
-				"section %d uses enc/comp; this build cannot decompress it", r.NameID))
 			continue
 		}
 		stored, err := b.storedBytes(r)
