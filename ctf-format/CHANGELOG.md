@@ -37,22 +37,31 @@ the secret as supplied, and §22.2 states that its length is unconstrained.
 
 `ctf oci-export` parsed the bundle only to annotate the OCI manifest and refused a
 file that did not parse, so a valid 0.2 `.ctf` — which a 0.3 whole-container read
-refuses by design — could not be distributed. Export now writes the layer
-unchanged and treats annotations as optional; §30.3 states that the exporting build
-need not parse the bundle. Export→import remains byte-for-byte.
+refuses by design — could not be distributed. Export now requires a valid `.ctf`
+header but not a whole-container read, and writes the layer unchanged; annotations
+are optional. §30.3 states the rule. Export→import remains byte-for-byte, and bytes
+that are not a `.ctf` file are still refused rather than wrapped under the bundle
+media type.
 
 ### Fixed — read-time policy pass (§29.2 P3)
 
 The digest-pinning check ran at authoring time only, although P3 requires it again
-at read time. `ctf inspect` now reports policy issues in its output and `ctf verify`
-reports them on stderr; neither changes its record or treats a policy failure as a
-parse failure. §29.2 names that reporting.
+at read time. `ctf inspect` now reports policy issues in its output and `ctf verify`,
+`ctf run`, `ctf serving-manifest`, and `ctf release` report them on stderr; none
+changes its record, output, or exit code, and none treats a policy failure as a
+parse failure. §29.2 names that reporting and the commands that apply it.
+
+The CLI keeps its own `--secret` contract — exactly 64 hex digits (32 bytes) — and
+now enforces it; an empty or short secret was previously accepted and would have
+made the derived flag publicly computable. The library derivation itself accepts any
+length, as §22.2 states.
 
 ### Fixed — Go diagnostic for a 0.3 file missing `CONTAINER_V1`
 
 Go called any file without the bit a "pre-0.3 file", even at `version_minor` 3.
-It now mirrors the reference: below 0.3 the legacy wording stands, at 0.3 or later
-the error names the missing `ro_compat` feature (§2.3).
+It now mirrors the reference: below the fixed 0.3 era boundary the legacy wording
+stands, at 0.3 or later the error names the missing `ro_compat` feature (§2.3). The
+boundary is a constant, so a later minor bump cannot mislabel a 0.3 file again.
 
 ## [0.13.8] — 2026-10-28
 

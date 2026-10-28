@@ -40,7 +40,7 @@ func Parse(data []byte) (*Bundle, error) {
 	// correctly: a pre-0.3 file is an older format with nothing to read, while a
 	// 0.3+ file missing the bit is a feature-negotiation inconsistency.
 	if !h.hasContainerV1() {
-		if h.VersionMinor < VersionMinor {
+		if h.VersionMinor < containerV1Minor {
 			return nil, errf(CatLegacy, "§10.2",
 				"pre-0.3 file (version_minor %d): no footer, manifest, or chunk index", h.VersionMinor)
 		}

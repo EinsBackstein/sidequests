@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::bundle::Bundle;
+use crate::header::Header;
 
 /// Media type of the bundle layer blob.
 pub const BUNDLE_MEDIA_TYPE: &str = "application/vnd.ctf.bundle.v1";
@@ -52,9 +53,9 @@ pub const LAYOUT_MARKER: &str = "oci-layout";
 pub enum OciError {
     /// A filesystem operation failed.
     Io(String),
-    /// A bundle-format failure surfaced through an OCI operation. Export does not
-    /// produce this — its parse is best-effort — but the variant is retained for
-    /// callers that surface the container error alongside layout failures.
+    /// A bundle-format failure surfaced through an OCI operation. Export returns
+    /// this when the bytes are not a `.ctf` at all (the header does not parse); a
+    /// whole-container parse that fails for an older or newer minor is not an error.
     Format(crate::Error),
     /// A JSON document could not be written or read.
     Json(String),
@@ -105,12 +106,15 @@ pub fn digest_sha256(bytes: &[u8]) -> String {
 ///
 /// The layer blob is the bundle, copied byte-for-byte: this function never
 /// re-serializes it, so a push/pull round trip reproduces the input exactly
-/// (spec §30.3). The parse below is **best-effort annotation** only — it names the
+/// (spec §30.3). A valid header is required — the blob must be a `.ctf`, not an
+/// arbitrary file under the bundle's media type (spec §30.1/X1) — but a
+/// whole-container read is not: a valid older-format bundle (a 0.2 file, which a
+/// 0.3 whole-container read refuses under §10.2) is still exported unchanged.
+/// [`Bundle::parse`] is used only for **best-effort annotation**: it names the
 /// challenge id and version in the OCI manifest when the bytes happen to parse,
-/// and is never a gate. A valid older-format bundle (a 0.2 file, which a 0.3
-/// whole-container read refuses under §10.2) or any other non-parsing byte
-/// sequence is still exported unchanged, simply without those annotations.
+/// and its failure never gates the export.
 pub fn export(bundle_bytes: &[u8], dir: &Path) -> Result<OciLayout, OciError> {
+    Header::parse(bundle_bytes).map_err(OciError::Format)?;
     let annotations = Bundle::parse(bundle_bytes).ok().map(|parsed| {
         (
             parsed.manifest.id().to_owned(),

@@ -1747,3 +1747,90 @@ fn a_clean_bundle_prints_no_policy_line() {
         "a clean bundle must not print a policy line:\n{stderr}"
     );
 }
+
+/// Spec §29.2/P3: the read-time pass is not `verify`-only. `serving-manifest`
+/// parses the same manifest, so a policy issue is reported on stderr while stdout
+/// and the exit code stay exactly as before.
+#[test]
+fn serving_manifest_reports_a_policy_issue_without_changing_its_output() {
+    let dir = TempDir::new("29-serving");
+    let path = dir.path("tagged.ctf");
+    std::fs::write(&path, tagged_runtime_bundle()).unwrap();
+
+    let (code, stdout, stderr) = run(&["serving-manifest", &path]);
+    assert_eq!(code, 0, "policy is not a parse failure:\n{stdout}{stderr}");
+    assert_eq!(
+        stdout, "chal: 0 servable artifact(s)\n",
+        "the stable stdout line must not change"
+    );
+    assert!(
+        !stdout.contains("policy"),
+        "the diagnostic belongs on stderr:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("policy: runtime.image:"),
+        "the policy issue must name the key on stderr:\n{stderr}"
+    );
+}
+
+/// Spec §29.2/P3 for `ctf release`: same diagnostic, same unchanged success path.
+#[test]
+fn release_reports_a_policy_issue_without_changing_its_output() {
+    let dir = TempDir::new("29-rel");
+    let bundle = dir.path("tagged.ctf");
+    std::fs::write(&bundle, tagged_runtime_bundle()).unwrap();
+    let key = dir.path("seal.key");
+    // `release` reads the key before it looks for sealed sections; this fixture has
+    // none, so any 64-hex-digit KEM key is enough to reach the report.
+    std::fs::write(&key, "00".repeat(32)).unwrap();
+    let out = dir.path("released");
+
+    let (code, stdout, stderr) = run(&["release", &bundle, "--key", &key, "--out", &out]);
+    assert_eq!(
+        code, 0,
+        "policy is not a release failure:\n{stdout}{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        format!("{out}: released 0 member(s), report {out}/release.json\n"),
+        "the stable stdout line must not change"
+    );
+    assert!(
+        !stdout.contains("policy"),
+        "the diagnostic belongs on stderr:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("policy: runtime.image:"),
+        "the policy issue must name the key on stderr:\n{stderr}"
+    );
+}
+
+/// Spec §29.2/P3 for `ctf run --bundle`: the bundle's manifest is parsed here too,
+/// so the same diagnostic appears while the gate's verdict is unchanged.
+#[test]
+fn run_with_a_bundle_reports_a_policy_issue_without_changing_the_verdict() {
+    let dir = TempDir::new("29-runb");
+    let source = dir.path("chal.yaml");
+    std::fs::write(&source, "spec: 1\nid: chal\nname: Title\n").unwrap();
+    let bundle = dir.path("tagged.ctf");
+    std::fs::write(&bundle, tagged_runtime_bundle()).unwrap();
+    let secret = "00".repeat(32);
+
+    let (code, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert_eq!(
+        code, 0,
+        "a declared runtime is unverified, not failed:\n{stdout}{stderr}"
+    );
+    assert!(
+        stdout.contains("gate          unverified"),
+        "the verdict is unchanged: {stdout}"
+    );
+    assert!(
+        !stdout.contains("policy"),
+        "the diagnostic belongs on stderr:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("policy: runtime.image:"),
+        "the policy issue must name the key on stderr:\n{stderr}"
+    );
+}

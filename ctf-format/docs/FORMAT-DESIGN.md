@@ -455,7 +455,7 @@ Two rules make the nonce safe, and both are load-bearing:
 ### Key hierarchy
 
 ```
-event_secret (32 B — KMS/HSM, never in a bundle, never in git)
+event_secret (octet string, 32 B typical — KMS/HSM, never in a bundle, never in git)
 └── seed(challenge, subject) = HKDF(
         ikm  = event_secret,
         salt = "ctf/seed/v1",

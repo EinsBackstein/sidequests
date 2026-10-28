@@ -61,54 +61,55 @@ fn export_then_import_round_trips_byte_for_byte() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The manifest annotations are a best-effort description, never a gate: bytes that
-/// are not this build's bundle format are wrapped unchanged, just unannotated.
+/// §30.1/X1: the layer blob is the bundle, so a valid header is required. Bytes
+/// that are not a `.ctf` at all are refused rather than wrapped under the bundle's
+/// media type, and nothing is written.
 #[test]
-fn export_copies_non_parsing_bytes_unchanged() {
-    let bytes = b"\x00not a ctf bundle, and deliberately not parseable\xff\n";
-    assert!(Bundle::parse(bytes).is_err());
-    let dir = scratch("non-parsing");
-    let layout = oci::export(bytes, &dir).unwrap();
-    assert_eq!(layout.bundle_digest, oci::digest_sha256(bytes));
-
-    let recovered = oci::import(&dir).unwrap();
-    assert_eq!(recovered, bytes, "the blob must be the input byte-for-byte");
-
-    let manifest = image_manifest(&dir);
-    assert!(
-        manifest.get("annotations").is_none(),
-        "a non-parsing bundle has no title or version to annotate: {manifest}"
-    );
-    assert!(
-        manifest["layers"][0].get("annotations").is_none(),
-        "the layer must not claim a title it could not derive: {manifest}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
+fn export_refuses_bytes_without_a_valid_header() {
+    for (name, bytes) in [
+        ("one-byte", &b"X"[..]),
+        ("not-a-bundle", &b"not a bundle"[..]),
+    ] {
+        let dir = scratch(name);
+        assert!(
+            matches!(oci::export(bytes, &dir), Err(oci::OciError::Format(_))),
+            "`{}` must be refused as a format error",
+            String::from_utf8_lossy(bytes)
+        );
+        assert!(
+            !dir.exists(),
+            "a refused export must not create a layout: {}",
+            dir.display()
+        );
+    }
 }
 
-/// A valid older-format bundle (0.2) is the case §17 keeps valid: a 0.3
-/// whole-container read refuses it, but export is a byte copy and must not.
+/// A valid header is enough: §17 keeps a 0.2 bundle valid even though a 0.3
+/// whole-container read refuses it (§10.2), and a current 0.3 bundle parses in
+/// full. Both are byte copies and must round-trip exactly.
 #[test]
-fn export_wraps_a_valid_0_2_bundle_without_parsing_it() {
+fn export_round_trips_a_valid_0_2_and_a_valid_0_3_bundle() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../spec/vectors/conformance/golden/minimal.ctf");
-    let mut bundle = std::fs::read(path).unwrap();
+    let mut older = std::fs::read(path).unwrap();
     // Exactly as a 0.2 writer left it: minor 2 and CONTAINER_V1 clear.
-    bundle[10..12].copy_from_slice(&2u16.to_le_bytes());
-    bundle[44..48].copy_from_slice(&0u32.to_le_bytes());
+    older[10..12].copy_from_slice(&2u16.to_le_bytes());
+    older[44..48].copy_from_slice(&0u32.to_le_bytes());
     assert!(matches!(
-        Bundle::parse(&bundle),
+        Bundle::parse(&older),
         Err(ctf_format::Error::LegacyContainer { minor: 2 })
     ));
 
-    let dir = scratch("0-2");
-    oci::export(&bundle, &dir).unwrap();
-    let recovered = oci::import(&dir).unwrap();
-    assert_eq!(
-        recovered, bundle,
-        "the 0.2 bundle must survive byte-for-byte"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
+    for (name, bundle) in [("0-2", older), ("0-3", minimal_bundle())] {
+        let dir = scratch(name);
+        oci::export(&bundle, &dir).unwrap();
+        let recovered = oci::import(&dir).unwrap();
+        assert_eq!(
+            recovered, bundle,
+            "the {name} bundle must survive byte-for-byte"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// When the bundle does parse, the layout still carries the challenge identity.
