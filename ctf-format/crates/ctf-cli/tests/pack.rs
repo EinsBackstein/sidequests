@@ -128,6 +128,66 @@ generate:
     );
 }
 
+/// §29.1: an out-of-range port cannot be represented in the descriptor, so it must
+/// fail the pack instead of being silently omitted while the committed manifest
+/// still carries it.
+#[test]
+fn refuses_an_out_of_range_container_port() {
+    let dir = TempDir::new("big-port");
+    let source = yaml(
+        &dir,
+        "chal.yaml",
+        "\
+spec: 1
+id: big-port
+name: Big Port
+runtime:
+  image: \"ghcr.io/ctf/big-port@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"
+  ports: [{ container: 70000, protocol: tcp }]
+  resources: { cpu: \"0.5\", memory: \"256Mi\", pids: 64 }
+  instancing: per_team
+  ttl: 30m
+  readiness: { tcp: 80, timeout: 30s }
+",
+    );
+    let out = dir.path("chal.ctf");
+    let (ok, _stdout, stderr) = pack(&source, &out);
+    assert!(!ok, "an out-of-range port must fail the pack");
+    assert!(stderr.contains("port"), "the port must be named: {stderr}");
+    assert!(stderr.contains("must be between 1 and 65535"), "{stderr}");
+    assert!(!std::path::Path::new(&out).exists());
+}
+
+#[test]
+fn refuses_an_out_of_range_readiness_port() {
+    let dir = TempDir::new("big-readiness");
+    let source = yaml(
+        &dir,
+        "chal.yaml",
+        "\
+spec: 1
+id: big-readiness
+name: Big Readiness
+runtime:
+  image: \"ghcr.io/ctf/big-readiness@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"
+  ports: [{ container: 80, protocol: tcp }]
+  resources: { cpu: \"0.5\", memory: \"256Mi\", pids: 64 }
+  instancing: per_team
+  ttl: 30m
+  readiness: { tcp: 70000, timeout: 30s }
+",
+    );
+    let out = dir.path("chal.ctf");
+    let (ok, _stdout, stderr) = pack(&source, &out);
+    assert!(!ok, "an out-of-range readiness port must fail the pack");
+    assert!(
+        stderr.contains("readiness.tcp"),
+        "the readiness port must be named: {stderr}"
+    );
+    assert!(stderr.contains("must be between 1 and 65535"), "{stderr}");
+    assert!(!std::path::Path::new(&out).exists());
+}
+
 #[test]
 fn packs_a_nested_artifact_tree_and_round_trips_its_path() {
     let dir = TempDir::new("nested");

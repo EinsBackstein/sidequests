@@ -14,7 +14,7 @@
 )]
 
 use ctf_format::derive::{base32_lower, flag, flag_with_bytes, stage_key, subject_seed};
-use ctf_format::{Manifest, SectionFlags, SectionKind, SectionSpec, write_bundle};
+use ctf_format::{Manifest, SectionFlags, SectionKind, SectionSpec, SuiteError, write_bundle};
 
 const SUITE: u16 = 1;
 
@@ -206,6 +206,33 @@ fn stage_keys_are_deterministic_and_domain_separated() {
     let s2_alice = stage_key(&prev_alice, 2).unwrap();
     let s2_bob = stage_key(&prev_bob, 2).unwrap();
     assert_ne!(s2_alice, s2_bob, "stage 2 must depend on stage 1's flag");
+}
+
+/// §22.4 rule DF4: `stage_key` is derived from stage *N-1*'s flag, so N has no
+/// previous flag at zero and no defined key. Stage numbering starts at 1, matching
+/// the Go implementation.
+#[test]
+fn stage_zero_is_refused() {
+    let seed = subject_seed(&secret(), "whos-that-bird", 3, "team-alpha").unwrap();
+    let f = flag(&seed);
+    let err = stage_key(&f, 0).unwrap_err();
+    assert_eq!(err, SuiteError::InvalidStage);
+    assert!(err.to_string().contains("DF4"), "{err}");
+    assert!(
+        err.to_string().contains("stage numbers start at 1"),
+        "{err}"
+    );
+
+    // Stage 1 and 2 remain the pinned known-answer values; the guard changes no
+    // defined derivation.
+    assert_eq!(
+        stage_key(&f, 1).unwrap().to_vec(),
+        hex("08eeb095eab82304c338dc14155b4975ee71523c41dfbca7f90927f46d281552")
+    );
+    assert_eq!(
+        stage_key(&f, 2).unwrap().to_vec(),
+        hex("629c4e12879a15640c3a81b7ef551d08b5b7a0cc979faa6d4b7078e3ecdebf0e")
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 # Audit — parser hardening checklist (design §14)
 
 **Date:** 2026-10-28
-**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.10
+**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.11
 **Source checklist:** `docs/FORMAT-DESIGN.md` §14, lines 800–831.
 **Method:** every claim below was verified by reading the enforcement site and the
 tests that pin it in the current tree, not inferred from the design text. Line
@@ -17,7 +17,7 @@ numbers are against this commit.
 | 4 | Depth cap on nested CBOR | `cbor.rs:45-51` (`MAX_DEPTH = 16`), `cbor.rs:154-157` (encode), `cbor.rs:304-307` (decode) | `cbor.rs:220` `rejects_nesting_past_the_depth_cap` (both encoder and decoder) | Satisfied | — |
 | 5 | Absolute output cap and ratio cap on zstd decompression, checked before decode | `compress.rs:27-70` (`MAX_DECOMPRESSED_SECTION`, `MAX_DECOMPRESSION_RATIO`, `check_caps`); `compress.rs:114-135` (`check_caps` first, then bounded `take`, exact-length check) | `compression.rs:108` `caps_reject_a_bomb_before_decompression`; `compression.rs:128` `a_wrong_declared_length_is_rejected` | Satisfied | — |
 | 6 | Reject duplicate section IDs and duplicate manifest keys | `section.rs:740-746` (T2 duplicate `name_id`); `cbor.rs:175-190` (encode) and `cbor.rs:333-358` (decode strictly-increasing keys ⇒ `CborDuplicateKey`/`CborUnsortedKeys`); `manifest.rs:267-277` (`names`), `manifest.rs:311-321` (`paths`) | `container.rs:951` `layout_rejects_duplicate_name_id`; `cbor.rs:92` `encoder_rejects_duplicate_keys`; `cbor.rs:175` `rejects_unsorted_and_duplicate_map_keys`; `bundle.rs:1285` `m16_duplicate_names_are_rejected`; `bundle.rs:906` `paths_reject_traversal_and_duplicates` | Satisfied | — |
-| 7 | Normalize and reject path-like names (`../`, absolute, symlink-shaped) | `manifest.rs:701-738` (`check_name`/`check_path`: separators, `.`/`..`, control and bidi chars, empty components); applied at `manifest.rs:252-322`; authoring side `pack.rs:143-151` | `bundle.rs:1027` `manifest_rejects_path_like_names`; `bundle.rs:1064` `manifest_rejects_bidi_controls_in_names`; `bundle.rs:1099` `manifest_accepts_right_to_left_script_in_names`; `bundle.rs:906` `paths_reject_traversal_and_duplicates` | Satisfied | — |
+| 7 | Normalize and reject path-like names (`../`, absolute, symlink-shaped) | `manifest.rs:701-738` (`check_name`/`check_path`: separators, `.`/`..`, C0/DEL and bidi-override chars, empty components); applied at `manifest.rs:252-322`; authoring side `pack.rs:143-151` | `bundle.rs:1040` `manifest_rejects_path_like_names`; `bundle.rs:1077` `manifest_rejects_bidi_controls_in_names`; `bundle.rs:1112` `manifest_accepts_right_to_left_script_in_names`; `bundle.rs:919` `paths_reject_traversal_and_duplicates` | Satisfied | — |
 | 8 | Verify signatures and the commitment root before interpreting the manifest semantically | Commitment root: `bundle.rs:90-112` (footer → root recomputed → `verified_bytes` over the manifest record) and `bundle.rs:441-469`; signatures: deliberately a separate caller step, `bundle.rs:132-143` `Bundle::verify_signatures` | Commitment: `bundle.rs:365` `section_bytes_are_verified_before_they_are_returned`; `bundle.rs:452,481` byte-flip breaks root; `bundle.rs:497` `commitment_root_is_the_documented_construction`; `bundle.rs:2131` `t8_does_not_reach_into_claimed_regions` (manifest payload byte fails at parse with `SectionRootMismatch { name_id: 0 }`). Signatures: `bundle.rs:2254,2289,2328,2340` | Satisfied by design | — |
 | 9 | Verify chunk authenticity before exposing chunk bytes | `chunk.rs:255-362` (`ChunkIndex::verify_root` consumes the index and yields `VerifiedChunkIndex`; no method returns chunk bytes), `compile_fail` doctests at `chunk.rs:274-280,321-326`; serving boundary `bundle.rs:231-250` (C8) | `chunk.rs:116` `a_chunk_cannot_be_checked_against_an_unverified_index`; `chunk.rs:137,155,183` tamper/swap/forge; `chunk.rs:350` `c7_chunk_bytes_are_never_exposed_without_passing_c5`; `bundle.rs:1962,1979` C8 | Satisfied | — |
 | 10 | Fuzz from day one (header, section table, manifest, chunk index, entitlement chain); oracle no panic, no OOM, round-trip stable | `fuzz/fuzz_targets/{bundle,header,section_table,manifest,chunk_index,entitlement}.rs`; `fuzz/Cargo.toml:27-67`; stable-toolchain mirror `tests/fuzzmirror.rs:19-170`; mutation oracle `tests/mutation.rs:110-147,221-239`. No-OOM oracle is not a fuzzer memory cap; see Notes | `fuzzmirror.rs:208` `fuzz_targets_still_compile_and_run` over every committed seed, including `fuzz/corpus/entitlement/chain.cbor` (accepted-and-re-encoded branch asserted at `fuzzmirror.rs:239-244`); `mutation.rs:152,174,188,205,221` flips/truncation/corruption/arbitrary/sub-parsers | Satisfied | #107 |
@@ -113,7 +113,7 @@ Adding `-rss_limit_mb` to CI remains a hardening follow-up; the phase-8
 
 ### Scope
 
-This audit reflects the tree at release 0.13.10; the post-0.13.0 audit rounds
+This audit reflects the tree at release 0.13.11; the post-0.13.0 audit rounds
 (#114–#118) changed reader behaviour, and the 0.13.2–0.13.4 gate corrections changed
 CLI gate resolution and its record (0.13.5 corrects 0.13.4's record-boundary wording), not any invariant this checklist tracks. It
 records gaps as tickets; no code was changed. Trailing-byte rejection, the CBOR

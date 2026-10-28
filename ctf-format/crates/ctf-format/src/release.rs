@@ -49,7 +49,8 @@ pub struct ReleaseReport {
     pub challenge_id: String,
     /// The challenge `version`.
     pub version: u64,
-    /// The release mode the declaration named, or `"all"` when there was none.
+    /// The release mode the declaration named, or `event_end` when there was no
+    /// declaration — the operation that performed the release (§27.2).
     pub release: String,
     /// The sections that were released.
     pub members: Vec<ReleasedMember>,
@@ -85,31 +86,55 @@ pub struct Release {
 /// The `sealed` declaration: release mode and member names (spec §7.6).
 struct SealedDeclaration {
     release: String,
-    members: Option<Vec<String>>,
+    members: Vec<String>,
 }
 
-fn sealed_declaration(bundle: &Bundle<'_>) -> Option<SealedDeclaration> {
-    let sealed = bundle.manifest.declaration("sealed")?;
+/// Read the bundle's `sealed` declaration.
+///
+/// `Ok(None)` means the whole declaration is absent, which §27.1 sentence 2 reads as
+/// "release every SEALED section". A *present* declaration must name `members` as an
+/// array of text (§7.6 marks it required), so a missing key, a non-array value, or a
+/// non-text element is an error rather than a wider release: treating a malformed
+/// declaration as "no filter" would release a `solver` or `writeup` its author did
+/// not name.
+fn sealed_declaration(bundle: &Bundle<'_>) -> Result<Option<SealedDeclaration>> {
+    let Some(sealed) = bundle.manifest.declaration("sealed") else {
+        return Ok(None);
+    };
     let release = sealed
         .get("release")
         .and_then(Value::as_text)
         .unwrap_or("manual")
         .to_owned();
-    let members = sealed.get("members").and_then(Value::as_array).map(|a| {
-        a.iter()
-            .filter_map(Value::as_text)
-            .map(str::to_owned)
-            .collect()
-    });
-    Some(SealedDeclaration { release, members })
+    let members = match sealed.get("members") {
+        Some(Value::Array(items)) => {
+            let mut members = Vec::with_capacity(items.len());
+            for item in items {
+                let Some(name) = item.as_text() else {
+                    return Err(Error::Inconsistent {
+                        what: "the bundle's `sealed` declaration `members` is not an array of text",
+                    });
+                };
+                members.push(name.to_owned());
+            }
+            members
+        }
+        _ => {
+            return Err(Error::Inconsistent {
+                what: "the bundle's `sealed` declaration does not name its `members` as an array of text",
+            });
+        }
+    };
+    Ok(Some(SealedDeclaration { release, members }))
 }
 
 /// Release the sections a bundle declares for `event_end`, using the offline seal key.
 ///
 /// Only sections the declaration names are released; a bundle with no `sealed`
-/// declaration releases every sealed section. A declaration whose release mode is not
-/// `event_end` is refused, so a `manual` or `stage:<id>` release cannot be triggered
-/// early by running the wrong command.
+/// declaration releases every sealed section (§27.1 sentence 2). A present
+/// declaration must carry its required `members` array, and a declaration whose
+/// release mode is not `event_end` is refused, so a `manual` or `stage:<id>` release
+/// cannot be triggered early by running the wrong command.
 ///
 /// `seal_secret_key` is the hybrid KEM secret key of the `seal` recipient. Every
 /// released plaintext is verified against its section root before it is returned
@@ -129,11 +154,13 @@ pub fn release_at_event_end(bundle: &Bundle<'_>, seal_secret_key: &[u8]) -> Resu
             what: "releasing a sealed section would rewrite a header carrying an unimplemented feat_ro_compat bit",
         });
     }
-    let declaration = sealed_declaration(bundle);
+    let declaration = sealed_declaration(bundle)?;
+    // §27.2: the audit record names an actual release mode. With no declaration the
+    // operation that ran is `event_end`, not an invented `all`.
     let release = declaration
         .as_ref()
         .map(|d| d.release.clone())
-        .unwrap_or_else(|| "all".to_owned());
+        .unwrap_or_else(|| "event_end".to_owned());
     if let Some(d) = &declaration
         && d.release != "event_end"
     {
@@ -141,7 +168,7 @@ pub fn release_at_event_end(bundle: &Bundle<'_>, seal_secret_key: &[u8]) -> Resu
             what: "the bundle's sealed declaration is not an event-end release",
         });
     }
-    let wanted: Option<Vec<String>> = declaration.and_then(|d| d.members);
+    let wanted: Option<Vec<String>> = declaration.map(|d| d.members);
 
     let mut members = Vec::new();
     let mut assets = Vec::new();

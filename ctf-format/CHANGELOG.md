@@ -7,6 +7,54 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.11] — 2026-10-28
+
+Second post-release audit round. **No byte-layout change:** `version_minor` stays
+`3`, both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and
+no header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — the suite registry is resolved on the read path (§19.2 S2/S3)
+
+The commitment root and every section root were hashed with BLAKE3 directly, so a
+bundle naming an unregistered `suite_id` parsed and `ctf verify` reported it intact.
+The reader now resolves the suite before the commitment root is checked — the first
+primitive — and rejects an unknown id by name; `write_bundle` resolves it at entry,
+so `ctf pack --suite 99` fails rather than emitting a file its own reader refuses.
+
+### Fixed — a malformed `sealed.members` no longer releases everything (§27.1)
+
+`members` is a required sub-key (§7.6), but a present `sealed` declaration that
+lacked it was read as "no filter", releasing a `solver` and a `writeup` the author
+did not name. The event-end release now refuses such a declaration before any
+section is decrypted; `members: []` releases nothing, and only the absence of the
+whole declaration releases every sealed section.
+
+### Fixed — the audit record no longer invents the mode `all` (§27.2)
+
+A release with no `sealed` declaration recorded `"release": "all"`, which is not one
+of `event_end`, `manual`, or `stage:<id>`. It records `event_end`, the operation
+that ran; a declaration records its own mode.
+
+### Fixed — Rust accepted `stage_key(_, 0)` (§22.4)
+
+Stage *N*'s key derives from stage *N-1*'s flag, so `0` has no previous flag and no
+defined key. Go already refused it; Rust now returns `SuiteError::InvalidStage` with
+a DF4 diagnostic. Stage 1 and 2 vectors are unchanged.
+
+### Fixed — a C1 control in a manifest name reached the terminal raw (§13)
+
+`check_name` rejects C0 and DEL but permits C1 controls such as U+0085, and
+`ctf inspect` printed manifest names verbatim in its tables. Table cells now escape
+C0/C1 controls and the bidi-format marks `check_name` permits before truncating, so a
+control or bidi character in a legal name cannot spoof the tool's own output.
+
+### Fixed — an out-of-range runtime port was dropped from the descriptor (§29.1)
+
+`u16::try_from(...).ok()` turned `container: 70000` or `readiness.tcp: 70000` into
+an absent descriptor field, so `ctf pack` wrote a descriptor that disagreed with the
+committed manifest. The projected value is now visible to `validate`, which makes it
+a pack-time policy error.
+
 ## [0.13.10] — 2026-10-28
 
 Determinism-gate corrections. **No byte-layout change:** `version_minor` stays `3`,

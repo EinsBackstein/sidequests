@@ -86,6 +86,10 @@ pub enum SuiteError {
     /// One component of a hybrid signature failed to verify. Both must verify
     /// (design §7, spec §8.4); a bundle carrying one valid half is a downgrade.
     VerificationFailed { component: &'static str },
+    /// A stage number was outside the defined range. Stage *N*'s key is derived
+    /// from stage *N-1*'s flag (spec §22.4), so `N = 0` has no previous flag and no
+    /// defined key; the message never echoes the input.
+    InvalidStage,
 }
 
 impl core::fmt::Display for SuiteError {
@@ -115,6 +119,7 @@ impl core::fmt::Display for SuiteError {
             Self::VerificationFailed { component } => {
                 write!(f, "hybrid signature {component} component did not verify")
             }
+            Self::InvalidStage => write!(f, "DF4: stage numbers start at 1"),
         }
     }
 }

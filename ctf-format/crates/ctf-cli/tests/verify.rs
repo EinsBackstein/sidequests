@@ -16,7 +16,11 @@
 use std::process::Command;
 
 use ctf_format::cbor::Value;
-use ctf_format::{Bundle, Manifest, Payload, SectionFlags, SectionKind, SectionSpec, write_bundle};
+use ctf_format::footer::commitment_root;
+use ctf_format::{
+    Bundle, HEADER_LEN, Header, Manifest, Payload, SectionFlags, SectionKind, SectionSpec,
+    write_bundle,
+};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ctf");
 
@@ -81,6 +85,53 @@ fn minimal_bundle() -> Vec<u8> {
         ],
     )
     .unwrap()
+}
+
+/// §19.2 S2/S3: a structurally valid bundle naming an unregistered suite is
+/// rejected by name, not reported intact. Built by re-rooting a registered bundle
+/// after editing `suite_id`, because the writer itself refuses an unknown suite.
+fn bundle_naming_suite(suite_id: u16) -> Vec<u8> {
+    let m = manifest();
+    let mut file = write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &m.encode().unwrap(),
+        )],
+    )
+    .unwrap();
+    file[16..18].copy_from_slice(&suite_id.to_le_bytes());
+    let header = Header::parse(&file).unwrap();
+    let (start, end) = header.table_range().unwrap();
+    let root = commitment_root(
+        &file[..HEADER_LEN as usize],
+        &file[start as usize..end as usize],
+    );
+    let footer = header.footer_off as usize;
+    file[footer..footer + 32].copy_from_slice(&root);
+    file
+}
+
+#[test]
+fn an_unknown_suite_is_rejected_not_reported_intact() {
+    let dir = TempDir::new("unknown-suite");
+    let path = dir.path("suite-99.ctf");
+    std::fs::write(&path, bundle_naming_suite(99)).unwrap();
+
+    let (code, stdout, _stderr) = run(&["verify", &path]);
+    assert_eq!(code, 1, "an unknown suite is a rejection:\n{stdout}");
+    let artifact = parse(&stdout);
+    assert_eq!(artifact["status"], "rejected");
+    assert_eq!(artifact["intact"], false);
+    assert!(
+        artifact["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown crypto suite 99"),
+        "the suite must be named:\n{stdout}"
+    );
 }
 
 /// A valid golden/minimal-style bundle with no gate requested is **unverified**,

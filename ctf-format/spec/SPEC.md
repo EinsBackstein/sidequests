@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.10
+**Version:** 0.3 (major 0, minor 3); document revision 0.13.11
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
@@ -1965,6 +1965,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.13.8 | Independent-implementation and validation-scope corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Go's `SealStream`/`OpenStream` now implement §20.2 exactly: an empty `comp = 0` plaintext is zero chunks (Go previously forced one, so the two writers disagreed and each rejected the other's empty body), and `OpenStream` validates the chunk size, the derived chunk count, and each chunk's plaintext length instead of only the total. §20.2 now states chunk *i*'s exact plaintext length for `comp = 0`, which both readers already enforced. §18.4 now scopes its rules to a reader of the chain: hashing a section's bytes is not reading its chain, E1–E8 run wherever an `entitlement` section is decoded as records (`ctf transfer`, `entitlement.rs`), and a hash-only pass must not be described as having validated one. Documentation is aligned with the shipped tree: the ROADMAP's closed phase-8 gaps and the `wasmi` checkbox, the hardening audit's `-rss_limit_mb` follow-up, and HANDOFF's superseded notes for the solver gate, `ctf pack` paths, and phase-1 signature verification. No change rejects a body the text permits; no feature bit is spent (§15). |
 | 0.13.9 | Envelope, derivation, and platform-policy corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §21.3's EN5 rule is now enforced on the whole `keys` section: every element is validated before any key is returned, so a malformed element after a usable envelope rejects the section instead of being skipped. One section may be wrapped to several recipients, so every envelope naming the section and context is tried in file order; previously the first matching envelope's failure was final, and a multi-recipient bundle could fail to unseal depending on recipient order. §22.2 now states that `event_secret` is an octet string of unconstrained length, which is what the Go implementation already assumed and the Rust one now accepts. §30.3 states that OCI export is a byte-copy that does not require the exporting build to read the whole container (a valid `.ctf` header is still required), so a valid older-format file round-trips instead of being refused; annotations are optional. §29.2's P3 read-time pass is now applied in the five commands that report a parsed bundle: `ctf inspect` names issues in its output and `ctf verify`, `ctf run`, `ctf serving-manifest`, and `ctf release` on their diagnostic streams; none turns a policy failure into a rejection. The CLI keeps its own 32-byte `--secret` contract while the derivation itself accepts any length. Go now distinguishes a 0.3 file missing `CONTAINER_V1` (a missing-feature error) from a genuine pre-0.3 file, matching the reference and §2.3. Every change enforces or states a rule the text already stated, or widens what an implementation accepts; no change rejects a body the text permits, and no feature bit is spent (§15). |
 | 0.13.10 | Determinism-gate corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §23.7's `none` mode was ignored at gate time: a document declaring `none` with a generator, solver, and `verify.offline` ran the determinism gate anyway, so a generator that varies per call was recorded `failed` instead of not run. The gate now reports `unverified` for `none` and `flag_only` — and for a `determinism` value this document does not define, which was silently read as absent and could be recorded `passed` — and §23.7 and §25.6 state that consequence. G8's rule that every named output must be declared in `generate.outputs` was unenforced, so a module could emit an undeclared artifact that reached the solver and had no §28 manifest row; the gate now rejects such a block at the determinism stage and escapes the guest-supplied name in its diagnostic (§13). Fuel was set once per instance, so G9's second run received the first run's remainder and a generator legitimately spending most of the budget failed on the second call; the budget is now per run, which §23.6 states. Every change enforces a rule the text already stated; no change rejects an input the text permits, and no feature bit is spent (§15). |
+| 0.13.11 | Second post-release audit round. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §19.2 S2/S3 were unimplemented on the read path: the commitment root and every section root were hashed with BLAKE3 directly, so a bundle naming an unregistered `suite_id` parsed and `ctf verify` reported it intact. The reader now resolves `suite_id` before the commitment root is checked — the first primitive — and rejects an unregistered id by name, and the writer resolves it at entry so `ctf pack --suite 99` fails instead of emitting a file its own reader refuses. §27.1: a present `sealed` declaration whose required `members` array was absent or malformed was read as covering every sealed section, releasing a `solver` or `writeup` the author did not name; it is now refused before decryption. §27.2: a release with no declaration recorded an invented mode `all`; it records `event_end`, the operation that ran. §22.4: the Rust `stage_key` accepted `0`, which has no previous flag and which Go already refused; both now refuse it. §13: a legal manifest `name` containing a C1 control was printed raw by `ctf inspect`; table cells escape control characters before truncation. §29.1: an out-of-range runtime port was silently dropped from the descriptor; it is now a pack-time policy error, so the descriptor cannot omit a value the manifest carries. Every change enforces a rule the text already stated; no change rejects an input the text permits, and no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2420,9 +2421,10 @@ stage_key(flag(N-1), N) = HKDF-SHA-256(
 
 `"ctf/stage/v1"` is 12 ASCII bytes. The key for stage *N* derives from the **flag**
 of stage *N-1*, so unlocking order is enforced by the derivation, not by platform
-logic. The resulting 32 bytes are a `content_key` that a section's `stage:N`
-envelope (§21) delivers, so a stage-gated section is `enc = 1` and
-`PLAYER_VISIBLE`, never `SEALED` (§5.3).
+logic. Stage numbers start at 1: `stage_key(_, 0)` has no previous flag and is not
+defined. The resulting 32 bytes are the stage-gated section's `content_key`; the
+derivation from the previous flag *is* the gate. A stage-gated section is `enc = 1`
+and `PLAYER_VISIBLE`, never `SEALED` (§5.3).
 
 ### 22.5 Rules and the entropy ceiling
 
@@ -2987,15 +2989,19 @@ A bundle's `sealed` declaration (§7.6) names a `release` mode — `event_end`,
 2. verifies each recovered plaintext against its section `root` before writing it;
 3. emits an audit record.
 
-A bundle with no `sealed` declaration releases every `SEALED` section. A declaration
-whose `release` is not `event_end` MUST NOT be released by the event-end operation:
-a `manual` or `stage:<id>` release is a different authorization.
+A bundle with no `sealed` declaration releases every `SEALED` section. A `sealed`
+declaration that is present but does not carry `members` as an array of text is
+malformed (§7.6 marks the key required) and MUST be refused rather than read as
+covering every sealed section. A declaration whose `release` is not `event_end` MUST
+NOT be released by the event-end operation: a `manual` or `stage:<id>` release is a
+different authorization.
 
 ### 27.2 The audit record
 
 The release record carries the bundle's commitment root, the challenge `id` and
 `version`, the release mode, and for each released member its `name_id`, name, size,
-and `root`. It MUST NOT contain any released plaintext, so it can be published or
+and `root`. With no `sealed` declaration the recorded mode is `event_end`, the
+operation that performed the release; a declaration records its own mode. It MUST NOT contain any released plaintext, so it can be published or
 archived without leaking a writeup or solver.
 
 ### 27.3 What it does not protect against
@@ -3082,7 +3088,9 @@ policy checks that are the platform's, not the container's.
 
 An absent field is omitted rather than emitted as `null`. The descriptor is derived
 data: it MUST be projected from the manifest that was packed, so it cannot disagree
-with the bundle's committed bytes.
+with the bundle's committed bytes. A `runtime.ports[0].container` or `runtime.readiness.tcp`
+outside `1..=65535` is a policy error reported by descriptor validation — and
+therefore by `ctf pack` — never a silently omitted field.
 
 ### 29.2 Digest-pinned images
 
