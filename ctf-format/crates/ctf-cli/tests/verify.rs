@@ -485,9 +485,10 @@ fn declared_name_id(manifest: &[u8], map: &str, key: &str) -> u16 {
 
 /// Rebuild `packed` with the module sections supplied, keeping its manifest.
 ///
-/// `ctf pack` reserves module names but emits no module sections, so a bundle that
-/// carries one is the stricter case the gate must prefer. Each module's `name_id`
-/// comes from the manifest's own name table.
+/// Each module's `name_id` comes from the manifest's own name table. The fixture
+/// already packs with its generator beside the document, which `ctf pack` now
+/// carries: this helper is how a test chooses exactly which module sections a
+/// bundle has, including none ([`without_module_sections`]).
 fn with_module_sections(packed: &str, generator: Option<&[u8]>, solver: Option<&[u8]>) -> Vec<u8> {
     let file = std::fs::read(packed).unwrap();
     let parsed = Bundle::parse(&file).unwrap();
@@ -498,6 +499,21 @@ fn with_module_sections(packed: &str, generator: Option<&[u8]>, solver: Option<&
         .expect("a bundle has a manifest");
     let manifest_bytes = parsed.section_bytes(manifest).unwrap().into_owned();
     rebuild_with_modules(&manifest_bytes, generator, solver)
+}
+
+/// Rebuild `packed` with no module sections, so the gate must fall back to the
+/// authoring document. `ctf pack` carries a generator it finds beside the document,
+/// which would otherwise hide the document-side path a test is exercising.
+fn without_module_sections(packed: &str) -> Vec<u8> {
+    let file = std::fs::read(packed).unwrap();
+    let parsed = Bundle::parse(&file).unwrap();
+    let manifest = parsed
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .expect("a bundle has a manifest");
+    let manifest_bytes = parsed.section_bytes(manifest).unwrap().into_owned();
+    rebuild_with_modules(&manifest_bytes, None, None)
 }
 
 /// Rebuild a bundle around `manifest_bytes`, adding the module sections supplied.
@@ -938,7 +954,10 @@ fn a_gate_input_error_does_not_leak_its_path() {
     let dir = TempDir::new("no-module");
     let secret = "00".repeat(32);
     let (_seed, expected) = reference(&secret);
-    let (source, bundle) = gate_fixture(&dir, "leak", &expected);
+    let (source, packed) = gate_fixture(&dir, "leak", &expected);
+    // Drop the embedded generator so the gate has to read the document's module.
+    let bundle = dir.path("leak.ctf");
+    std::fs::write(&bundle, without_module_sections(&packed)).unwrap();
 
     // Same document, but the generator module now points at a path that does not
     // exist. That path is exactly what `load_gate_setup`'s error names, and the
@@ -1411,7 +1430,11 @@ fn a_declared_module_with_a_missing_document_file_is_unverified() {
     let dir = TempDir::new("deferred-missing");
     let secret = "00".repeat(32);
     let (_seed, expected) = reference(&secret);
-    let (source, bundle) = gate_fixture(&dir, "deferred", &expected);
+    let (source, packed) = gate_fixture(&dir, "deferred", &expected);
+    // No carried generator, so the document is the only source for the module and
+    // its deferred read is the code under test.
+    let bundle = dir.path("deferred.ctf");
+    std::fs::write(&bundle, without_module_sections(&packed)).unwrap();
 
     let document = dir.path("deferred-missing.yaml");
     let text = std::fs::read_to_string(&source)

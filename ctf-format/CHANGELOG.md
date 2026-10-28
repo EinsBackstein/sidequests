@@ -8,6 +8,36 @@ From 1.0.0 the 0.3 on-disk byte layout is **frozen**. A breaking change to it
 requires a new format major version, not a minor release; the *format* version
 remains 0.3 while this document and the crates are revised at 1.0.0.
 
+## [Unreleased]
+
+**No byte-layout change:** `version_minor` stays `3` and both goldens are
+byte-identical (`minimal.ctf` 4344 B `a23cd1b3…`, `demo.ctf` 18328 B `ce1a930e…`).
+Packing a document that ships its generator now emits an existing 0.3 section kind
+(`generator`, §5.2 kind 3); no header, record, root, or transcript changed.
+
+### Added — `ctf pack` carries a declared generator module
+
+A document that declares `generate.wasm` and ships that file beside the authoring
+document now packs the module as a `generator` section, under the `names` entry the
+declaration already references (§7.6). A bundle that carries the section needs no
+challenge image to run it: `ctf verify` uses the section's plaintext, so the gate
+passes in a directory where `gen.wasm` does not exist.
+
+A declared file that is absent still packs, and `ctf pack` prints a note: the
+bundle declares the module but the challenge image must supply it (§31 B1), which
+is how every bundle written before this change was deployed. The solver is
+deliberately not embedded — R6 requires a solver section to be `SEALED`, R21
+requires `SEALED` to be encrypted, and the reference tooling holds no event key.
+
+### Added — `examples/zipception`
+
+`zipception` from `EinsBackstein/Challenges` is now a worked example: a strict
+generator that builds the 150 nested archives per subject, an in-memory `§25`
+solver, a player solver, and a `play` tool that renders a subject's artifact from
+the bundle alone. `build.sh` builds, validates, packs, gates, then deploys the
+bundle into a scratch directory and solves the archive it generates. CI runs the
+same path on Linux.
+
 ## [1.0.0] — 2026-10-28
 
 v1.0.0 freeze. **No byte-layout change:** `version_minor` stays `3` and both

@@ -138,3 +138,94 @@ generate:
 ");
     assert_eq!(doc.validate(), Vec::new());
 }
+
+/// A scratch directory removed on drop.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "ctf-generator-declaration-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        Self(p)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const GENERATOR_DOC: &str = "\
+flag: derived
+generate:
+  wasm: gen.wasm
+  determinism: strict
+  outputs:
+    - { name: chal, player_visible: true }
+";
+
+/// The module beside the document is copied into the bundle as a `generator`
+/// section, so the file alone is enough to run the challenge (spec §5.2 kind 3,
+/// §7.6). The bytes are never validated here: carrying is the packer's job, and
+/// running is the host's.
+#[test]
+fn a_generator_beside_the_document_is_embedded() {
+    let module = b"\0asm\x01\0\0\0";
+    let dir = TempDir::new("embedded");
+    std::fs::write(dir.0.join("gen.wasm"), module).unwrap();
+
+    let bundle = pack::pack_with_root(&doc(GENERATOR_DOC), 1, &dir.0).unwrap();
+    let parsed = ctf_format::Bundle::parse(&bundle).unwrap();
+    let name_id = u16::try_from(
+        parsed
+            .manifest
+            .names()
+            .iter()
+            .position(|n| *n == "gen.wasm")
+            .expect("`generate.wasm` is a name-table entry"),
+    )
+    .unwrap();
+    let record = parsed.section(name_id).expect("a generator section");
+    assert_eq!(record.kind, ctf_format::SectionKind::Generator);
+    // A generator is platform input, never a served artifact.
+    assert_eq!(record.flags, ctf_format::SectionFlags::empty());
+    assert!(
+        !record
+            .flags
+            .contains(ctf_format::SectionFlags::PLAYER_VISIBLE)
+    );
+    assert_eq!(&*parsed.section_bytes(record).unwrap(), module);
+}
+
+/// The same document with no file beside it still packs: spec §31 B1 lets the
+/// challenge image carry the module, and a bundle that predates embedding has no
+/// section here. The declaration stays in the manifest either way.
+#[test]
+fn a_missing_generator_file_packs_without_a_section() {
+    let dir = TempDir::new("missing");
+    let bundle = pack::pack_with_root(&doc(GENERATOR_DOC), 1, &dir.0).unwrap();
+    let parsed = ctf_format::Bundle::parse(&bundle).unwrap();
+    let name_id = u16::try_from(
+        parsed
+            .manifest
+            .names()
+            .iter()
+            .position(|n| *n == "gen.wasm")
+            .expect("`generate.wasm` is a name-table entry"),
+    )
+    .unwrap();
+    assert!(
+        parsed.section(name_id).is_none(),
+        "no bytes, no section: the declaration is carried, the module is not"
+    );
+    assert!(
+        parsed.manifest.declaration("generate").is_some(),
+        "the declaration survives without the bytes"
+    );
+}

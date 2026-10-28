@@ -20,7 +20,10 @@ and `readiness: { tcp: 80, ... }`.
 manifest carries the declaration keys (spec §7.6); it does not run a generator,
 fetch an image, or boot a container. The fixtures therefore test the authoring
 surface and the platform descriptor against realistic declarations — not the
-upstream Python.
+upstream Python. A generator file that sits beside the document is copied into
+the bundle as a `generator` section; these fixtures' runtime challenges do not
+need it for the descriptor, and `mental_overflow`'s is embedded because it is
+vendored next to its YAML.
 
 ## The image digest is a placeholder
 

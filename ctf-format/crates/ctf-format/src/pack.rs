@@ -6,15 +6,19 @@
 //! # What this does, and what it deliberately does not
 //!
 //! It turns a validated [`ChallengeDoc`] into the required manifest keys, the
-//! name table, and the declaration keys of §7.6, then writes a bundle with a single
-//! manifest section. That is the minimum viable challenge — an OSINT challenge with
-//! no artifacts — and the shape R6 is measured against.
+//! name table, and the declaration keys of §7.6, then writes a bundle with the
+//! manifest section, the declared generator when the author ships it beside the
+//! document, and one section per inline artifact. That is a deployable
+//! challenge — an OSINT challenge with no generator is just the manifest — and
+//! the shape R6 is measured against.
 //!
 //! It does **not** run a generator, fetch external payloads, or encrypt anything:
-//! those need phase 3 and 4. A challenge that declares `generate` packs with its
-//! declaration intact and its output names reserved in the name table, ready for
-//! the artifacts a later pass will add. The bundle is **unsigned**; signing is
-//! [`crate::bundle::sign_bundle`].
+//! those need phase 3 and 4. The generator module is copied in as bytes
+//! ([`SectionKind::Generator`], spec §5.2 kind 3); a bundle that carries it needs
+//! no challenge image to run it. When the file is absent the declaration still
+//! packs and the module has to travel with the image instead (spec §31 B1), which
+//! is what bundles written before embedding relied on. The bundle is **unsigned**;
+//! signing is [`crate::bundle::sign_bundle`].
 //!
 //! # The name table is synthesized, and its order is stable
 //!
@@ -330,6 +334,31 @@ fn external_entries(
     Ok(out)
 }
 
+/// The bytes of the declared generator module, when the author ships the file
+/// beside the document.
+///
+/// A declared module that is absent is **not** an error: spec §31 B1 lets the
+/// challenge image carry it instead, which is how bundles written before modules
+/// were embedded were deployed. It does mean the bundle is not self-contained, so
+/// `ctf pack` says so on stderr. Any other read failure is the author's and names
+/// `generate.wasm`, like an unreadable artifact names `artifacts[i].source`.
+fn read_generator(
+    doc: &ChallengeDoc,
+    root: &Path,
+) -> core::result::Result<Option<Vec<u8>>, PackError> {
+    let Some(wasm) = doc.generate.as_ref().and_then(|g| g.wasm.as_deref()) else {
+        return Ok(None);
+    };
+    match std::fs::read(root.join(wasm)) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(PackError::Invalid(vec![ValidationIssue::new(
+            "generate.wasm",
+            format!("could not read `{wasm}`: {e}"),
+        )])),
+    }
+}
+
 fn text(s: &str) -> Value {
     Value::Text(s.to_owned())
 }
@@ -420,8 +449,10 @@ pub fn pack_with_descriptor_root(
         return Err(PackError::Invalid(read_issues));
     }
 
+    let generator = read_generator(doc, root)?;
+
     let bytes = manifest.encode().map_err(PackError::Format)?;
-    let mut sections = Vec::with_capacity(1 + payloads.len());
+    let mut sections = Vec::with_capacity(2 + payloads.len());
     sections.push(SectionSpec::inline(
         SectionKind::Manifest,
         0,
@@ -429,6 +460,33 @@ pub fn pack_with_descriptor_root(
         &bytes,
     ));
     let names = manifest.names();
+    if let Some(module) = &generator {
+        // §7.6: `generate.wasm` names a `names` entry, and the section's identity
+        // is that `name_id`. A host that runs the gate prefers these bytes to the
+        // authoring input, so the bundle alone is enough to generate a challenge.
+        let wasm = doc
+            .generate
+            .as_ref()
+            .and_then(|g| g.wasm.as_deref())
+            .ok_or(PackError::Format(Error::Inconsistent {
+                what: "a generator was read for a document that declares none",
+            }))?;
+        let name_id = names
+            .iter()
+            .position(|n| *n == wasm)
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or(PackError::Format(Error::Inconsistent {
+                what: "the generator module has no name-table entry after a successful manifest build",
+            }))?;
+        // A generator is not player material: it is an input to the platform's
+        // host, never a served artifact (§5.2 kind 3).
+        sections.push(SectionSpec::inline(
+            SectionKind::Generator,
+            name_id,
+            SectionFlags::empty(),
+            module,
+        ));
+    }
     for (artifact, payload) in doc.artifacts.iter().zip(&payloads) {
         let name_id = names
             .iter()

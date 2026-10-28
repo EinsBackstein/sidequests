@@ -659,6 +659,22 @@ fn run_pack(args: &PackArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // §31 B1: a module that is not beside the document still packs, but the image
+    // has to carry it. Saying so is the difference between an author who knows
+    // their bundle is not self-contained and one who finds out at deploy time.
+    let missing = doc
+        .generate
+        .as_ref()
+        .and_then(|g| g.wasm.as_deref())
+        .filter(|wasm| !root.join(wasm).is_file());
+    if let Some(wasm) = missing {
+        eprintln!(
+            "ctf: {path}: note: `{}` is not beside the document, so the bundle declares \
+             the generator but does not carry it; the challenge image must supply it \
+             (spec §31 B1)",
+            escape_terminal(wasm)
+        );
+    }
     if let Err(e) = std::fs::write(out, &file) {
         eprintln!("ctf: {out}: {e}");
         return ExitCode::FAILURE;
