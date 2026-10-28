@@ -2744,9 +2744,9 @@ and a `SEALED` section MUST be encrypted (R21), so a gate that holds no key for 
 bundle's solver cannot run it and reports `unverified`; the reference implementation
 holds none. When more than one condition holds, the record MAY name any of them.
 
-`unverified` is the state for a gate that was **not run**: either an input it needs
-is absent, or a declaration forbids the gate. A gate that ran and could not complete
-a stage — a module that failed the determinism check or could not be sandboxed — is
+`unverified` is the state for a gate that was **not run**: an input it needs is
+absent, a declaration forbids the gate, or a declaration leaves it unknown whether
+the gate may run. A gate that ran and could not complete a stage — a module that failed the determinism check or could not be sandboxed — is
 `failed`, not `unverified`, and S9 requires the stage to be named. The distinction is the difference between "there was
 nothing to run" and "it ran and broke".
 
