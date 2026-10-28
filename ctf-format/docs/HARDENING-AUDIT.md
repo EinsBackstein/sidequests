@@ -1,7 +1,7 @@
 # Audit — parser hardening checklist (design §14)
 
 **Date:** 2026-10-28
-**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.10
+**Format version:** 0.3 (`version_minor` 3) · **Release:** 0.13.11
 **Source checklist:** `docs/FORMAT-DESIGN.md` §14, lines 800–831.
 **Method:** every claim below was verified by reading the enforcement site and the
 tests that pin it in the current tree, not inferred from the design text. Line
@@ -113,7 +113,7 @@ Adding `-rss_limit_mb` to CI remains a hardening follow-up; the phase-8
 
 ### Scope
 
-This audit reflects the tree at release 0.13.10; the post-0.13.0 audit rounds
+This audit reflects the tree at release 0.13.11; the post-0.13.0 audit rounds
 (#114–#118) changed reader behaviour, and the 0.13.2–0.13.4 gate corrections changed
 CLI gate resolution and its record (0.13.5 corrects 0.13.4's record-boundary wording), not any invariant this checklist tracks. It
 records gaps as tickets; no code was changed. Trailing-byte rejection, the CBOR
