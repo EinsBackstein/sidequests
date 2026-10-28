@@ -16,10 +16,10 @@ no header, section, footer, commitment root, or signature transcript moved.
 ### Fixed — Go did not resolve the suite registry (§19.2 S2/S3)
 
 The reference reader rejected an unregistered `suite_id`, but the independent Go
-reader still computed the commitment root with BLAKE3 and never called
-`LookupSuite`, so a suite-99 bundle parsed and `VerifyAll` reported no findings. Go
-now resolves the registry before the root; `ParseHeader` still accepts any id, so
-§19.2 S1 is preserved.
+reader computed the commitment root with BLAKE3 without resolving the registry
+first. A suite-99 bundle with no signed footer (so F10 never looked the suite up)
+parsed and `VerifyAll` reported no findings. Go now resolves the registry before
+the root; `ParseHeader` still accepts any id, so §19.2 S1 is preserved.
 
 ### Fixed — Go `VerifyChunk` double-sliced and could panic (§9, C5/C7)
 
