@@ -284,12 +284,14 @@ the orchestrator project consumes it (design §2).
 - [x] **60** Platform ingest descriptor — §29, `descriptor.rs`; `ctf pack` emits
       `<out>.descriptor.json`.
 - [x] **61** Digest-pinned images — §29.2, `policy::check_image_ref`; enforced at
-      authoring time and as a read-time policy pass (`ctf inspect`, `ctf verify`).
+      authoring time and as a read-time policy pass in `ctf inspect`, `ctf verify`,
+      `ctf run`, `ctf serving-manifest`, and `ctf release`.
 - [x] **62** Seed and flag injection — §26, `seed_source.rs`; `CTF_SEED`/`/ctf/seed`,
       `CTF_FLAG`/`/ctf/flag`, `/ctf/data`, and a container with no seed fails.
 - [x] **63** Bundle as an OCI artifact — §30, `oci.rs`; media type
       `application/vnd.ctf.bundle.v1`, `ctf oci-export`/`oci-import` round-trip
-      byte-for-byte, and export copies the bundle without needing to parse it.
+      byte-for-byte, and export copies the bundle without needing to read the whole
+      container (a valid header is still required).
 - [x] **65** Static artifact serving manifest — §28, `serving.rs`,
       `ctf serving-manifest`; sealed sections never appear.
 - [x] **66** Sealed release interop — §27, `release.rs`, `ctf release`; the offline

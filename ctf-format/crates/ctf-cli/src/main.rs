@@ -418,7 +418,8 @@ struct RunArgs {
     /// The authoring YAML file.
     challenge: String,
 
-    /// The event secret, 64 lowercase hex digits (spec §22.2). Never written anywhere.
+    /// The event secret, 64 hex digits (32 bytes) by this CLI's contract.
+    /// §22.2 leaves the library's secret length unconstrained. Never written anywhere.
     #[arg(long)]
     secret: String,
 
@@ -459,7 +460,8 @@ struct VerifyArgs {
     #[arg(long, requires = "secret")]
     challenge: Option<String>,
 
-    /// The event secret, 64 hex digits (spec §22.2). Never written to the artifact.
+    /// The event secret, 64 hex digits (32 bytes) by this CLI's contract.
+    /// §22.2 leaves the library's secret length unconstrained. Never written to the artifact.
     #[arg(long, requires = "challenge")]
     secret: Option<String>,
 
@@ -1595,10 +1597,10 @@ fn bundle_module(
 
 /// Report the spec §29.2 read-time policy issues for `manifest` on stderr.
 ///
-/// Diagnostic only: it changes no exit code, stdout line, or artifact. Both the key
-/// and the message can carry author-supplied text (an origin extracted from
-/// `description`, a flagged image reference), so both are Debug-escaped so a crafted
-/// manifest cannot inject terminal escapes.
+/// Diagnostic only: it changes no exit code, stdout line, or artifact. The message
+/// can carry author-supplied text (an origin extracted from `description`, a flagged
+/// image reference), so it is Debug-escaped and a crafted manifest cannot inject a
+/// newline or a terminal escape. The key is this crate's static constant.
 fn report_policy(manifest: &Manifest) {
     for issue in policy::check_manifest(manifest) {
         eprintln!("policy: {}: {:?}", issue.key(), issue.message());

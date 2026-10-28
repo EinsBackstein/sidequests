@@ -46,15 +46,20 @@ media type.
 ### Fixed — read-time policy pass (§29.2 P3)
 
 The digest-pinning check ran at authoring time only, although P3 requires it again
-at read time. `ctf inspect` now reports policy issues in its output and `ctf verify`,
-`ctf run`, `ctf serving-manifest`, and `ctf release` report them on stderr; none
-changes its record, output, or exit code, and none treats a policy failure as a
-parse failure. §29.2 names that reporting and the commands that apply it.
+at read time. `ctf inspect` now names policy issues in its human output, and `ctf
+verify`, `ctf run`, `ctf serving-manifest`, and `ctf release` report them on stderr.
+None changes a stable machine record or an exit code, and none treats a policy
+failure as a parse failure. §29.2 names that reporting and the commands that apply
+it.
 
-The CLI keeps its own `--secret` contract — exactly 64 hex digits (32 bytes) — and
-now enforces it; an empty or short secret was previously accepted and would have
-made the derived flag publicly computable. The library derivation itself accepts any
-length, as §22.2 states.
+### Fixed — the CLI enforces its own `--secret` contract
+
+§22.2 fixes only that `seed` is 32 bytes, so `--secret` has its own contract:
+exactly 64 hex digits, or 32 bytes. Once the library's length check moved out, the
+CLI had none, and `--secret ""` would have derived a flag from an empty, publicly
+computable input. `ctf run` and `ctf verify` now reject anything but 32 bytes with a
+message naming the contract. The library derivation itself accepts any length, as
+§22.2 states.
 
 ### Fixed — Go diagnostic for a 0.3 file missing `CONTAINER_V1`
 
@@ -913,8 +918,9 @@ context, even with a valid key. Envelopes serialize as a canonical-CBOR map
 "ctf/seed/v1", info = LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id))`;
 `flag = base32_lower(HMAC-SHA-256(seed, "ctf/flag/v1")[0..10])` (16 chars, 80 bits);
 `stage_key(flag(N-1), N) = HKDF-SHA-256(ikm = flag, salt = "ctf/stage/v1",
-info = u32_le(N))`. `event_secret` must be 32 bytes and never enters a bundle; a
-test asserts no byte of a written bundle contains the flag or the secret.
+info = u32_le(N))`. `event_secret` was treated as 32 bytes and never enters a bundle; a
+test asserts no byte of a written bundle contains the flag or the secret. (0.13.9
+lifts the library's length rule; see §22.2 and that release's note.)
 `chal_version` is a fixed-width `u64_le` and is deliberately not length-prefixed,
 where the design sketch wrote `LP(chal_version)`.
 
