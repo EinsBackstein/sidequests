@@ -10,6 +10,9 @@
 
 use std::process::Command;
 
+use ctf_format::cbor::Value;
+use ctf_format::{Bundle, SectionFlags, SectionKind, SectionSpec, write_bundle};
+
 const BIN: &str = env!("CARGO_BIN_EXE_ctf");
 
 struct TempDir(std::path::PathBuf);
@@ -86,6 +89,37 @@ fn generator_wasm(block: &[u8]) -> Vec<u8> {
 )
 "#,
         escape(block),
+        block.len()
+    );
+    wat::parse_str(&src).unwrap()
+}
+
+/// A generator whose output changes with its own call count (rule G9): each call
+/// writes its call number over the block byte at `mutate_at`. Used to prove the
+/// gate did not run.
+fn stateful_generator_wasm(block: &[u8], mutate_at: usize) -> Vec<u8> {
+    let src = format!(
+        r#"(module
+  (memory (export "memory") 1)
+  (global $n (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (func (export "ctf_alloc") (param i32) (result i32) i32.const 8192)
+  (func (export "ctf_generate") (param i32 i32) (result i32)
+    i32.const {}
+    i32.const 65
+    global.get $n
+    i32.add
+    i32.store8
+    global.get $n
+    i32.const 1
+    i32.add
+    global.set $n
+    i32.const 1024)
+  (func (export "ctf_output_len") (result i32) i32.const {})
+)
+"#,
+        escape(block),
+        1024 + mutate_at,
         block.len()
     );
     wat::parse_str(&src).unwrap()
@@ -277,6 +311,65 @@ fn run_persists_an_unverified_status_distinctly() {
     );
 }
 
+/// Spec §23.7: `determinism: none` declares that reproducibility is not required,
+/// so `ctf run` must not run the gate. The module varies across calls, so a gate
+/// run would report `failed`; observing `unverified` proves it did not run.
+#[test]
+fn run_does_not_run_the_gate_for_determinism_none() {
+    let dir = TempDir::new("determinism-none");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let block = generator_block(&expected, &[("artifact.bin", b"artifact bytes")]);
+    // The first artifact's data begins after the count, the name length and name,
+    // and the data length.
+    let data_at = 4 + 4 + "artifact.bin".len() + 4;
+    std::fs::write(
+        dir.path("none-gen.wasm"),
+        stateful_generator_wasm(&block, data_at),
+    )
+    .unwrap();
+    std::fs::write(dir.path("none-solver.wasm"), solver_wasm(&expected)).unwrap();
+    let source = dir.path("none.yaml");
+    std::fs::write(
+        &source,
+        format!(
+            "spec: 1\nid: {ID}\nname: Gate Test\nflag: derived\n\
+             generate:\n  wasm: none-gen.wasm\n  determinism: none\n  outputs:\n    \
+             - {{ name: artifact.bin, player_visible: true }}\n\
+             verify:\n  solver: none-solver.wasm\n  expect: flag\n  offline: true\n"
+        ),
+    )
+    .unwrap();
+
+    let status = dir.path("none.status.json");
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--status", &status]);
+    assert!(ok, "`none` is not a failure: {stdout}{stderr}");
+    assert!(
+        stdout.contains("gate          unverified"),
+        "status: {stdout}"
+    );
+    assert!(
+        stdout.contains("determinism not run"),
+        "the condition is named: {stdout}"
+    );
+    assert!(
+        !stderr.contains("not deterministic"),
+        "the gate must not have run: {stderr}"
+    );
+
+    let record = std::fs::read_to_string(&status).unwrap();
+    assert!(
+        record.contains("\"status\": \"unverified\""),
+        "record: {record}"
+    );
+    assert!(
+        record.contains("determinism: none"),
+        "the record says why: {record}"
+    );
+    assert!(record.contains("\"generator_root\": null"), "{record}");
+    assert!(record.contains("\"runs\": null"), "{record}");
+}
+
 /// Spec §25.6/S10: `--bundle` names the bundle the record describes. A document for
 /// another challenge must not have its verdict persisted beside that bundle.
 #[test]
@@ -305,4 +398,107 @@ fn run_refuses_to_attach_the_record_to_another_challenge() {
         !std::path::Path::new(&format!("{bundle}.status.json")).exists(),
         "a refused attribution writes no record"
     );
+}
+
+/// Replace or insert `key` inside a decoded manifest's `generate` map.
+fn set_generate_key(manifest: &mut Value, key: &str, value: Value) {
+    let Value::Map(entries) = manifest else {
+        panic!("a manifest is a map");
+    };
+    let (_, generate) = entries
+        .iter_mut()
+        .find(|(k, _)| k.as_text() == Some("generate"))
+        .expect("the fixture declares generate");
+    let Value::Map(inner) = generate else {
+        panic!("`generate` is a map");
+    };
+    match inner.iter_mut().find(|(k, _)| k.as_text() == Some(key)) {
+        Some((_, slot)) => *slot = value,
+        None => inner.push((Value::Text(key.to_owned()), value)),
+    }
+}
+
+/// The gate fixture's bundle with its manifest `generate.determinism` replaced.
+///
+/// `ctf pack` cannot produce an unrecognised mode — the authoring validator rejects
+/// it — so the bundle is rebuilt through `ctf_format` from the packed manifest. The
+/// document still names the modules, and a bundle that declares them without
+/// carrying them is gated on the document's bytes (§25.6).
+fn bundle_with_determinism(
+    dir: &TempDir,
+    tag: &str,
+    expected: &str,
+    mode: Value,
+) -> (String, String, String) {
+    let source = fixture(dir, tag, expected);
+    let packed = dir.path(&format!("{tag}-packed.ctf"));
+    let (ok, stdout, stderr) = run(&["pack", &source, "--out", &packed]);
+    assert!(ok, "pack failed: {stdout}{stderr}");
+    let file = std::fs::read(&packed).unwrap();
+    let parsed = Bundle::parse(&file).unwrap();
+    let record = parsed
+        .sections
+        .iter()
+        .find(|r| r.kind == SectionKind::Manifest)
+        .expect("a bundle has a manifest");
+    let mut manifest = Value::decode(&parsed.section_bytes(record).unwrap()).unwrap();
+    set_generate_key(&mut manifest, "determinism", mode);
+    let manifest_bytes = manifest.encode().unwrap();
+    let bundle = dir.path(&format!("{tag}-patched.ctf"));
+    let bytes = write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &manifest_bytes,
+        )],
+    )
+    .unwrap();
+    std::fs::write(&bundle, bytes).unwrap();
+    (source, packed, bundle)
+}
+
+/// Spec §23.7/§25.6: a `determinism` value that is not one of the three modes is not
+/// a mode. A bundle that would otherwise pass — generator, solver, `verify.offline`,
+/// no `runtime` — must be `unverified`, never `passed`, on the bundle-override path.
+#[test]
+fn run_reports_an_unrecognised_determinism_mode_as_unverified() {
+    let dir = TempDir::new("determinism-unrecognised");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let (source, control, bundle) = bundle_with_determinism(
+        &dir,
+        "unrecognised",
+        &expected,
+        Value::Text("nope".to_owned()),
+    );
+
+    // The packed bundle declares `strict`, so the same fixture passes; only the
+    // replaced value can explain a non-`passed` outcome.
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &control]);
+    assert!(ok, "the control gate passes: {stdout}{stderr}");
+    assert!(stdout.contains("gate          passed"), "{stdout}");
+
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--bundle", &bundle]);
+    assert!(ok, "unverified is not a failure: {stdout}{stderr}");
+    assert!(stdout.contains("gate          unverified"), "{stdout}");
+    assert!(!stdout.contains("gate          passed"), "{stdout}");
+    assert!(
+        stdout.contains("not a mode"),
+        "the reason names the condition: {stdout}"
+    );
+    assert!(
+        !stderr.contains("not deterministic"),
+        "the gate must not have run: {stderr}"
+    );
+
+    let record = std::fs::read_to_string(format!("{bundle}.status.json")).unwrap();
+    assert!(record.contains("\"status\": \"unverified\""), "{record}");
+    assert!(
+        record.contains("not a mode"),
+        "the record says why: {record}"
+    );
+    assert!(record.contains("\"generator_root\": null"), "{record}");
+    assert!(record.contains("\"runs\": null"), "{record}");
 }

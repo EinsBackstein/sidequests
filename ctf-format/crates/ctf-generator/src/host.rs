@@ -95,6 +95,9 @@ pub enum GeneratorError {
     Nondeterministic { run: usize },
     /// The two engines disagreed (rule G10).
     EngineDisagreement,
+    /// The module named an output `generate.outputs` does not declare (rule G8).
+    /// Carries the output name, which is manifest text rather than a path.
+    UndeclaredOutput(String),
 }
 
 impl core::fmt::Display for GeneratorError {
@@ -130,6 +133,14 @@ impl core::fmt::Display for GeneratorError {
             }
             Self::EngineDisagreement => f.write_str(
                 "the two engines produced different output for the same module and seed",
+            ),
+            // The name comes from guest output, so it is escaped: a crafted module
+            // must not be able to inject a newline or terminal escape into the
+            // gate's own diagnostic stream (spec §13).
+            Self::UndeclaredOutput(name) => write!(
+                f,
+                "generator named output `{}`, which `generate.outputs` does not declare (rule G8)",
+                name.escape_debug()
             ),
         }
     }
@@ -216,6 +227,11 @@ impl Generator {
     /// Calling twice in one instance is what catches a generator whose output
     /// depends on its own call count or on a global that changes between calls
     /// (rule G9). A fresh instance would hide exactly that class of state.
+    ///
+    /// Fuel is reset to `limits.fuel` before every call. The limit bounds *one*
+    /// run (rule G5); carrying run 1's remaining fuel into run 2 would give the
+    /// second run a smaller budget and fail a generator that legitimately spends
+    /// most of it, turning a limit into false nondeterminism.
     pub fn run_repeated(
         &self,
         seed: &[u8],
@@ -225,6 +241,9 @@ impl Generator {
         let (mut store, instance) = self.instantiate(limits)?;
         let mut out = Vec::with_capacity(runs);
         for _ in 0..runs {
+            store
+                .set_fuel(limits.fuel)
+                .map_err(|_| GeneratorError::OutOfFuel)?;
             out.push(call_generate(&mut store, &instance, seed, limits)?);
         }
         Ok(out)

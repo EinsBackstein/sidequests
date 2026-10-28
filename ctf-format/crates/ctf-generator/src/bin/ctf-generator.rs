@@ -13,6 +13,12 @@
 //! The seed comes from `CTF_SEED` or `/ctf/seed` (spec §26). The generator's flag is
 //! compared against `CTF_FLAG` when that is injected, so a generator that disagrees
 //! with the platform's oracle fails at start rather than for the first player.
+//!
+//! The runtime container carries the module, not the manifest, so this executable
+//! cannot apply the two declaration-dependent checks the ingest gate applies: G8's
+//! `generate.outputs` membership and §23.7's mode. Those are enforced by `ctf run`
+//! and `ctf verify`, which hold both. The runtime still re-checks every output name
+//! for path traversal, because it turns a module-supplied name into a filename.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

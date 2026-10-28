@@ -7,6 +7,42 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.10] — 2026-10-28
+
+Determinism-gate corrections. **No byte-layout change:** `version_minor` stays `3`,
+both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and no
+header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — `determinism: none` is honoured (§23.7)
+
+A document declaring `none` with a generator, a solver, and `verify.offline`
+declared still ran the determinism gate, so a generator whose output varies per call
+was recorded `failed` ("generator run 1 differed") instead of not being gated at
+all. The gate now returns `unverified` for `none` and `flag_only` before touching
+either module, and §23.7 and §25.6 state that §25.5's first stage cannot run in
+those modes. A `determinism` value outside the three modes was silently read as
+absent, so a typo could run the gate and be recorded `passed`; it is now
+`unverified` too, because no host can know whether it may run. An absent declaration
+is still not a suppression.
+
+### Fixed — G8's declared-output rule is enforced (§23.3, §23.8)
+
+The host never compared the generator's output block against `generate.outputs`, so
+a module could emit an undeclared artifact. The gate now rejects the run at the
+determinism stage, naming the offending output, which keeps the record's
+`generator_root`, `cross_engine`, and `runs` null. The name is guest text, so the
+diagnostic escapes control characters (§13) rather than letting a crafted module
+forge the gate's own status lines. An emitted subset of the declared outputs remains
+legal.
+
+### Fixed — fuel is a per-run budget (§23.6, G5, G9)
+
+Fuel was set once at instantiation and shared by both G9 runs, so the second run
+received the first run's remainder and a generator that legitimately spends most of
+the budget failed with `OutOfFuel` on the replay — a resource limit turning into
+false nondeterminism. Each run now starts with the full fuel count, so the two runs
+differ only in guest state. §23.6 states the per-run rule.
+
 ## [0.13.9] — 2026-10-28
 
 Envelope, derivation, and platform-policy corrections. **No byte-layout change:**

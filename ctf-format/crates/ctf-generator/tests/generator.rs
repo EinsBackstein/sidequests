@@ -84,6 +84,32 @@ const MISSING_EXPORT: &str = r#"
 )
 "#;
 
+/// A well-formed module whose single call burns roughly three quarters of a small
+/// fuel budget, then returns the valid block. Fuel bounds one run (rule G5); the
+/// gate's second run must get the whole budget again (rule G9).
+fn fuel_spending(iterations: u32) -> String {
+    format!(
+        r#"
+(module
+  (memory (export "memory") 1)
+  (data (i32.const 1024) "\01\00\00\00\04\00\00\00chal\01\00\00\00A\03\00\00\00abc")
+  (func (export "ctf_alloc") (param i32) (result i32) i32.const 0)
+  (func (export "ctf_generate") (param i32 i32) (result i32)
+    (local $i i32)
+    (local.set $i (i32.const {iterations}))
+    (loop $l
+      local.get $i
+      i32.const 1
+      i32.sub
+      local.tee $i
+      br_if $l)
+    i32.const 1024)
+  (func (export "ctf_output_len") (result i32) i32.const 24)
+)
+"#
+    )
+}
+
 fn wat(source: &str) -> Vec<u8> {
     wat::parse_str(source).unwrap()
 }
@@ -152,6 +178,28 @@ fn an_endless_loop_is_stopped_by_fuel() {
         .run(b"", &limits)
         .unwrap_err();
     assert_eq!(err, GeneratorError::OutOfFuel);
+}
+
+/// Spec §23.6/§23.8 G9: fuel bounds one run, so each of the gate's in-process runs
+/// starts with the full budget. Without the reset, run 2 gets what run 1 left and a
+/// near-limit generator fails with `OutOfFuel` — a budget artefact reported as a
+/// stage failure rather than as nondeterminism.
+#[test]
+fn each_repeated_run_gets_the_full_fuel_budget() {
+    // Measured: one call costs ~300_000 fuel, three quarters of this budget.
+    let limits = Limits {
+        fuel: 400_000,
+        ..Limits::default()
+    };
+    let generator = Generator::new(&wat(&fuel_spending(60_000))).unwrap();
+
+    // One run fits the budget.
+    assert!(generator.run(b"", &limits).is_ok());
+
+    // Two runs in one instance must also fit, each with its own budget.
+    let runs = generator.run_repeated(b"", &limits, 2).unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].output_root(), runs[1].output_root());
 }
 
 #[test]

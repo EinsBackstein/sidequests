@@ -1,6 +1,6 @@
 [package]
 name = "ctf-generator"
-version = "0.13.9"
+version = "0.13.10"
 description = "Deterministic WebAssembly generator host for the .ctf format"
 edition.workspace = true
 rust-version.workspace = true

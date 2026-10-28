@@ -11,6 +11,72 @@ use crate::host::{Generator, GeneratorError, Limits};
 use crate::second::{run_second_engine, second_engine_supported};
 use crate::solver::Solver;
 
+/// A declared `generate.determinism` mode (spec §23.7).
+///
+/// The mode fixes whether a determinism gate exists at all. It is deliberately not
+/// an `Option<Self>` on [`OfflineGate`]: "no declaration" is not a suppression — the
+/// container does not validate §7.6 shapes, so an undeclared mode still runs the
+/// gate. See [`DeterminismDeclaration`] for the three-way input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeterminismMode {
+    /// A generator is required and must pass the determinism gate.
+    Strict,
+    /// No generator exists, so there is nothing to gate.
+    FlagOnly,
+    /// A generator is declared, but reproducibility is not required and the gate is
+    /// not run.
+    None,
+}
+
+impl DeterminismMode {
+    /// Parse one of §23.7's mode names. `None` for any other text, which is
+    /// [`DeterminismDeclaration::Unrecognized`] rather than absent.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "strict" => Some(Self::Strict),
+            "flag_only" => Some(Self::FlagOnly),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// Whether the mode declares that no determinism gate exists (§23.7).
+    ///
+    /// `flag_only` and `none` alike suppress the gate: neither can have a generator
+    /// declared that the gate would run.
+    pub fn suppresses_gate(self) -> bool {
+        matches!(self, Self::FlagOnly | Self::None)
+    }
+}
+
+impl core::fmt::Display for DeterminismMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Strict => "strict",
+            Self::FlagOnly => "flag_only",
+            Self::None => "none",
+        })
+    }
+}
+
+/// What an input declares about `generate.determinism` (spec §23.7).
+///
+/// Three-way rather than `Option<DeterminismMode>`: a key that is present but not
+/// one of §23.7's values is not the same as a key that is absent. Absent runs the
+/// gate, because the container does not validate §7.6 shapes; a present value that
+/// is not a mode cannot be known to permit the gate, so it is `unverified` rather
+/// than read as absent (§23.7, §25.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeterminismDeclaration {
+    /// No `generate.determinism` key at all: the gate still runs.
+    Absent,
+    /// A mode this build defines.
+    Mode(DeterminismMode),
+    /// Present, but not one of §23.7's three values — text this build does not
+    /// define, or a value that is not text.
+    Unrecognized,
+}
+
 /// The result of a passing gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateReport {
@@ -113,6 +179,17 @@ pub struct OfflineGate<'a> {
     /// When it is false or absent, the gate does not run and the bundle is
     /// `unverified`: a bundle that did not ask to be gated is not passed silently.
     pub offline_declared: bool,
+    /// What the input declares about `generate.determinism` (§23.7).
+    ///
+    /// [`DeterminismDeclaration::Absent`] still runs the gate: an undeclared mode is
+    /// not a suppression. [`DeterminismDeclaration::Mode`] with `FlagOnly` or `None`
+    /// suppresses it and yields [`UnverifiedReason::DeterminismNone`]; a present but
+    /// unrecognised value yields [`UnverifiedReason::DeterminismUnrecognized`].
+    pub determinism: DeterminismDeclaration,
+    /// The output names `generate.outputs` declares (§7.6, rule G8).
+    ///
+    /// Every output the generator names must be a member; a subset is legal.
+    pub declared_outputs: &'a [String],
 }
 
 /// The offline gate's result.
@@ -150,20 +227,38 @@ pub enum UnverifiedReason {
     NoGenerator,
     /// The challenge declares no solver.
     NoSolver,
+    /// `generate.determinism` is `none` or `flag_only`, so no gate exists (§23.7).
+    ///
+    /// The payload is the mode that suppressed the gate and is always one of those
+    /// two; `Strict` is never constructed.
+    DeterminismNone(DeterminismMode),
+    /// `generate.determinism` is present but not one of §23.7's three modes.
+    ///
+    /// The gate cannot tell whether it may run, so it does not (§23.7, §25.6).
+    DeterminismUnrecognized,
 }
 
 impl core::fmt::Display for UnverifiedReason {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::RuntimeDeclared => {
-                "the challenge declares a runtime, which needs a live instance (spec §32)"
-            }
-            Self::OfflineNotDeclared => {
-                "the challenge does not declare `verify.offline`, so it did not ask to be gated"
-            }
-            Self::NoGenerator => "the challenge declares no generator",
-            Self::NoSolver => "the challenge declares no solver",
-        })
+        match self {
+            Self::RuntimeDeclared => f.write_str(
+                "the challenge declares a runtime, which needs a live instance (spec §32)",
+            ),
+            Self::OfflineNotDeclared => f.write_str(
+                "the challenge does not declare `verify.offline`, so it did not ask to be gated",
+            ),
+            Self::NoGenerator => f.write_str("the challenge declares no generator"),
+            Self::NoSolver => f.write_str("the challenge declares no solver"),
+            Self::DeterminismNone(mode) => write!(
+                f,
+                "the bundle declares `determinism: {mode}`, so the determinism gate is not run \
+                 (spec §23.7)"
+            ),
+            Self::DeterminismUnrecognized => f.write_str(
+                "the bundle's `generate.determinism` is not a mode this document defines \
+                 (spec §23.7)",
+            ),
+        }
     }
 }
 
@@ -252,6 +347,21 @@ pub fn offline_gate(
         artifact_count: None,
         unverified_reason: Some(reason),
     };
+    // §23.7: `none` and `flag_only` are positive declarations that no determinism
+    // gate exists, so they win over every other condition. A bundle that declares
+    // both `none` and no solver did not fail for want of a solver: it never asked to
+    // be gated at all. An absent declaration is not a suppression; it falls through.
+    // A present value that is not one of the three modes is likewise checked first:
+    // the gate cannot tell whether it may run, so it must not.
+    match input.determinism {
+        DeterminismDeclaration::Mode(mode) if mode.suppresses_gate() => {
+            return Ok(unverified(UnverifiedReason::DeterminismNone(mode)));
+        }
+        DeterminismDeclaration::Unrecognized => {
+            return Ok(unverified(UnverifiedReason::DeterminismUnrecognized));
+        }
+        DeterminismDeclaration::Absent | DeterminismDeclaration::Mode(_) => {}
+    }
     if input.runtime_declared {
         return Ok(unverified(UnverifiedReason::RuntimeDeclared));
     }
@@ -274,6 +384,20 @@ pub fn offline_gate(
             source,
             determinism: None,
         })?;
+    // G8/§23.3: every name the module emits must be declared by `generate.outputs`.
+    // A subset is legal (the rule is one-directional), so only emitted names are
+    // checked. This is a determinism-stage failure: the module ran, but its block is
+    // not one its declarations permit, so the record keeps its determinism fields
+    // null rather than reporting a root for an unacceptable run.
+    for output in &gate.outputs.outputs {
+        if !input.declared_outputs.iter().any(|d| d == &output.name) {
+            return Err(GateError {
+                stage: GateStage::Determinism,
+                source: GeneratorError::UndeclaredOutput(output.name.clone()),
+                determinism: None,
+            });
+        }
+    }
     let artifact_count = gate.outputs.outputs.len();
     let determinism = DeterminismSummary {
         output_root: gate.output_root,
