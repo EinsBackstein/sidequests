@@ -16,7 +16,7 @@ use crate::{
     footer::{Footer, MIN_FOOTER_LEN, ROOT_LEN, Signing, commitment_root},
     manifest::Manifest,
     section::{parse_table, validate_layout},
-    suite::{HybridPublicKey, HybridSigningKey},
+    suite::{HybridPublicKey, HybridSigningKey, SuiteError},
 };
 
 use std::borrow::Cow;
@@ -273,12 +273,25 @@ impl<'a> Bundle<'a> {
     /// (spec §21). The `keys` section's own plaintext is verified against its root
     /// before it is decoded — nothing acts on unauthenticated content (§10) — and a
     /// wrong secret key or a wrong context fails without distinguishing which.
+    ///
+    /// **Every element is validated before any envelope is opened** (spec §21.3
+    /// EN5). A reader must reject a malformed `keys` section outright, so finding a
+    /// usable envelope early cannot skip an invalid one after it.
+    ///
+    /// One section may be wrapped to several recipients, so more than one envelope
+    /// can name the same `(name_id, context)`. Each is tried in file order until one
+    /// opens; a failure on an earlier recipient is not final. If no envelope names
+    /// this section and context, the error is [`Error::Inconsistent`]; if at least
+    /// one did but none opened, it is the last [`Error::Suite`] failure.
     pub fn section_content_key(
         &self,
         record: &SectionRecord,
         recipient_secret_key: &[u8],
         expected_context: &str,
     ) -> Result<[u8; 32]> {
+        // Validate the whole section first: §21.3 EN5 is about the section, not
+        // about the elements that happen to be read before a match.
+        let mut envelopes: Vec<Envelope> = Vec::new();
         for keys in self.sections.iter().filter(|r| r.kind == SectionKind::Keys) {
             let bytes = self.section_bytes(keys)?;
             let value = Value::decode(&bytes)?;
@@ -286,22 +299,30 @@ impl<'a> Bundle<'a> {
                 what: "a keys section's plaintext is not a CBOR array",
             })?;
             for entry in entries {
-                let envelope = Envelope::from_cbor(entry)?;
-                if envelope.name_id == record.name_id && envelope.context == expected_context {
-                    return envelope
-                        .open(
-                            recipient_secret_key,
-                            self.header.suite_id,
-                            self.header.version_major,
-                            expected_context,
-                        )
-                        .map_err(Error::Suite);
+                envelopes.push(Envelope::from_cbor(entry)?);
+            }
+        }
+
+        let mut last_error: Option<SuiteError> = None;
+        for envelope in envelopes {
+            if envelope.name_id == record.name_id && envelope.context == expected_context {
+                match envelope.open(
+                    recipient_secret_key,
+                    self.header.suite_id,
+                    self.header.version_major,
+                    expected_context,
+                ) {
+                    Ok(key) => return Ok(key),
+                    Err(e) => last_error = Some(e),
                 }
             }
         }
-        Err(Error::Inconsistent {
-            what: "no key envelope for this section and context",
-        })
+        match last_error {
+            Some(e) => Err(Error::Suite(e)),
+            None => Err(Error::Inconsistent {
+                what: "no key envelope for this section and context",
+            }),
+        }
     }
 
     /// A section's plaintext, decrypted with `content_key` and verified against its

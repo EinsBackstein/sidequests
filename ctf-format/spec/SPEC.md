@@ -1,6 +1,6 @@
 # The `.ctf` container format
 
-**Version:** 0.3 (major 0, minor 3); document revision 0.13.8
+**Version:** 0.3 (major 0, minor 3); document revision 0.13.9
 **Status:** The container is complete and specified: header, section table,
 manifest, chunk index, footer, zstd compression (§5.4), the entitlement record
 format and chain validation (§18), the crypto suite registry (§19), the phase 2
@@ -1963,6 +1963,7 @@ Both directions across the 0.2/0.3 boundary are asserted by the reference tests
 | 0.13.6 | Independent-implementation and corpus corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §7.1 now defines the M1h depth count normatively: depth is 0 at the outermost value, so 17 nested containers are accepted and a scalar inside them is rejected. The Go reader previously counted the outermost value as depth 1, and the Go writer had no cap, so Go rejected a manifest the reference accepts at that boundary and could emit bytes its own reader refused; both now count from 0. The corpus vector `unknown-enc-discriminant` mutated the manifest, so R20 could be the rejection and an `OPTIONAL` exemption from R10 would still pass; it now mutates an unknown-kind (kind 9) `OPTIONAL` section, which a reader must skip for serving but must still validate, and `unknown-comp-discriminant` covers the other field (§5.4). The Go conformance suite asserts the chunk-index refusal and inline verification for the unknown-kind vector that the index already claimed. Every change makes an existing rule explicit or enforces it in both implementations; no feature bit is spent (§15). |
 | 0.13.7 | Writer and record-definition corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Two `write_bundle` paths ignored `comp` on the stored side: a `keys` section written with `SectionSpec::envelopes(..).compressed()` stored raw envelope CBOR under a record saying `comp = 1`, and an empty plaintext with `chunk_size != 0` stored zero zstd frames; both produced a bundle `ctf verify` rejected with `DecompressionFailed`. The envelope payload is now compressed as §5.4 requires (`len_plain` and `root` stay over the uncompressed bytes), an empty plaintext is one empty frame, and §5.4 states that framing; the encrypted reader accepts both that one-chunk body and the zero-chunk body earlier builds emitted for an empty plaintext. §25.6 and §25.6.1 now state the shipped rule for `ctf verify`: an intact bundle with a requested gate that could not run is an `unverified` record with null determinism fields, not `null`; the no-record rule for `ctf run` is unchanged. Every change enforces or states a rule the text already implied; no feature bit is spent (§15). |
 | 0.13.8 | Independent-implementation and validation-scope corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. Go's `SealStream`/`OpenStream` now implement §20.2 exactly: an empty `comp = 0` plaintext is zero chunks (Go previously forced one, so the two writers disagreed and each rejected the other's empty body), and `OpenStream` validates the chunk size, the derived chunk count, and each chunk's plaintext length instead of only the total. §20.2 now states chunk *i*'s exact plaintext length for `comp = 0`, which both readers already enforced. §18.4 now scopes its rules to a reader of the chain: hashing a section's bytes is not reading its chain, E1–E8 run wherever an `entitlement` section is decoded as records (`ctf transfer`, `entitlement.rs`), and a hash-only pass must not be described as having validated one. Documentation is aligned with the shipped tree: the ROADMAP's closed phase-8 gaps and the `wasmi` checkbox, the hardening audit's `-rss_limit_mb` follow-up, and HANDOFF's superseded notes for the solver gate, `ctf pack` paths, and phase-1 signature verification. No change rejects a body the text permits; no feature bit is spent (§15). |
+| 0.13.9 | Envelope, derivation, and platform-policy corrections. **No byte-layout change:** `version_minor` stays `3` and both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B); no header, section, footer, commitment root, or signature transcript moved. §21.3's EN5 rule is now enforced on the whole `keys` section: every element is validated before any key is returned, so a malformed element after a usable envelope rejects the section instead of being skipped. One section may be wrapped to several recipients, so every envelope naming the section and context is tried in file order; previously the first matching envelope's failure was final, and a multi-recipient bundle could fail to unseal depending on recipient order. §22.2 now states that `event_secret` is an octet string of unconstrained length, which is what the Go implementation already assumed and the Rust one now accepts. §30.3 states that OCI export is a byte-copy that does not require the exporting build to read the whole container (a valid `.ctf` header is still required), so a valid older-format file round-trips instead of being refused; annotations are optional. §29.2's P3 read-time pass is now applied in the five commands that report a parsed bundle: `ctf inspect` names issues in its output and `ctf verify`, `ctf run`, `ctf serving-manifest`, and `ctf release` on their diagnostic streams; none turns a policy failure into a rejection. The CLI keeps its own 32-byte `--secret` contract while the derivation itself accepts any length. Go now distinguishes a 0.3 file missing `CONTAINER_V1` (a missing-feature error) from a genuine pre-0.3 file, matching the reference and §2.3. Every change enforces or states a rule the text already stated, or widens what an implementation accepts; no change rejects a body the text permits, and no feature bit is spent (§15). |
 
 ## 18. Entitlement records
 
@@ -2385,7 +2386,9 @@ and `subject_id` is the subject's identifier as UTF-8; both are length-prefixed.
 `chal_version` is the manifest `version` (§7.2) as a **fixed-width** `u64`
 little-endian, and is therefore **not** length-prefixed — the design sketch wrote
 `LP(chal_version)` for a variable-width reading, and this document fixes the
-unambiguous fixed-width encoding instead. `seed` is 32 bytes.
+unambiguous fixed-width encoding instead. `seed` is 32 bytes. `event_secret` is an
+octet string of unconstrained length and is absorbed as HKDF input key material
+exactly as supplied, never padded or truncated.
 
 ### 22.3 The flag
 
@@ -3074,7 +3077,13 @@ mutable reference from being committed to at all.
 The check MUST run at authoring time (`ctf pack`) and again as a read-time policy
 pass over the parsed manifest. It is **not** a container rule: §7.6 makes the
 container carry `runtime` without acting on it, so a tagged image is a readable
-bundle and a policy failure, not a parse failure.
+bundle and a policy failure, not a parse failure. The reference tooling applies the
+read-time pass in the five commands that report a parsed bundle: `ctf inspect`
+names the issues in its output, and `ctf verify`, `ctf run`,
+`ctf serving-manifest`, and `ctf release` name them on their diagnostic stream.
+None turns a policy failure into a rejection. Commands that parse a bundle for
+another purpose, such as the container operations, are not policy ingests and do
+not report it.
 
 | # | Rule |
 |---|---|
@@ -3134,7 +3143,11 @@ layer is the bundle with media type `application/vnd.ctf.bundle.v1`.
 The layer blob is the bundle, unmodified: there is no re-serialization step, so a
 push/pull round trip is byte-for-byte. The registry digest is `sha256` of the bundle
 and is independent of the format's BLAKE3 commitment; both are checked, and the OCI
-digest is a transport address, never a substitute for the commitment.
+digest is a transport address, never a substitute for the commitment. Export is a
+byte-copy and does not require the exporting build to read the whole container, so a
+file whose header this build accepts — including an older minor such as 0.2 — still
+round-trips. The file must carry a valid `.ctf` header, and annotations derived from
+the manifest are optional and absent when the container does not parse.
 
 | # | Rule |
 |---|---|

@@ -35,9 +35,18 @@ func Parse(data []byte) (*Bundle, error) {
 		return nil, err
 	}
 	// Step 2: this implementation needs the manifest, footer, and chunk index.
+	// The bit is the authority on whether the read can proceed, never
+	// version_minor (spec §2.3). The minor only picks which refusal reads
+	// correctly: a pre-0.3 file is an older format with nothing to read, while a
+	// 0.3+ file missing the bit is a feature-negotiation inconsistency.
 	if !h.hasContainerV1() {
-		return nil, errf(CatLegacy, "§10.2",
-			"pre-0.3 file (version_minor %d): no footer, manifest, or chunk index", h.VersionMinor)
+		if h.VersionMinor < containerV1Minor {
+			return nil, errf(CatLegacy, "§10.2",
+				"pre-0.3 file (version_minor %d): no footer, manifest, or chunk index", h.VersionMinor)
+		}
+		return nil, errf(CatHeader, "§2.3",
+			"file does not declare the ro_compat feature CONTAINER_V1 (0x%08x), which a whole-container read needs",
+			FeatROCompatContainerV1)
 	}
 	b := &Bundle{raw: data, Header: h}
 

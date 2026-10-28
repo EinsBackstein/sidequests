@@ -31,6 +31,11 @@ const (
 	VersionMajor = 0
 	VersionMinor = 3
 	SuiteDefault = 1
+	// containerV1Minor is the first minor that required the CONTAINER_V1
+	// ro_compat bit. It is a fixed era boundary, not the writer's current
+	// minor: a missing bit on such a file is a feature error at any later
+	// minor, while an earlier file is genuinely an older format (§2.3).
+	containerV1Minor = 3
 )
 
 // Feature bits.

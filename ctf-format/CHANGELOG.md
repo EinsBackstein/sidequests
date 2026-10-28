@@ -7,6 +7,67 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.9] — 2026-10-28
+
+Envelope, derivation, and platform-policy corrections. **No byte-layout change:**
+`version_minor` stays `3`, both goldens are byte-identical (`minimal.ctf` 4344 B,
+`demo.ctf` 18328 B), and no header, section, footer, commitment root, or signature
+transcript moved.
+
+### Fixed — `keys` sections are validated whole (§21.3 EN5)
+
+- **A malformed element after a usable envelope was ignored.** `section_content_key`
+  decoded elements lazily and returned at the first `(name_id, context)` match, so a
+  `keys` payload such as `[<valid envelope>, 42]` yielded the content key instead of
+  rejecting the section. Every element is now decoded and validated before any key
+  is returned, as EN5 requires.
+- **Multi-recipient bundles failed on recipient order.** One section may be wrapped
+  to several recipients, producing several envelopes with the same `name_id` and
+  context. The first matching envelope's failure was final, so a reader whose
+  envelope was not first could not unseal. Every matching envelope is now tried in
+  file order and the first that opens is used.
+
+### Fixed — `event_secret` length is unconstrained (§22.2)
+
+The spec fixes `seed` at 32 bytes and says nothing about the input key material;
+Go accepted any length while Rust rejected anything but 32 bytes. Rust now absorbs
+the secret as supplied, and §22.2 states that its length is unconstrained.
+
+### Fixed — OCI export is a byte-copy (§30.3)
+
+`ctf oci-export` parsed the bundle only to annotate the OCI manifest and refused a
+file that did not parse, so a valid 0.2 `.ctf` — which a 0.3 whole-container read
+refuses by design — could not be distributed. Export now requires a valid `.ctf`
+header but not a whole-container read, and writes the layer unchanged; annotations
+are optional. §30.3 states the rule. Export→import remains byte-for-byte, and bytes
+that are not a `.ctf` file are still refused rather than wrapped under the bundle
+media type.
+
+### Fixed — read-time policy pass (§29.2 P3)
+
+The digest-pinning check ran at authoring time only, although P3 requires it again
+at read time. `ctf inspect` now names policy issues in its human output, and `ctf
+verify`, `ctf run`, `ctf serving-manifest`, and `ctf release` report them on stderr.
+None changes a stable machine record or an exit code, and none treats a policy
+failure as a parse failure. §29.2 names that reporting and the commands that apply
+it.
+
+### Fixed — the CLI enforces its own `--secret` contract
+
+§22.2 fixes only that `seed` is 32 bytes, so `--secret` has its own contract:
+exactly 64 hex digits, or 32 bytes. Once the library's length check moved out, the
+CLI had none, and `--secret ""` would have derived a flag from an empty, publicly
+computable input. `ctf run` and `ctf verify` now reject anything but 32 bytes with a
+message naming the contract. The library derivation itself accepts any length, as
+§22.2 states.
+
+### Fixed — Go diagnostic for a 0.3 file missing `CONTAINER_V1`
+
+Go called any file without the bit a "pre-0.3 file", even at `version_minor` 3.
+It now mirrors the reference: below the fixed 0.3 era boundary the legacy wording
+stands, at 0.3 or later the error names the missing `ro_compat` feature (§2.3). The
+boundary is a constant, so a later minor bump cannot mislabel a 0.3 file again.
+
 ## [0.13.8] — 2026-10-28
 
 Independent-implementation and validation-scope corrections. **No byte-layout
@@ -857,8 +918,9 @@ context, even with a valid key. Envelopes serialize as a canonical-CBOR map
 "ctf/seed/v1", info = LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id))`;
 `flag = base32_lower(HMAC-SHA-256(seed, "ctf/flag/v1")[0..10])` (16 chars, 80 bits);
 `stage_key(flag(N-1), N) = HKDF-SHA-256(ikm = flag, salt = "ctf/stage/v1",
-info = u32_le(N))`. `event_secret` must be 32 bytes and never enters a bundle; a
-test asserts no byte of a written bundle contains the flag or the secret.
+info = u32_le(N))`. `event_secret` was treated as 32 bytes and never enters a bundle; a
+test asserts no byte of a written bundle contains the flag or the secret. (0.13.9
+lifts the library's length rule; see §22.2 and that release's note.)
 `chal_version` is a fixed-width `u64_le` and is deliberately not length-prefixed,
 where the design sketch wrote `LP(chal_version)`.
 

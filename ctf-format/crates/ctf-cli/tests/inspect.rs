@@ -436,3 +436,75 @@ fn completions_bash_emits_a_script() {
         "script should mention the binary:\n{out}"
     );
 }
+
+/// A bundle whose manifest declares a tagged `runtime.image`. `ctf pack` refuses to
+/// author this, but the container accepts it (§7.6), so it is built through the
+/// library exactly as an ingest pipeline would receive it.
+fn tagged_runtime_bundle() -> Vec<u8> {
+    let m = Manifest::build(
+        "chal",
+        "Title",
+        &["manifest"],
+        vec![(
+            Value::Text("runtime".into()),
+            Value::Map(vec![(
+                Value::Text("image".into()),
+                Value::Text("ghcr.io/ctf/chal:latest".into()),
+            )]),
+        )],
+    )
+    .unwrap();
+    write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &m.encode().unwrap(),
+        )],
+    )
+    .unwrap()
+}
+
+/// Spec §29.2: the policy pass runs at read time too. A tagged image is a policy
+/// finding, not a parse failure, so the report names it and the exit code stays 0.
+#[test]
+fn policy_issues_are_reported_without_failing_the_parse() {
+    let t = TempFile::new("policy-issue");
+    std::fs::write(t.path(), tagged_runtime_bundle()).unwrap();
+
+    let (code, out) = inspect_status(t.path(), &[]);
+    assert_eq!(code, 0, "a policy issue is not a parse failure:\n{out}");
+    assert!(out.contains("policy        1 issue(s)"), "{out}");
+    assert!(
+        out.contains("\"runtime.image\""),
+        "the policy block names the key:\n{out}"
+    );
+    // The pre-existing manifest block is unchanged.
+    assert!(out.contains("manifest      spec 1 — chal"), "{out}");
+}
+
+/// A clean manifest prints nothing new: no `policy` block and no line changes.
+#[test]
+fn a_clean_manifest_prints_no_policy_block() {
+    let m = manifest_with(None);
+    let file = write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &m.encode().unwrap(),
+        )],
+    )
+    .unwrap();
+    let t = TempFile::new("policy-clean");
+    std::fs::write(t.path(), &file).unwrap();
+
+    let (code, out) = inspect_status(t.path(), &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        !out.contains("policy        "),
+        "a clean manifest must not grow a policy block:\n{out}"
+    );
+}

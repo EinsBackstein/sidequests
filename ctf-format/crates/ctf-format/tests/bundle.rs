@@ -2864,3 +2864,159 @@ fn a_zero_chunk_empty_sealed_body_still_decrypts() {
         "a zero-chunk empty body decodes to the empty plaintext"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §21.3 EN5: every element of a `keys` section is validated before any is used
+// ---------------------------------------------------------------------------
+
+/// A bundle with a `SEALED` artifact under `content_key` and a `keys` section
+/// carrying `payload` verbatim.
+///
+/// The artifact takes no recipients: the envelope is supplied inside `payload`, so
+/// the writer must not also collect one, and `keys` is given as an inline payload
+/// rather than [`Payload::Envelopes`].
+fn bundle_with_keys_payload(payload: &[u8], content_key: [u8; 32]) -> Vec<u8> {
+    let manifest = Manifest::build(
+        "keys-validate",
+        "Keys Validate",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::SEALED),
+                b"the sealed payload",
+            )
+            .chunked(4096)
+            .encrypted_with_key(content_key, &[]),
+            SectionSpec::inline(SectionKind::Keys, 2, SectionFlags::empty(), payload),
+        ],
+    )
+    .unwrap()
+}
+
+/// §21.3 EN5: an element that is not a map is rejected even when it follows the
+/// envelope a reader is looking for. Lazy decoding returned the key and never saw
+/// the `42`.
+#[test]
+fn a_non_map_key_element_after_a_match_is_rejected() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let content_key = [0x5au8; 32];
+    let envelope = ctf_format::envelope::seal(
+        &content_key,
+        &recipient.public_key,
+        SUITE,
+        ctf_format::VERSION_MAJOR,
+        1,
+        "seal",
+    )
+    .unwrap();
+    let payload = Value::Array(vec![envelope.to_cbor(), Value::Uint(42)])
+        .encode()
+        .unwrap();
+
+    let file = bundle_with_keys_payload(&payload, content_key);
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    let result = b.section_content_key(&record, &recipient.secret_key, "seal");
+    assert!(
+        result.is_err(),
+        "an invalid element after the match must not be ignored: {result:?}"
+    );
+    assert!(matches!(result, Err(Error::Suite(_))), "got {result:?}");
+}
+
+/// §21.3 EN5: a map with an extra key is rejected after a valid envelope, too.
+#[test]
+fn a_key_element_with_an_extra_map_key_after_a_match_is_rejected() {
+    let recipient = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let content_key = [0x37u8; 32];
+    let envelope = ctf_format::envelope::seal(
+        &content_key,
+        &recipient.public_key,
+        SUITE,
+        ctf_format::VERSION_MAJOR,
+        1,
+        "seal",
+    )
+    .unwrap();
+    let Value::Map(mut entries) = envelope.to_cbor() else {
+        unreachable!("an envelope is a map");
+    };
+    entries.push((Value::Text("extra".into()), Value::Uint(0)));
+    let payload = Value::Array(vec![envelope.to_cbor(), Value::Map(entries)])
+        .encode()
+        .unwrap();
+
+    let file = bundle_with_keys_payload(&payload, content_key);
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+    let result = b.section_content_key(&record, &recipient.secret_key, "seal");
+    assert!(matches!(result, Err(Error::Suite(_))), "got {result:?}");
+}
+
+/// §21.3: one section may be wrapped to several recipients, so several envelopes
+/// can name the same `(name_id, context)`. A reader whose envelope is not first
+/// still opens the section; a failure on an earlier recipient is not final.
+#[test]
+fn a_later_matching_envelope_opens_when_the_first_does_not() {
+    let wrong = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let right = suite(SUITE).unwrap().kem().unwrap().generate().unwrap();
+    let manifest = Manifest::build(
+        "several-recipients",
+        "Several Recipients",
+        &["manifest", "secret", "keys"],
+        Vec::new(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    // The wrong recipient's envelope is written first, so the reader has to keep
+    // trying after its own key fails on that one.
+    let recipients = [
+        Recipient {
+            context: "seal",
+            public_key: &wrong.public_key,
+        },
+        Recipient {
+            context: "seal",
+            public_key: &right.public_key,
+        },
+    ];
+    let plaintext = b"the payload both recipients may read";
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(SectionKind::Manifest, 0, SectionFlags::empty(), &manifest),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::SEALED),
+                plaintext,
+            )
+            .chunked(4096)
+            .encrypted(&recipients),
+            SectionSpec::envelopes(SectionKind::Keys, 2),
+        ],
+    )
+    .unwrap();
+    let b = Bundle::parse(&file).unwrap();
+    let record = *b.section(1).unwrap();
+
+    let key = b
+        .section_content_key(&record, &right.secret_key, "seal")
+        .expect("the second matching envelope must be tried");
+    assert_eq!(
+        b.decrypt_section_bytes(&record, &key).unwrap(),
+        plaintext,
+        "the content key unwrapped from the second envelope is the real one"
+    );
+}

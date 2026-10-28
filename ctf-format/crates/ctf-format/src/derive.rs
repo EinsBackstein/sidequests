@@ -1,8 +1,8 @@
 //! Derived flags and stage keys (design §7, spec §22). Ticket 15.
 //!
 //! A bundle stores the derivation *rule*, never a flag value: the seed is a
-//! function of `event_secret` (a 32-byte KMS/HSM value that never enters a
-//! bundle), the challenge identity, and the subject. A leaked bundle therefore
+//! function of `event_secret` (a KMS/HSM value that never enters a bundle), the
+//! challenge identity, and the subject. A leaked bundle therefore
 //! leaks nothing — no flag byte and no secret byte occurs anywhere in the file.
 //!
 //! # The construction
@@ -65,7 +65,6 @@
 
 use aws_lc_rs::hmac;
 
-use crate::Role;
 use crate::crypto::kdf::HkdfSha256;
 use crate::crypto::lp;
 use crate::suite::{Kdf, SuiteError};
@@ -79,10 +78,6 @@ pub const FLAG_LABEL: &[u8] = b"ctf/flag/v1";
 /// Domain label for a stage key. ASCII, no terminator, no length prefix: it is
 /// the HKDF salt.
 pub const STAGE_LABEL: &[u8] = b"ctf/stage/v1";
-
-/// `event_secret` is exactly this many bytes; anything else is rejected rather
-/// than accepted and padded.
-const EVENT_SECRET_LEN: usize = 32;
 
 /// The output length of every derivation here. A seed and a stage key are both
 /// content keys, and the frozen content-key size is 32 bytes (spec §12).
@@ -98,24 +93,17 @@ const FLAG_BYTES: usize = 10;
 
 /// `seed(challenge, subject)` — the per-subject root of the flag derivation.
 ///
-/// `event_secret` MUST be exactly 32 bytes; any other length is a
-/// [`SuiteError::InvalidLength`] naming the `kdf` role, never a silently padded
-/// value. `chal_id` and `subject_id` are UTF-8 strings and are length-prefixed;
-/// `chal_version` is a fixed-width `u64_le` and is not (see the module docs).
+/// `event_secret` is the HKDF input key material and its length is unconstrained
+/// (spec §22.2 fixes only that `seed` is 32 bytes); it is absorbed as-is, never
+/// padded or truncated. `chal_id` and `subject_id` are UTF-8 strings and are
+/// length-prefixed; `chal_version` is a fixed-width `u64_le` and is not (see the
+/// module docs).
 pub fn subject_seed(
     event_secret: &[u8],
     chal_id: &str,
     chal_version: u64,
     subject_id: &str,
 ) -> Result<[u8; 32], SuiteError> {
-    if event_secret.len() != EVENT_SECRET_LEN {
-        return Err(SuiteError::InvalidLength {
-            role: Role::Kdf,
-            expected: EVENT_SECRET_LEN,
-            got: event_secret.len(),
-        });
-    }
-
     // LP(chal_id) ‖ u64_le(chal_version) ‖ LP(subject_id). The version is
     // fixed-width, so it takes no length prefix.
     let mut info = Vec::new();

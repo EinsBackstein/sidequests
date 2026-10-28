@@ -34,11 +34,12 @@ use ctf_format::cbor::Value;
 use ctf_format::derive;
 use ctf_format::oci;
 use ctf_format::pack::{self, PackError};
+use ctf_format::policy;
 use ctf_format::{
     Bundle, Compression, Encryption, EntitlementChain, HEADER_LEN, HolderKeys, HybridPublicKey,
-    HybridSigningKey, KemKeyPair, MAGIC, Payload, Recipient, SECTION_RECORD_LEN, SectionFlags,
-    SectionKind, SectionRecord, SectionSpec, ServingManifest, Signing, Timestamp, VERSION_MAJOR,
-    holder_hash, release_at_event_end, seal_progress,
+    HybridSigningKey, KemKeyPair, MAGIC, Manifest, Payload, Recipient, SECTION_RECORD_LEN,
+    SectionFlags, SectionKind, SectionRecord, SectionSpec, ServingManifest, Signing, Timestamp,
+    VERSION_MAJOR, holder_hash, release_at_event_end, seal_progress,
 };
 
 use verify::{Artifact, SectionCounts, Status};
@@ -417,7 +418,8 @@ struct RunArgs {
     /// The authoring YAML file.
     challenge: String,
 
-    /// The event secret, 64 lowercase hex digits (spec §22.2). Never written anywhere.
+    /// The event secret, 64 hex digits (32 bytes) by this CLI's contract.
+    /// §22.2 leaves the library's secret length unconstrained. Never written anywhere.
     #[arg(long)]
     secret: String,
 
@@ -458,7 +460,8 @@ struct VerifyArgs {
     #[arg(long, requires = "secret")]
     challenge: Option<String>,
 
-    /// The event secret, 64 hex digits (spec §22.2). Never written to the artifact.
+    /// The event secret, 64 hex digits (32 bytes) by this CLI's contract.
+    /// §22.2 leaves the library's secret length unconstrained. Never written to the artifact.
     #[arg(long, requires = "challenge")]
     secret: Option<String>,
 
@@ -663,6 +666,7 @@ fn run_serving_manifest(args: &ServingManifestArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    report_policy(&bundle.manifest);
     let manifest = ServingManifest::from_bundle(&bundle);
     let bytes = match manifest.to_bytes() {
         Ok(b) => b,
@@ -773,6 +777,9 @@ fn run_release(args: &ReleaseArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Read-time policy pass (spec §29.2). Diagnostics only: no exit code, stdout
+    // line, or released artifact changes.
+    report_policy(&bundle.manifest);
     let key = match read_hex_key_file(&args.key) {
         Ok(k) => k,
         Err(e) => {
@@ -866,6 +873,9 @@ fn run_gate(args: &RunArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        // Read-time policy pass (spec §29.2), the same diagnostic `ctf verify`
+        // prints. The gate's verdict and exit code are unchanged.
+        report_policy(&bundle.manifest);
         let (id, version) = (bundle.manifest.id(), bundle.manifest.version());
         if id != setup.doc_id || version != setup.doc_version {
             eprintln!(
@@ -1254,6 +1264,15 @@ fn load_gate_setup_inner(
 
     let secret =
         hex_decode(secret_hex).map_err(|e| GateSetupError::Message(format!("--secret: {e}")))?;
+    // §22.2's derivation is length-agnostic so library callers can use any IKM, but
+    // the CLI's contract is exactly the 64 hex digits both help strings name. Without
+    // this, `--secret ""` derives a flag from an empty, publicly computable secret.
+    if secret.len() != 32 {
+        return Err(GateSetupError::Message(format!(
+            "--secret: expected 64 hex digits (32 bytes), got {} bytes",
+            secret.len()
+        )));
+    }
     let seed = derive::subject_seed(&secret, &doc.id, doc.version, subject)
         .map_err(|e| GateSetupError::Message(format!("--secret: {e}")))?;
     let expected = derive::flag(&seed);
@@ -1576,6 +1595,18 @@ fn bundle_module(
         .map_err(|e| format!("the bundle's {} section: {e}", kind_name(kind)))
 }
 
+/// Report the spec §29.2 read-time policy issues for `manifest` on stderr.
+///
+/// Diagnostic only: it changes no exit code, stdout line, or artifact. The message
+/// can carry author-supplied text (an origin extracted from `description`, a flagged
+/// image reference), so it is Debug-escaped and a crafted manifest cannot inject a
+/// newline or a terminal escape. The key is this crate's static constant.
+fn report_policy(manifest: &Manifest) {
+    for issue in policy::check_manifest(manifest) {
+        eprintln!("policy: {}: {:?}", issue.key(), issue.message());
+    }
+}
+
 /// `ctf verify`: the ingest checks plus, when asked, the offline gate, as one
 /// stable machine-readable artifact. See [`verify`] for the shape and the rules.
 fn run_verify(args: &VerifyArgs) -> ExitCode {
@@ -1599,6 +1630,9 @@ fn run_verify(args: &VerifyArgs) -> ExitCode {
     match Bundle::parse(&file) {
         Err(e) => artifact.reject(format!("the bundle did not parse: {e}")),
         Ok(bundle) => {
+            // Read-time policy pass (spec §29.2). Diagnostics only: the stable
+            // artifact on stdout and the status-derived exit code are unchanged.
+            report_policy(&bundle.manifest);
             artifact.commitment_root = Some(bundle.footer.root);
             artifact.signing = Some(bundle.signing());
             match bundle.verify_inline_sections() {
@@ -2610,6 +2644,20 @@ fn inspect(
     }
     if b.manifest.version() != 0 {
         println!("              version {}", b.manifest.version());
+    }
+
+    // Read-time policy pass (spec §29.2). It is not a parse failure: a tagged
+    // `runtime.image` is a readable bundle that the platform will refuse to boot,
+    // so the exit code stays 0 and no line above changes. The key and message can
+    // carry author-supplied text (an origin extracted from `description`), so both
+    // are Debug-escaped like the manifest and mirror lines above.
+    let issues = policy::check_manifest(&b.manifest);
+    if !issues.is_empty() {
+        println!();
+        println!("policy        {} issue(s)", issues.len());
+        for issue in &issues {
+            println!("              {:?}: {:?}", issue.key(), issue.message());
+        }
     }
 
     println!();

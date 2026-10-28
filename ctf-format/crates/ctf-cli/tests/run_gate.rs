@@ -153,6 +153,41 @@ name: \"Who's That Bird\"
 category: osint
 ";
 
+/// Spec §22.2 as the CLI states it: both help strings promise 64 hex digits, and
+/// the derivation is length-agnostic only for library callers. An empty secret
+/// derives a publicly computable flag, so it must be refused before the gate runs.
+#[test]
+fn run_refuses_a_secret_that_is_not_64_hex_digits() {
+    let dir = TempDir::new("secret-shape");
+    let source = dir.path("chal.yaml");
+    std::fs::write(&source, MINIMAL).unwrap();
+
+    for (tag, secret) in [
+        ("empty", String::new()),
+        ("short", "00".repeat(16)),
+        ("long", "00".repeat(33)),
+    ] {
+        let status = dir.path(&format!("{tag}.status.json"));
+        let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--status", &status]);
+        assert!(!ok, "a {tag} secret must be refused: {stdout}{stderr}");
+        assert!(
+            stderr.contains("64 hex digits"),
+            "the refusal names the contract: {stderr}"
+        );
+        assert!(
+            !std::path::Path::new(&status).exists(),
+            "a refused secret writes no record"
+        );
+    }
+
+    // A 32-byte secret still runs the gate exactly as before.
+    let secret = "00".repeat(32);
+    let status = dir.path("ok.status.json");
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--status", &status]);
+    assert!(ok, "a 64-hex-digit secret still runs: {stdout}{stderr}");
+    assert!(stdout.contains("gate          unverified"), "{stdout}");
+}
+
 #[test]
 fn run_names_every_stage_and_persists_a_pass() {
     let dir = TempDir::new("pass");

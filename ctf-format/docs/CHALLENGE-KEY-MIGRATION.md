@@ -29,7 +29,7 @@ The ingest descriptor projects these two fields directly: `slug` = manifest `id`
 `LP(x)` is `u32_le(len(x)) ‖ x` (§22.1). Every variable-length input is
 length-prefixed; `chal_version` is a fixed-width `u64_le` and is **not**
 length-prefixed (rule DF2, §22.2). For challenge key `K`, revision `V`, subject
-`T`, and the platform's 32-byte secret `S`:
+`T`, and the platform's secret `S` (an octet string; 32 bytes is typical):
 
 ```text
 seed = HKDF-SHA-256(
