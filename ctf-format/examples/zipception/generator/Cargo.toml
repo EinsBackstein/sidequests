@@ -1,0 +1,25 @@
+[package]
+name = "zipception-generator"
+version = "1.0.0"
+description = "Zipception generator for the .ctf format"
+edition = "2021"
+
+# A standalone crate: the example lives under ctf-format/ but is not a workspace
+# member (building a wasm guest has its own target and profile).
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "preview"
+path = "src/bin/preview.rs"
+
+[dependencies]
+ctf-generator-sdk = { path = "../../../sdk/rust" }
+hmac = "0.12"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true

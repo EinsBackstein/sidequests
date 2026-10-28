@@ -1,0 +1,15 @@
+[package]
+name = "zipception-solver"
+version = "1.0.0"
+description = "Zipception gate solver for the .ctf format"
+edition = "2021"
+
+# Standalone: the solver builds for wasm32-unknown-unknown, outside the workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = true

@@ -1,0 +1,25 @@
+spec: 1
+id: zipception
+version: 1
+name: "Zipception"
+category: misc
+description: |
+  Unzip me UwU
+
+  The attachment is a ZIP archive nested inside itself 150 times. Every layer adds
+  a 120-character directory component, so extracting in place runs into PATH_MAX on
+  macOS and Linux and MAX_PATH on Windows long before the flag. Stream each layer
+  through memory instead (unzip -p, 7z e -so, tar -xOf, or a few lines of Python).
+flag: derived
+generate:
+  wasm: gen.wasm
+  determinism: strict
+  outputs:
+    - { name: inception.zip, player_visible: true }
+sealed:
+  release: event_end
+  members: [solver.wasm]
+verify:
+  solver: solver.wasm
+  expect: flag
+  offline: true
