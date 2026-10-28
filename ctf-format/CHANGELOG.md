@@ -7,6 +7,50 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.12] — 2026-10-28
+
+Third post-release audit round. **No byte-layout change:** `version_minor` stays
+`3`, both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and
+no header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — Go did not resolve the suite registry (§19.2 S2/S3)
+
+The reference reader rejected an unregistered `suite_id`, but the independent Go
+reader still computed the commitment root with BLAKE3 and never called
+`LookupSuite`, so a suite-99 bundle parsed and `VerifyAll` reported no findings. Go
+now resolves the registry before the root; `ParseHeader` still accepts any id, so
+§19.2 S1 is preserved.
+
+### Fixed — Go `VerifyChunk` double-sliced and could panic (§9, C5/C7)
+
+`VerifyChunk` sliced out the chunk and then passed it to a helper that sliced again
+at `i*chunk_size`, so chunk 1 of `demo.ctf` failed C5 and chunk 2 panicked. It now
+hashes the whole section plaintext, returns the requested chunk, and no longer
+compares a plaintext offset with a file offset. Every chunk of both goldens verifies,
+and an out-of-range index is a C5 error rather than a panic.
+
+### Fixed — `--seed-file` outranked `CTF_SEED` (§26 I3)
+
+The environment must win over the mount, but the runtime read an explicit
+`--seed-file` directly, so a file won over the orchestrator's seed and the
+generator produced artifacts for the wrong subject. `--seed-file` now names the
+mount: `CTF_SEED` still wins, then the path, then `/ctf/seed`.
+
+### Fixed — an empty flag injection skipped the oracle check (§26 I4)
+
+`CTF_FLAG=` or a zero-length `/ctf/flag` was read as "nothing injected", so a
+challenge started although no player could submit its flag. Presence is now
+distinct from absence: an empty injection can never equal a derived flag and fails
+the start; only the absence of both is "not injected".
+
+### Fixed — the runtime host always ran the determinism gate (§23.7)
+
+The ingest gate honoured `none`, but `ctf-generator` always ran two G9 runs, so a
+`none` challenge could not start at all. The runtime now takes the mode from its
+operator with `--determinism <strict|none|flag_only>`: `strict` is the default and
+unchanged, `none` runs the module once without a comparison, and `flag_only` is
+refused because it declares no generator. §23.7 states the default.
+
 ## [0.13.11] — 2026-10-28
 
 Second post-release audit round. **No byte-layout change:** `version_minor` stays
