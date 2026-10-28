@@ -7,6 +7,29 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.14] — 2026-10-28
+
+Fifth post-release audit round. **No byte-layout change:** `version_minor` stays
+`3`, both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and
+no header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — Go `VerifyAll` accepted compression bombs (§5.4, §10)
+
+`VerifyAll` skipped every encrypted or compressed section, so the committed
+`compressed-output-cap` and `compressed-ratio-cap` fixtures returned no findings
+instead of failing D1 or D2. It now applies both caps before any decoder would run,
+and reports a compressed section of a kind this build cannot expand rather than
+claiming it verified. An encrypted section it cannot open is still unverifiable and
+skipped.
+
+### Fixed — `ctf validate`/`ctf pack` wrote a raw control from a description (§13)
+
+§13 requires free-form manifest text written to a terminal to be escaped, but the
+O2 origin quoted from `description` was printed verbatim, so a C0 ESC could clear or
+spoof the operator's terminal during preflight. Issue and error text now go through
+the same escaping as `ctf inspect`'s tables (C0/C1, DEL, and the bidi-format marks
+`check_name` permits).
+
 ## [0.13.13] — 2026-10-28
 
 Fourth post-release audit round. **No byte-layout change:** `version_minor` stays
