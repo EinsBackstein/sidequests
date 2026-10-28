@@ -6,4 +6,6 @@ solver.wasm
 *.descriptor.json
 *.status.json
 inception.zip
+played.zip
+play.log
 __pycache__/

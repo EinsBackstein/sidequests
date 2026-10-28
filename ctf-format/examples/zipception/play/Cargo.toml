@@ -1,0 +1,14 @@
+[package]
+name = "zipception-play"
+version = "1.0.0"
+description = "Render a zipception player artifact from the .ctf bundle alone"
+edition = "2021"
+
+# Standalone, like the two guests: this is a deployment-side tool, not a member of
+# the format workspace. It reuses the workspace target directory when build.sh
+# points CARGO_TARGET_DIR at it.
+[workspace]
+
+[dependencies]
+ctf-format = { path = "../../../crates/ctf-format" }
+ctf-generator = { path = "../../../crates/ctf-generator" }

@@ -76,11 +76,12 @@ jobs:
           cargo build --release --target wasm32-unknown-unknown
         working-directory: ctf-format/sdk/sample-generator
       # The ported challenge is the only end-to-end authoring example in the tree:
-      # two real guests, `ctf validate`, `ctf pack`, the offline gate (two runs plus
-      # the second engine), and the player solver against the rendered archive. One
-      # operating system is enough; the gate's cross-engine check is what covers
-      # the second implementation for this path.
-      - name: Zipception example builds, packs and passes its gate
+      # two real guests, `ctf validate`, `ctf pack` (which now carries the generator
+      # section), the offline gate (two runs plus the second engine), deployment of
+      # the bundle into a scratch directory with no `gen.wasm`, and the player solver
+      # against the archive `play` generates from it. One operating system is
+      # enough; the gate's cross-engine check covers the second engine for this path.
+      - name: Zipception example builds, packs, deploys and passes its gate
         if: runner.os == 'Linux'
         run: ./build.sh
         working-directory: ctf-format/examples/zipception
