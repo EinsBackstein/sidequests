@@ -165,18 +165,29 @@ fn web_declares_a_live_gate_and_pwn_verifies_offline() {
 }
 
 #[test]
-fn forensics_has_notes_and_no_external_key() {
-    // `ChallengeDoc` has no `external` field (authoring.rs), and `from_yaml`
-    // rejects unknown keys, so the scaffold must not emit an `external:` key.
+fn forensics_declares_an_external_payload() {
+    // `external` is an authoring key now (design §10, spec §5.7): the scaffold
+    // emits a real block with placeholders, and it parses and validates.
     let files = scaffold("forensics", ID).unwrap();
     assert!(files.iter().any(|f| f.path == "notes.md"));
     let yaml = challenge_yaml(&files);
     assert!(
-        !yaml.contains("external:"),
-        "`external` is not authoring YAML"
+        yaml.contains("external:"),
+        "the forensics scaffold must declare its payload: {yaml}"
     );
-    let doc = ChallengeDoc::from_yaml(yaml).unwrap();
-    assert!(doc.validate().is_empty());
+    let doc = ChallengeDoc::from_yaml(yaml).expect("the scaffold's external block parses");
+    assert_eq!(doc.external.len(), 1);
+    assert_eq!(doc.external[0].name, "workstation.E01");
+    assert!(
+        !doc.external[0].mirrors.is_empty(),
+        "a mirror is what makes the payload fetchable"
+    );
+    assert_eq!(
+        doc.external[0].root.len(),
+        32,
+        "the placeholder root decodes to a BLAKE3 digest"
+    );
+    assert!(doc.validate().is_empty(), "{:?}", doc.validate());
 }
 
 #[test]

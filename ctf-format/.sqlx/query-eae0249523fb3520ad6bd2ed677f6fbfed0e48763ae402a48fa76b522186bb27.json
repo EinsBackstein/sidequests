@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO entitlements (subject, seq, record, prev_hash, hash) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (subject, seq) DO UPDATE SET record = EXCLUDED.record, prev_hash = EXCLUDED.prev_hash, hash = EXCLUDED.hash, recorded_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Jsonb",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eae0249523fb3520ad6bd2ed677f6fbfed0e48763ae402a48fa76b522186bb27"
+}

@@ -31,7 +31,7 @@ use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 
 use crate::cbor::Value;
-use crate::manifest::{check_id, check_name, check_path};
+use crate::manifest::{MAX_MIRROR_LEN, check_id, check_name, check_path};
 
 /// The highest authoring `spec` this build understands.
 ///
@@ -119,6 +119,14 @@ pub struct ChallengeDoc {
     /// of a later pass.
     #[serde(default)]
     pub artifacts: Vec<ArtifactSpec>,
+    /// Payloads too large to carry inline, declared by mirror metadata.
+    ///
+    /// Design §10's last block: a forensics image is committed to by its BLAKE3
+    /// root and length, while its bytes live behind one or more mirrors (spec
+    /// §5.7, §7.4). No `path` is possible here — the payload is never extracted
+    /// from the bundle because it is never in it.
+    #[serde(default, deserialize_with = "deserialize_external_list")]
+    pub external: Vec<ExternalSpec>,
 }
 
 impl ChallengeDoc {
@@ -531,6 +539,7 @@ impl ChallengeDoc {
         }
 
         issues.extend(self.artifact_issues());
+        issues.extend(self.external_issues());
 
         issues
     }
@@ -624,6 +633,95 @@ impl ChallengeDoc {
                     format!("artifacts[{i}].name")
                 };
                 claim(&mut destinations, &mut issues, destination, key);
+            }
+        }
+
+        issues
+    }
+
+    /// The rules that apply to `external` entries.
+    ///
+    /// A root's shape is checked where it is parsed — the `external[i].root`
+    /// diagnostic comes from the field deserializer — because the stored type is
+    /// `[u8; 32]` and no other length can exist by the time this runs. What is left
+    /// is the cross-entry and cross-key work: the name is a section identity (spec
+    /// §5.1) and a mirror list is the only way to fetch the payload (spec §7.4), so
+    /// both are checked here before a byte is packed.
+    pub(crate) fn external_issues(&self) -> Vec<ValidationIssue> {
+        let mut issues = Vec::new();
+        if self.external.is_empty() {
+            return issues;
+        }
+        // Every other name the document assigns. `sealed.members` and
+        // `verify.solver` *name* a section rather than declaring one, and the same
+        // section may be both; an external entry is a section too, so a shared name
+        // would give one identity two payload sources, which the format cannot
+        // represent (spec §7.4, M20).
+        let mut assigned: Vec<(&str, &str)> = Vec::new();
+        if let Some(g) = &self.generate {
+            if let Some(wasm) = &g.wasm {
+                assigned.push((wasm, "generate.wasm"));
+            }
+            for output in &g.outputs {
+                assigned.push((&output.name, "generate.outputs"));
+            }
+        }
+        if let Some(s) = &self.sealed {
+            for member in &s.members {
+                assigned.push((member, "sealed.members"));
+            }
+        }
+        if let Some(v) = &self.verify {
+            assigned.push((&v.solver, "verify.solver"));
+        }
+
+        let mut seen: Vec<&str> = Vec::new();
+        for (i, external) in self.external.iter().enumerate() {
+            let name_key = format!("external[{i}].name");
+            if let Some(reason) = check_name(&external.name) {
+                issues.push(ValidationIssue::new(name_key.clone(), reason));
+            }
+            if external.name == "manifest" {
+                issues.push(ValidationIssue::new(
+                    name_key.clone(),
+                    "`manifest` is reserved for the manifest section",
+                ));
+            }
+            if seen.contains(&external.name.as_str()) {
+                issues.push(ValidationIssue::new(
+                    name_key.clone(),
+                    "duplicate external name",
+                ));
+            }
+            seen.push(&external.name);
+
+            // Inline and external are two payload sources for one identity, so one
+            // entry cannot be both (design §5's archetype table).
+            if self.artifacts.iter().any(|a| a.name == external.name) {
+                issues.push(ValidationIssue::new(
+                    name_key.clone(),
+                    "is also an `artifacts` entry; a payload cannot be both inline and external",
+                ));
+            } else if let Some((_, key)) = assigned.iter().find(|(n, _)| *n == external.name) {
+                issues.push(ValidationIssue::new(
+                    name_key.clone(),
+                    format!("already names a section through `{key}`"),
+                ));
+            }
+
+            if external.mirrors.is_empty() {
+                issues.push(ValidationIssue::new(
+                    format!("external[{i}].mirrors"),
+                    "must not be empty; a payload with no mirror cannot be fetched",
+                ));
+            }
+            for (j, mirror) in external.mirrors.iter().enumerate() {
+                if mirror.is_empty() || mirror.len() > MAX_MIRROR_LEN {
+                    issues.push(ValidationIssue::new(
+                        format!("external[{i}].mirrors[{j}]"),
+                        "must be 1 to 2048 bytes (spec §7.4, M18)",
+                    ));
+                }
             }
         }
 
@@ -883,6 +981,91 @@ pub struct ArtifactSpec {
     /// means the flat `name`.
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// One `external` entry: a payload whose bytes live behind mirrors, not in the
+/// bundle (design §10, spec §5.7).
+///
+/// `root` is stored as the 32 raw bytes the manifest's `bstr` carries, so the
+/// authoring surface cannot hand `ctf pack` a digest of any other length. The YAML
+/// spelling accepts `blake3:<64 lowercase hex>` (the form design §10 shows) or the
+/// bare 64 digits, which is the one place the design's ellipsis is resolved by
+/// implementation rather than text.
+///
+/// There is deliberately no `path`: an external payload is never extracted from
+/// the bundle, so it has no destination in the tree (spec §5.7, §7.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSpec {
+    /// Section name; indexes the manifest's `names` table and keys `external`.
+    pub name: String,
+    /// Plaintext size in bytes; the record's `len_plain` (M21).
+    pub size: u64,
+    /// BLAKE3 root of the plaintext (M18, M21).
+    pub root: [u8; 32],
+    /// Where the payload can be fetched; non-empty, each 1..=2048 bytes (M18).
+    pub mirrors: Vec<String>,
+}
+
+/// The wire form of an `external` entry, before the digest is decoded.
+///
+/// Kept separate so the digest error can name `external[i].root`: a field-level
+/// deserializer has no access to the list index, and a bare "invalid digest" would
+/// leave an author with several entries hunting for the bad one.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalSpecDoc {
+    name: String,
+    size: u64,
+    root: String,
+    mirrors: Vec<String>,
+}
+
+fn deserialize_external_list<'de, D>(deserializer: D) -> Result<Vec<ExternalSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<ExternalSpecDoc>::deserialize(deserializer)?;
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let root = parse_external_root(&spec.root).map_err(|reason| {
+                <D::Error as serde::de::Error>::custom(format!("`external[{i}].root` {reason}"))
+            })?;
+            Ok(ExternalSpec {
+                name: spec.name,
+                size: spec.size,
+                root,
+                mirrors: spec.mirrors,
+            })
+        })
+        .collect()
+}
+
+/// Decode `blake3:<64 lowercase hex>` or bare 64 lowercase hex into 32 bytes.
+fn parse_external_root(value: &str) -> Result<[u8; 32], &'static str> {
+    let hex = value.strip_prefix("blake3:").unwrap_or(value);
+    const SHAPE: &str = "must be 64 lowercase hex digits, optionally prefixed with `blake3:`";
+    if hex.len() != 64 {
+        return Err(SHAPE);
+    }
+    let bytes = hex.as_bytes();
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let [hi, lo] = <[u8; 2]>::try_from(pair).map_err(|_| SHAPE)?;
+        *slot = (hex_digit(hi).ok_or(SHAPE)? << 4) | hex_digit(lo).ok_or(SHAPE)?;
+    }
+    Ok(out)
+}
+
+/// One lowercase hex digit. Uppercase is deliberately not accepted: the digest is
+/// written as manifest `bstr`, but two spellings of one digest at authoring time
+/// would make diagnostics, grep, and diffing disagree for no gain.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// `runtime:` — the runtime contract the future orchestrator consumes (design §2).

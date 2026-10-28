@@ -22,13 +22,11 @@
 //!
 //! # Status
 //!
-//! All five roles are implemented for suites 1 and 2: BLAKE3 `hash`, HKDF-SHA-256
-//! `kdf`, X25519+ML-KEM-768 `kem`, AES-256-GCM / XChaCha20-Poly1305 `aead`, and
-//! Ed25519+ML-DSA-65 `signature`. The constructions are normative in spec §20.
-//!
-//! Suite 3's `signature` adds SLH-DSA, which this build does not implement, so
-//! resolving it returns [`SuiteError::NotImplemented`] naming the suite and role
-//! rather than silently reducing the hybrid to two of its three components.
+//! All five roles are implemented for all three suites: BLAKE3 `hash`,
+//! HKDF-SHA-256 `kdf`, X25519+ML-KEM-768 `kem`, AES-256-GCM /
+//! XChaCha20-Poly1305 `aead`, and Ed25519+ML-DSA-65 (suites 1 and 2) or
+//! Ed25519+ML-DSA-65+SLH-DSA-SHA2-128s (suite 3) `signature`. The constructions
+//! are normative in spec §20.
 
 use crate::footer::ROOT_LEN;
 
@@ -157,7 +155,8 @@ pub struct KemKeyPair {
 pub struct HybridPublicKey {
     /// The classical (Ed25519) component.
     pub classical: Vec<u8>,
-    /// The post-quantum (ML-DSA-65) component.
+    /// The post-quantum component: ML-DSA-65 for suites 1 and 2, or
+    /// `ML-DSA-65 ‖ SLH-DSA-SHA2-128s` for suite 3 (§20.3).
     pub pq: Vec<u8>,
 }
 
@@ -166,16 +165,18 @@ pub struct HybridPublicKey {
 pub struct HybridSigningKey {
     /// The classical (Ed25519) component.
     pub classical: Vec<u8>,
-    /// The post-quantum (ML-DSA-65) component.
+    /// The post-quantum component. Its secret-key encoding is the suite's own, not
+    /// a container structure; for suite 3 it carries both post-quantum keys.
     pub pq: Vec<u8>,
 }
 
-/// A hybrid signature. Both components cover the identical transcript.
+/// A hybrid signature. Every component covers the identical transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HybridSignature {
     /// The classical (Ed25519) component.
     pub classical: Vec<u8>,
-    /// The post-quantum (ML-DSA-65) component.
+    /// The post-quantum component: ML-DSA-65 for suites 1 and 2, or
+    /// `ML-DSA-65 ‖ SLH-DSA-SHA2-128s` for suite 3 (§20.3).
     pub pq: Vec<u8>,
 }
 
@@ -266,10 +267,11 @@ pub trait Aead: core::fmt::Debug + Send + Sync {
     ) -> Result<Vec<u8>, SuiteError>;
 }
 
-/// The hybrid signature: Ed25519 + ML-DSA-65 (spec §19, suite 1). Both components
-/// MUST verify over the identical transcript (design §7, spec §8.4); a bundle that
-/// carries one of the pair is a downgrade and is refused by F4 before it reaches a
-/// verifier.
+/// The hybrid signature: Ed25519 + ML-DSA-65 for suites 1 and 2, with SLH-DSA added
+/// for suite 3 (spec §19, §20.3). Every component MUST verify over the identical
+/// transcript (design §7, spec §8.4); a bundle carrying a subset of them is a
+/// downgrade and is refused by F4 or by the component-width checks before it reaches
+/// a verifier.
 pub trait Signature: core::fmt::Debug + Send + Sync {
     /// Length of the classical public key.
     fn classical_public_key_len(&self) -> usize;
@@ -290,7 +292,7 @@ pub trait Signature: core::fmt::Debug + Send + Sync {
         signing_key: &HybridSigningKey,
     ) -> Result<HybridSignature, SuiteError>;
 
-    /// Verify **both** components over `transcript`. Returns an error naming the
+    /// Verify **every** component over `transcript`. Returns an error naming the
     /// first component that failed; a caller must treat any error as "not
     /// authentic".
     fn verify(
@@ -319,13 +321,14 @@ static BLAKE3: Blake3 = Blake3;
 use crate::crypto::aead::{Aes256Gcm, XChaCha20Poly1305Aead};
 use crate::crypto::hybrid_kem::X25519MlKem768;
 use crate::crypto::kdf::HkdfSha256;
-use crate::crypto::sign::Ed25519MlDsa65;
+use crate::crypto::sign::{Ed25519MlDsa65, Ed25519MlDsa65SlhDsa};
 
 static HKDF_SHA256_ROLE: HkdfSha256 = HkdfSha256;
 static X25519_MLKEM768_ROLE: X25519MlKem768 = X25519MlKem768;
 static AES_256_GCM_ROLE: Aes256Gcm = Aes256Gcm;
 static XCHACHA20_POLY1305_ROLE: XChaCha20Poly1305Aead = XChaCha20Poly1305Aead;
 static ED25519_MLDSA65_ROLE: Ed25519MlDsa65 = Ed25519MlDsa65;
+static ED25519_MLDSA65_SLHDSA_ROLE: Ed25519MlDsa65SlhDsa = Ed25519MlDsa65SlhDsa;
 
 /// The hash algorithm a suite selects. Every suite uses BLAKE3 today; the enum
 /// exists so a future suite can select another without a new field.
@@ -456,7 +459,8 @@ impl Suite {
         })
     }
 
-    /// The signature role, or [`SuiteError::NotImplemented`] until ticket 10 lands.
+    /// The signature role, or [`SuiteError::NotImplemented`] if this build has no
+    /// implementation for the suite.
     pub fn signature(&self) -> Result<&'static dyn Signature, SuiteError> {
         self.signature.ok_or(SuiteError::NotImplemented {
             suite: self.id,
@@ -501,10 +505,10 @@ static SUITE_2: Suite = Suite {
 
 /// Suite 3: suite 1 plus SLH-DSA, for the long-term archive copy.
 ///
-/// The signature role is deliberately absent: SLH-DSA is not in this build, and a
-/// suite with one unimplemented component of a *hybrid* signature is not a working
-/// signature role. Resolving it reports `NotImplemented` naming the suite, which is
-/// the accurate diagnostic — a suite is not silently reduced to Ed25519+ML-DSA.
+/// §20.3 fixes the extra component's parameter set (`SLH-DSA-SHA2-128s`) and slot
+/// layout: `sig_pq = ML-DSA-65 ‖ SLH-DSA-SHA2-128s`, 11165 bytes, and the public
+/// key is `ML-DSA-65 ‖ SLH-DSA-SHA2-128s`, 1984 bytes. All three components must
+/// verify; a failure of any is a failure of the whole.
 static SUITE_3: Suite = Suite {
     id: 3,
     name: "hybrid-archive",
@@ -517,7 +521,7 @@ static SUITE_3: Suite = Suite {
     kdf: Some(&HKDF_SHA256_ROLE),
     kem: Some(&X25519_MLKEM768_ROLE),
     aead: Some(&AES_256_GCM_ROLE),
-    signature: None,
+    signature: Some(&ED25519_MLDSA65_SLHDSA_ROLE),
 };
 
 /// Every suite this build knows.

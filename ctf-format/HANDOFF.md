@@ -13,16 +13,18 @@ Cold-start context for whoever picks this up. Read this, then
 > decision, including cases where what shipped is deliberately *not* what a review
 > proposed.
 
-**Last updated:** 2026-10-28, at format version 0.3 / release 0.13.14. Phases 1–4
-complete and **phase 8 is complete**: the **hardening audit** (ticket 48,
-`docs/HARDENING-AUDIT.md`), the **hostile-input and future-file corpora** (tickets
-49/50, 35 fixtures in `spec/vectors/conformance/`), the **independent Go
-implementation** (tickets 53/54, `go/`, byte-identical on both goldens and 35/35
-fixtures), the **rerunnable ingest artifact** (ticket 64, `ctf verify`, spec
-§25.6.1), **`ctf pack` path emission** (ticket 88), and **fuzzing in CI with the
-entitlement target** (tickets 51/107). **The specification has no gaps** (ticket
-55): §34 fixes trusted-key distribution, §20.3 fixes suite 3's SLH-DSA parameters,
-and §25.6/§25.6.1 fix the gate's record and the ingest artifact. Release **0.13.1**
+**Last updated:** 2026-10-28, at format version 0.3 / release 1.0.0. Phases 1–8
+complete, including the **Phase 5 platform** (`crates/ctf-tui`), and Phase 9's
+v1.0.0 release checklist is closed. Phase 8 is complete: the **hardening audit**
+(ticket 48, `docs/HARDENING-AUDIT.md`), the **hostile-input and future-file
+corpora** (tickets 49/50, 35 fixtures in `spec/vectors/conformance/`), the
+**independent Go implementation** (tickets 53/54, `go/`, byte-identical on both
+goldens and 35/35 fixtures), the **rerunnable ingest artifact** (ticket 64, `ctf
+verify`, spec §25.6.1), **`ctf pack` path emission** (ticket 88), and **fuzzing in
+CI with the entitlement target** (tickets 51/107). **The specification has no
+gaps** (ticket 55): §34 fixes trusted-key distribution, §20.3 fixes suite 3's
+SLH-DSA parameters, and §25.6/§25.6.1 fix the gate's record and the ingest
+artifact. Release **0.13.1**
 is a post-release audit round (PRs #114–#118): every reader path that still
 disagreed with §4.4, §5.2, §5.4, §7.6, §10, §18, §23, §24, §25, or §34 was fixed,
 with no byte layout moved and both goldens unchanged. Release **0.13.2** closes the
@@ -43,6 +45,22 @@ leaves the gate unrunnable, and refuses a bare document's own unrunnable declara
 without a record. Release **0.13.14** makes both implementations run §5.4's D1/D2 caps on every non-external compressed section before any encryption or decoder skip, and escapes free-form text on every CLI path that echoes it — `ctf validate`/`ctf pack` origins, `ctf run`/`ctf verify` schema keys, the gate's module path, and `ctf release` destinations — including zero-width and other format characters a `check_name`-valid name can carry (§13). Release **0.13.13** gives Go's §24 progress helper a fresh content key per payload and enforces the envelope `name_id` and the two-key shape, makes a negative projected port the §29.1 policy error it always was, matches §29.3 origins case-insensitively, and runs the descriptor policy pass in `ctf validate`. Release **0.13.12** brings the independent Go reader in line with §19.2 S2/S3 (it accepted an unregistered suite as intact), fixes Go's `VerifyChunk` double-slice (which failed chunk 1 and panicked on chunk 2), makes `CTF_SEED` outrank `--seed-file` (I3), treats an empty flag injection as a mismatch rather than an absence (I4), and gives the runtime host a `--determinism` mode so a `none` challenge can start (§23.7). Release **0.13.11** resolves `suite_id` through the registry on the read path (an unregistered suite was accepted as intact), refuses a `sealed` declaration that omits its required `members` instead of releasing every sealed section, records `event_end` rather than an invented `all`, refuses `stage_key(_, 0)` as Go already did, escapes C1 controls in `ctf inspect`'s tables, and makes an out-of-range runtime port a pack-time policy error. Release **0.13.10** makes the determinism gate honour §23.7's `none`/`flag_only` modes and report an unrecognised mode as `unverified` (never a failed run), enforces G8's declared-output rule with an escaped diagnostic, and gives each G9 run the full fuel budget. Release **0.13.9** validates a `keys` section as a whole (EN5), tries every matching envelope so multi-recipient bundles unseal in any order, makes §22.2's `event_secret` length unconstrained, makes OCI export a byte-copy that needs a valid header but not a whole-container read, applies §29.2's read-time policy pass in `ctf inspect`, `ctf verify`, `ctf run`, `ctf serving-manifest`, and `ctf release`, and gives Go the reference's 0.3-missing-bit diagnostic. Release **0.13.8** aligns Go's `SealStream`/`OpenStream` with §20.2 (zero chunks for an empty plaintext; validate chunk size, chunk count, and per-chunk lengths), states in §18.4 that hashing a section is not reading its chain, and brings the ROADMAP, hardening audit, and this file in line with the shipped tree. Release **0.13.7** fixes two `write_bundle` paths that emitted `comp = 1` sections their own reader rejected, and states in §25.6/§25.6.1 what `ctf verify` records when a requested gate cannot run. Release 0.13.6 aligned the Go CBOR depth cap with the reference, defined the M1h count in §7.1, and repaired the corpus vectors that were meant to prove §5.4's `OPTIONAL` rule. The live gate is
 specified (§32) but not implemented, per design §2's scope boundary. `cargo test
 --workspace` green, `go test ./...` green, 0 clippy warnings, 0 gofmt diffs.
+
+**1.0.0 (2026-10-28) is the freeze release.** Suite 3's SLH-DSA-SHA2-128s
+signature role is implemented in both Rust and Go: `sig_pq =
+ML-DSA-65 (3309) ‖ SLH-DSA (7856) = 11165` bytes, split at 3309; `pk_pq = 1952 +
+32 = 1984`; all three components verify over the §8.4 transcript. Go now also
+covers zstd `comp = 1` with D1/D2 before the decoder, the §18 entitlement chain
+E1–E9 with the §34 trust roles, and suite 3. The authoring surface gains
+`external:` (design §10): entries are validated, compiled to the manifest
+`external` map and `EXTERNAL` section records, and emitted by `ctf init
+forensics`. Phase 5 ships as `crates/ctf-tui`: the Postgres 17 schema and `sqlx`
+migrations with a committed offline cache, the validate → verify → offline gate →
+store ingest pipeline, the `ratatui` admin TUI (six screens plus chunk progress),
+and the dual serving checks, alongside a CI database job. **No byte-layout
+change:** `version_minor` stays `3` and both goldens are byte-identical
+(`minimal.ctf` 4344 B `a23cd1b3…`, `demo.ctf` 18328 B `ce1a930e…`). 1.0.0 is the
+first release where the 0.3 byte layout is declared stable.
 
 ## Where this lives
 
@@ -93,6 +111,11 @@ ctf-format/
                         keys, seal, unseal, init, transfer, serving-manifest,
                         oci-export, oci-import, release, run, verify, completions
                         (clap); `src/verify.rs` is the §25.6.1 ingest artifact
+  crates/ctf-tui/       the operator surface (design §10): Postgres 17 schema +
+                        `sqlx` migrations with a committed `.sqlx` offline cache,
+                        the ingest pipeline (validate -> verify -> offline gate ->
+                        store), the ratatui admin TUI (six screens + chunk
+                        progress), and the default-deny serving checks
   go/                   independent second implementation (tickets 53/54), written
                         from `spec/SPEC.md` alone: read path, byte-identical
                         writer, primitive vectors, the 35-fixture conformance
@@ -195,13 +218,13 @@ Confirmed against current docs, not from memory. Re-verify before changing:
   implementation would have to reproduce with no Go `bao` available. Pre-1.0 with a
   single maintainer was the secondary concern. See `docs/ROADMAP.md` phase 1.
 
-## Current state — format version 0.3, phase 1 complete
+## Current state — format version 0.3, phases 1–8 complete
 
 The **container** is done: header, section table, canonical CBOR manifest, chunk
 index, footer, and the commitment root over header plus table. `Bundle::parse`
 runs the whole spec §10 conformance procedure; `write_bundle` produces files and
-parses them back before returning. 444 tests, 0 clippy warnings, `unsafe_code =
-"forbid"`.
+parses them back before returning. The full workspace test suite passes, with 0
+clippy warnings and `unsafe_code = "forbid"`.
 
 `ctf inspect` prints the header, manifest, section table, chunk indices, mirrors,
 and commitment root, with `--verify` to re-hash every inline section and `--hex`
@@ -231,7 +254,9 @@ the AEAD-STREAM construction (AES-256-GCM and XChaCha20-Poly1305), and hybrid
 signature verification (Ed25519 + ML-DSA-65, both required). `Authentication` is a
 token whose only constructor is a successful two-component check, so there is still
 no API that reports a bundle authentic without having verified it. Suite 3's SLH-DSA
-signature role reports `NotImplemented`.
+signature role is implemented in both implementations (1.0.0): the `sig_pq` slot is
+`ML-DSA-65 ‖ SLH-DSA-SHA2-128s`, split at 3309 bytes, and all three components must
+verify.
 
 Implemented since 0.7.0: **bundle signing** (`bundle::sign_bundle`, the production
 half of §20.3 — no byte outside the footer changes), **key envelopes**
@@ -240,7 +265,9 @@ recipient), **derived flags and stage keys** (`derive.rs`, spec §22 — a bundl
 carries the rule, never the flag), and **`ctf pack`** (`pack.rs`, ticket 35), with
 `ctf keygen`/`ctf sign` as CLI conveniences.
 
-Not implemented: key distribution and the live gate. The generator now **is**
+The only two non-implementations are key distribution (deployment, spec §34.3) and
+the live gate (orchestrator project, spec §32.4); both are external by design. The
+generator now **is**
 implemented (0.10.0): `ctf-generator` runs a capability-free module under profile 1
 and the determinism gate, with a `wasmi` cross-check.
 The writer now emits `enc = 1` for an encrypted section — compress, then encrypt —
@@ -328,26 +355,27 @@ unreadable to every 0.2 reader — spending the forward-compatibility mechanism 
 its first use. If you are about to reach for `feat_incompat` because a change feels
 big, that is the wrong reason; run the four clauses.
 
-## Next three things, in order
+## v1.0.0 status
 
-**0.13.0 completed phase 8**: fuzzing in CI with the entitlement target (51/107),
-the 33-fixture hostile and future-file corpora (49/50), the independent Go
-implementation reproducing every vector from `spec/SPEC.md` alone (53/54), the
-rerunnable ingest artifact (64), and `ctf pack` path emission (88). What remains, in
-order:
+Everything in [`docs/ROADMAP.md`](docs/ROADMAP.md) is done, through Phase 9's
+release checklist. Phase 5 is no longer future work: `crates/ctf-tui` is the
+Postgres 17 + `sqlx` + `ratatui` operator surface, with the validate → verify →
+offline gate → store ingest path, chunk progress, dual serving checks, and a CI
+database job. The `external:` authoring surface landed as well, so `ctf init
+forensics` packs a real external block instead of describing one in prose.
 
-1. **The platform ingest path** (phase 5): the Postgres schema, the ingest pipeline,
-   and the admin TUI — the first point the system is operable end to end. It now has
-   everything it needs: `Bundle::parse`, `offline_gate`, `PlatformDescriptor`,
-   `ServingManifest`, `release_at_event_end`, the `ctf/verification/v1` record
-   `ctf run` persists, and the `ctf/ingest-verification/v1` artifact `ctf verify`
-   emits for a job to gate on.
-2. **The live solvability gate** (spec §32): the orchestrator project implements the
-   socket contract; until then a `runtime`-bearing bundle is `unverified`.
-3. **The authoring surface for `external` payloads**, which `forensics` scaffolding
-   still has to describe in prose because `ChallengeDoc` has no `external` key. The
-   `artifacts`/`path` half of the old handoff item landed in 0.13.0; mirror metadata
-   did not, and spec §7.4's `external` map remains reader-only.
+The only two non-implementations are external by design, and neither is a release
+blocker:
+
+1. **The live solvability gate** (spec §32): the orchestrator project implements
+   the socket contract (§32.4). Until then a `runtime`-bearing bundle is
+   `unverified`.
+2. **Trusted-key provisioning** (spec §34.3): obtaining and distributing keys is a
+   deployment concern. Verification takes the trust set as an input and never
+   reads it from the file (§8.2).
+
+Their absence is reported honestly as `unverified`, never as `passed`. Nothing else
+in the specification is unimplemented; §14 now lists exactly these two items.
 
 ## Gotchas that will bite you
 
@@ -444,7 +472,7 @@ serving-layer checks:
 
 ```bash
 cd ctf-format
-cargo test                    # 444 tests
+cargo test                    # full workspace suite
 cargo clippy --all-targets    # must stay at zero warnings
 cargo fmt --all
 

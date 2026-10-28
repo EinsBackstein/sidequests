@@ -12,7 +12,7 @@
 )]
 
 use ctf_format::{
-    AeadId, Bundle, Error, HEADER_LEN, HashId, Header, KdfId, KemId, Manifest, Role, SectionFlags,
+    AeadId, Bundle, Error, HEADER_LEN, HashId, Header, KdfId, KemId, Manifest, SectionFlags,
     SectionKind, SectionSpec, SignatureId, SuiteError, footer::commitment_root, suite,
     write_bundle,
 };
@@ -53,10 +53,11 @@ fn an_unknown_suite_is_named() {
     );
 }
 
-/// Tickets 10–12 filled the phases 2 roles, so suites 1 and 2 resolve all five.
+/// Tickets 10–12 filled the phases 2 roles; suite 3's SLH-DSA component is now
+/// implemented too, so all three suites resolve all five.
 #[test]
 fn implemented_roles_resolve_through_the_registry() {
-    for id in [1u16, 2] {
+    for id in [1u16, 2, 3] {
         let s = suite(id).unwrap();
         assert!(s.kdf().is_ok(), "kdf role should resolve for suite {id}");
         assert!(s.kem().is_ok(), "kem role should resolve for suite {id}");
@@ -68,22 +69,15 @@ fn implemented_roles_resolve_through_the_registry() {
     }
 }
 
-/// Suite 3's signature is Ed25519 + ML-DSA-65 + SLH-DSA. SLH-DSA is not in this
-/// build, and a hybrid signature missing a component is not a working role, so it
-/// fails where it is used — named, not panicking, and not at header parse.
+/// Suite 3's signature is Ed25519 + ML-DSA-65 + SLH-DSA-SHA2-128s. §20.3 fixes the
+/// slot layout, so the role reports the concatenated post-quantum widths.
 #[test]
-fn the_archive_signature_role_is_not_implemented() {
-    let s3 = suite(3).unwrap();
-    assert!(s3.kdf().is_ok());
-    assert!(s3.kem().is_ok());
-    assert!(s3.aead().is_ok());
-    assert_eq!(
-        s3.signature().unwrap_err(),
-        SuiteError::NotImplemented {
-            suite: 3,
-            role: Role::Signature
-        }
-    );
+fn the_archive_signature_role_reports_its_slot_layout() {
+    let role = suite(3).unwrap().signature().unwrap();
+    assert_eq!(role.classical_public_key_len(), 32);
+    assert_eq!(role.classical_signature_len(), 64);
+    assert_eq!(role.pq_public_key_len(), 1952 + 32);
+    assert_eq!(role.pq_signature_len(), 3309 + 7856);
 }
 
 /// The header parser records `suite_id` verbatim and does not consult the

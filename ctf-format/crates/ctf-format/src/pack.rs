@@ -22,10 +22,21 @@
 //! assigned is format-relevant. `pack` assigns, in order: `manifest` first (so the
 //! manifest is always `name_id` 0), then the author's inline `artifacts` in
 //! declaration order, the generator module, its declared outputs in declaration
-//! order, the sealed members, and the solver. A name repeated across those places
-//! is assigned once, at its first occurrence. Every name passes `check_name`, so a
-//! path-shaped or control-character name is refused here — at authoring time, with
-//! the offending key named — rather than by the manifest decoder with no context.
+//! order, the sealed members, the solver, and finally the `external` entries. A
+//! name repeated across those places is assigned once, at its first occurrence.
+//! Every name passes `check_name`, so a path-shaped or control-character name is
+//! refused here — at authoring time, with the offending key named — rather than by
+//! the manifest decoder with no context.
+//!
+//! # External payloads are declared, never read
+//!
+//! An `external` entry compiles into one `artifact` section carrying the
+//! `EXTERNAL` flag and a `Payload::External` record, plus an `external` manifest
+//! entry keyed by that section's `name_id` (spec §5.7, §7.4). `pack` never opens a
+//! file for one: the record's `root` and `len_plain` are the commitment, and the
+//! mirrors in the manifest say where a player can fetch the bytes. The writer's own
+//! parse-back then applies M20/M21, so a `size` or `root` that disagrees with the
+//! record is refused before `pack` returns.
 //!
 //! # Paths, and why the key is omitted when it says nothing
 //!
@@ -43,7 +54,7 @@ use std::path::Path;
 
 use crate::Error;
 use crate::authoring::{ChallengeDoc, ValidationIssue};
-use crate::bundle::{SectionSpec, write_bundle};
+use crate::bundle::{Payload, SectionSpec, write_bundle};
 use crate::cbor::Value;
 use crate::descriptor::PlatformDescriptor;
 use crate::manifest::{Manifest, check_name};
@@ -144,6 +155,12 @@ fn name_sources(doc: &ChallengeDoc) -> Vec<NameSource> {
     if let Some(v) = &doc.verify {
         push(&mut out, &v.solver, "verify.solver");
     }
+    // External names go last so a document that declares none keeps the exact
+    // `name_id` assignment — and therefore the byte-identical manifest — it had
+    // before the key existed.
+    for (i, external) in doc.external.iter().enumerate() {
+        push(&mut out, &external.name, &format!("external[{i}].name"));
+    }
     out
 }
 
@@ -159,6 +176,7 @@ pub fn names_for(doc: &ChallengeDoc) -> Vec<String> {
 pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackError> {
     let sources = name_sources(doc);
     let mut issues = doc.artifact_issues();
+    issues.extend(doc.external_issues());
     for s in &sources {
         if let Some(reason) = check_name(&s.name) {
             issues.push(ValidationIssue::new(s.key.clone(), reason));
@@ -190,6 +208,35 @@ pub fn manifest_for(doc: &ChallengeDoc) -> core::result::Result<Manifest, PackEr
     }
 
     let mut extra = doc.manifest_entries();
+    let external = external_entries(doc, &names)?;
+    if !external.is_empty() {
+        // §7.4: `size` and `root` are copies for a fetcher; the record is
+        // authoritative, and the writer's parse-back applies M21. Mirrors are the
+        // only place a player learns where the payload lives.
+        extra.push((
+            text("external"),
+            Value::Map(
+                external
+                    .into_iter()
+                    .map(|entry| {
+                        (
+                            Value::Uint(u64::from(entry.name_id)),
+                            Value::Map(vec![
+                                (text("size"), Value::Uint(entry.size)),
+                                (text("root"), Value::Bytes(entry.root.to_vec())),
+                                (
+                                    text("mirrors"),
+                                    Value::Array(
+                                        entry.mirrors.into_iter().map(Value::Text).collect(),
+                                    ),
+                                ),
+                            ]),
+                        )
+                    })
+                    .collect(),
+            ),
+        ));
+    }
     let paths = path_entries(doc, &names)?;
     if !paths.is_empty() {
         extra.push((
@@ -238,6 +285,47 @@ fn path_entries(
                 )])
             })?;
         out.push((name_id, path.to_owned()));
+    }
+    Ok(out)
+}
+
+/// One compiled `external` entry, bound to the section identity it will carry.
+struct ExternalEntry {
+    name_id: u16,
+    size: u64,
+    root: [u8; 32],
+    mirrors: Vec<String>,
+}
+
+/// The `external` entries a document declares.
+///
+/// Empty when the document declares none, which is what keeps the manifest key —
+/// and every byte of the bundle — absent for a document written before the key
+/// existed. A collision is refused by [`ChallengeDoc::external_issues`] before this
+/// runs, so failing to find a `name_id` here means the name table was built by
+/// something other than [`names_for`].
+fn external_entries(
+    doc: &ChallengeDoc,
+    names: &[&str],
+) -> core::result::Result<Vec<ExternalEntry>, PackError> {
+    let mut out = Vec::with_capacity(doc.external.len());
+    for (i, external) in doc.external.iter().enumerate() {
+        let name_id = names
+            .iter()
+            .position(|n| *n == external.name)
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or_else(|| {
+                PackError::Invalid(vec![ValidationIssue::new(
+                    format!("external[{i}].name"),
+                    "has no entry in the manifest name table",
+                )])
+            })?;
+        out.push(ExternalEntry {
+            name_id,
+            size: external.size,
+            root: external.root,
+            mirrors: external.mirrors.clone(),
+        });
     }
     Ok(out)
 }
@@ -357,6 +445,38 @@ pub fn pack_with_descriptor_root(
             SectionFlags(SectionFlags::PLAYER_VISIBLE),
             payload,
         ));
+    }
+    // External payloads are declared, never read: no `std::fs` call belongs in this
+    // loop. The record commits to the author's `root`/`size`, the manifest carries
+    // the mirrors, and the payload stays wherever the author hosts it (design §2).
+    for (i, external) in doc.external.iter().enumerate() {
+        let name_id = names
+            .iter()
+            .position(|n| *n == external.name)
+            .and_then(|index| u16::try_from(index).ok())
+            .ok_or_else(|| {
+                PackError::Invalid(vec![ValidationIssue::new(
+                    format!("external[{i}].name"),
+                    "has no entry in the manifest name table",
+                )])
+            })?;
+        sections.push(SectionSpec {
+            kind: SectionKind::Artifact,
+            name_id,
+            // The bytes are for the player, served from a mirror; `EXTERNAL` says
+            // they are not in this file (spec §5.3, §5.7).
+            flags: SectionFlags(SectionFlags::EXTERNAL | SectionFlags::PLAYER_VISIBLE),
+            chunk_size: 0,
+            // R22: an EXTERNAL record carries no codec. `size` is already the
+            // plaintext length the author declared.
+            comp: crate::Compression::None,
+            payload: Payload::External {
+                len_plain: external.size,
+                root: external.root,
+            },
+            chunk_index: None,
+            encryption: None,
+        });
     }
     let file = write_bundle(suite_id, &sections).map_err(PackError::Format)?;
     Ok((file, descriptor))

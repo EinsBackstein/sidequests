@@ -1,6 +1,6 @@
 [package]
 name = "ctf-format"
-version = "0.13.14"
+version = "1.0.0"
 description = "Reader and writer for the .ctf challenge transport format"
 edition.workspace = true
 rust-version.workspace = true
@@ -31,6 +31,10 @@ zstd = "0.14"
 aws-lc-rs = "1.18"
 ml-kem = { version = "0.3", features = ["getrandom"] }
 ml-dsa = { version = "0.1", features = ["getrandom"] }
+# SLH-DSA-SHA2-128s, suite 3's third signature component (spec §20.3). RustCrypto's
+# FIPS 205 implementation, deterministic by default: the same key and transcript
+# produce the same signature, which is what keeps a re-sign reproducible.
+slh-dsa = "0.2.0-rc.5"
 # XChaCha20-Poly1305, suite 2's AEAD. AWS-LC exposes ChaCha20-Poly1305 but not the
 # extended-nonce XChaCha variant, so this one role comes from RustCrypto.
 chacha20poly1305 = "0.11"

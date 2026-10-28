@@ -220,15 +220,19 @@ func TestMLDSA65RoundTrip(t *testing.T) {
 }
 
 func TestHybridSignatureRoundTrip(t *testing.T) {
-	for _, suiteID := range []uint16{1, 2} {
+	for _, suiteID := range []uint16{1, 2, 3} {
 		suiteID := suiteID
 		t.Run(cf.SuiteName(suiteID), func(t *testing.T) {
-			priv, pub, err := cf.GenerateHybridKey()
+			priv, pub, err := cf.GenerateHybridKeyForSuite(suiteID)
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantPQ := 3309
+			if suiteID == 3 {
+				wantPQ = 11165
+			}
 			root := [32]byte{1, 2, 3}
-			transcript := cf.FooterTranscript(suiteID, 64, 3309, root, 4344)
+			transcript := cf.FooterTranscript(suiteID, 64, uint32(wantPQ), root, 4344)
 			if len(transcript) != 67 {
 				t.Fatalf("transcript is %d bytes, want 67", len(transcript))
 			}
@@ -236,7 +240,7 @@ func TestHybridSignatureRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(classical) != 64 || len(pq) != 3309 {
+			if len(classical) != 64 || len(pq) != wantPQ {
 				t.Fatalf("signature sizes %d/%d", len(classical), len(pq))
 			}
 			if err := cf.VerifyHybrid(suiteID, pub, transcript, classical, pq); err != nil {
@@ -248,9 +252,6 @@ func TestHybridSignatureRoundTrip(t *testing.T) {
 				t.Fatal("verified a modified transcript")
 			}
 		})
-	}
-	if _, _, err := cf.SignHybrid(3, nil, nil); err == nil {
-		t.Fatal("suite 3 should report SLH-DSA not implemented")
 	}
 }
 

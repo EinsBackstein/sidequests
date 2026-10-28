@@ -12,7 +12,7 @@
 )]
 
 use ctf_format::footer::ROOT_LEN;
-use ctf_format::suite::{Role, SuiteError, suite};
+use ctf_format::suite::{SuiteError, suite};
 use ctf_format::{Footer, MAGIC, verify_footer};
 
 fn signed_footer(suite_id: u16) -> (Footer, ctf_format::HybridPublicKey) {
@@ -199,16 +199,13 @@ fn a_signed_bundle_reads_back_and_verifies() {
     assert!(auth.is_authentic());
 }
 
-/// Suite 3's hybrid signature includes SLH-DSA, which is not in this build, so the
-/// role is reported as not implemented rather than silently reduced.
+/// Suite 3's hybrid signature includes SLH-DSA. The role resolves with the slot
+/// layout §20.3 fixes: 64 classical bytes and 11165 post-quantum bytes.
 #[test]
-fn the_archive_signature_role_is_not_implemented() {
-    let err = suite(3).unwrap().signature().unwrap_err();
-    assert_eq!(
-        err,
-        SuiteError::NotImplemented {
-            suite: 3,
-            role: Role::Signature
-        }
-    );
+fn the_archive_signature_role_resolves_with_its_slot_layout() {
+    let role = suite(3).unwrap().signature().unwrap();
+    assert_eq!(role.classical_signature_len(), 64);
+    assert_eq!(role.pq_signature_len(), 11165);
+    assert_eq!(role.classical_public_key_len(), 32);
+    assert_eq!(role.pq_public_key_len(), 1984);
 }

@@ -33,28 +33,29 @@
 //! `ctf pack` requires. Everything else is present only where it has something
 //! to say: `rev` emits a `generator/` crate because `generate.wasm: gen.wasm` is
 //! useless without a module to build, `forensics` emits `notes.md` for the
-//! inventory that has no other home, and every archetype emits a `README.md`
+//! analysis that has no other home, and every archetype emits a `README.md`
 //! with next-step guidance. Nothing else is emitted, so a scaffold is a starting
 //! point rather than a tree to delete.
 //!
-//! # The `external` gap
+//! # External payloads
 //!
 //! Design §10's full pwn example ends with an `external:` list for
-//! forensics-scale payloads (design §10, spec §5.7). The authoring schema in
-//! [`crate::authoring`] has **no `external` field** on
-//! [`crate::authoring::ChallengeDoc`], and
-//! [`crate::authoring::ChallengeDoc::from_yaml`] rejects unknown keys (spec
-//! §7.8), so a scaffold that emitted `external:` would not parse. The
-//! `forensics` scaffold therefore carries that guidance in its `README.md`
-//! instead of inventing a key, and the manifest-level `external` mechanism
-//! (spec §5.7) remains reachable only through the bundle layer until the
-//! authoring surface grows the key.
+//! forensics-scale payloads (design §10, spec §5.7). It is an authoring key on
+//! [`crate::authoring::ChallengeDoc`]: each entry declares a section name, the
+//! plaintext `size`, the BLAKE3 `root`, and one or more `mirrors` (spec §7.4,
+//! M18). `ctf pack` compiles an entry into an `EXTERNAL` artifact section and an
+//! `external` manifest entry keyed by its `name_id`, and never reads a file for
+//! it — the payload stays where the author hosts it (design §2).
 //!
-//! Inline static payloads *are* authorable now: an `artifacts:` entry names the
+//! The `forensics` scaffold therefore emits a real `external:` block with
+//! placeholders for `workstation.E01`. Its `size` and `root` are not derivable
+//! from a scaffold, so they are clearly marked placeholders the author replaces
+//! before packing.
+//!
+//! Inline static payloads are authorable too: an `artifacts:` entry names the
 //! section, the file to read, and an optional `path` for the extracted tree
 //! (spec §7.2, §7.8). That is the right shape for a small attachment, not for a
-//! 40 GB evidence image, which is why the gap above is specifically about
-//! `external`.
+//! 40 GB evidence image.
 //!
 //! # Determinism
 //!
@@ -240,19 +241,20 @@ fn web(id: &str) -> Vec<ScaffoldFile> {
     ]
 }
 
-/// The generator-free forensic path. `external:` is not yet an authoring key, so
-/// the payload inventory lives in `notes.md` (see the module docs).
+/// The generator-free forensic path. The evidence image is declared with
+/// `external:`, so the bundle commits to it without carrying its bytes.
 fn forensics(id: &str) -> Vec<ScaffoldFile> {
+    let mut yaml = header(
+        id,
+        "forensics",
+        "Forensics challenge",
+        "Analyze the provided material; the evidence image is declared with `external:` (see notes.md).",
+    );
+    yaml.push_str(&format!(
+        "external:\n  - name: workstation.E01\n    size: 41231986688\n    root: \"blake3:{ZERO_DIGEST}\"\n    mirrors: [\"https://mirror.example/workstation.E01\"]\n"
+    ));
     vec![
-        file(
-            "challenge.yaml",
-            header(
-                id,
-                "forensics",
-                "Forensics challenge",
-                "Analyze the provided material; see notes.md for the payload inventory.",
-            ),
-        ),
+        file("challenge.yaml", yaml),
         file("README.md", readme(id, "forensics", FORENSICS_BODY)),
         file("notes.md", notes(id)),
     ]
@@ -261,14 +263,17 @@ fn forensics(id: &str) -> Vec<ScaffoldFile> {
 fn notes(id: &str) -> String {
     format!(
         "# {id} analysis notes\n\n\
-         Design 10 expresses forensics-scale payloads with an `external:` list, but the\n\
-         authoring schema still has no such key and rejects unknown keys (spec 7.8).\n\
-         Small static payloads can be carried inline now with an `artifacts:` entry and\n\
-         its `path:`. Record the external payload inventory here until `external` lands.\n\n\
-         - name:\n\
-         - size:\n\
-         - root (blake3):\n\
-         - mirrors:\n"
+         `challenge.yaml` declares the evidence image under `external:`. The bundle\n\
+         commits to its plaintext size and BLAKE3 root and lists the mirrors, but\n\
+         never carries the bytes (spec 5.7, 7.4); a player or the platform fetches\n\
+         and verifies the payload out of band.\n\n\
+         Replace the placeholders in `challenge.yaml` before packing:\n\n\
+         - `size`: the payload's plaintext length in bytes.\n\
+         - `root`: `blake3:` followed by 64 lowercase hex digits of the payload.\n\
+         - `mirrors`: one or more URLs, each 1 to 2048 bytes.\n\n\
+         A small payload that belongs inside the bundle is an `artifacts:` entry\n\
+         instead, with an optional `path:` for the extracted tree.\n\n\
+         Record the analysis here:\n"
     )
 }
 
@@ -336,18 +341,21 @@ Next steps:
 ";
 
 const FORENSICS_BODY: &str = "\
-Design 10's forensics-scale payloads are declared with an `external:` list, but
-the authoring schema has no `external` key yet and rejects unknown keys (spec
-7.8). Small static payloads can be carried inline with `artifacts:` and a `path:`;
-keep the external payload inventory in `notes.md` for now. The manifest's
-`external` mechanism (spec 5.7) is reachable through the bundle layer until the
-authoring surface grows the key.
+`challenge.yaml` declares `workstation.E01` under `external:`. The bundle keeps
+the payload's plaintext size, BLAKE3 root, and mirror list, and never carries its
+bytes (spec 5.7, 7.4); whoever serves the challenge fetches and verifies the image
+out of band.
+
+The `size`, `root`, and `mirrors` values are placeholders. Replace them with the
+real payload metadata before packing, or `ctf pack` will emit a record that
+describes bytes no mirror will match.
 
 Next steps:
 
-1. Put the analysis and external payload inventory in `notes.md`.
-2. Replace `name` and `description` in `challenge.yaml`.
-3. Run `ctf validate`, then `ctf pack`.
+1. Replace the placeholder `external:` `size`, `root`, and `mirrors`.
+2. Put the analysis in `notes.md`.
+3. Replace `name` and `description` in `challenge.yaml`.
+4. Run `ctf validate`, then `ctf pack`.
 ";
 
 const GENERATOR_CARGO: &str = "\

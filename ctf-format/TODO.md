@@ -5,6 +5,11 @@
 **Read first:** [`HANDOFF.md`](HANDOFF.md) for what the project is, then this file for
 what is outstanding.
 
+> **Historical record (1.0.0).** Every tier in this file is closed. It is retained
+> as the review record for the 0.3 phase-1 audit, not as an open-work list; the
+> current state is in [`HANDOFF.md`](HANDOFF.md) and
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 **Progress:** Tier 1 complete (B1–B4), and Tier 2 and Tier 3 complete (H2–H6,
 L1–L8). The post-fix re-review of 2026-09-20 closed the final two open items — L6 and
 L7 — and recorded 28 new tickets (70–97) rather than folding them in; see

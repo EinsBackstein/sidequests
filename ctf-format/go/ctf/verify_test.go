@@ -1,6 +1,7 @@
 package ctf
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"os"
@@ -155,11 +156,11 @@ func TestVerifyAllAcceptsPlainAndExternalSections(t *testing.T) {
 	}
 }
 
-// A compressed section inside the caps is unverifiable, not invalid: this build
-// has no zstd decoder, so the section is skipped. Its stored bytes deliberately
-// do not hash to the record's root, so deleting the skip would make the root
-// check report a finding and fail this test.
-func TestVerifyAllTreatsInCapCompressedAsUnverifiable(t *testing.T) {
+// A compressed section inside the caps is now decodable, so a verification pass
+// must decode it and check the plaintext against its root. The writer emits the
+// frame, and the reader returns exactly the original plaintext.
+func TestVerifyAllDecodesInCapCompressedSection(t *testing.T) {
+	plaintext := []byte("compressed plaintext that round-trips through the reader")
 	m := NewManifest()
 	m.Set("id", Text("verify-comp"))
 	m.Set("name", Text("Verify Comp"))
@@ -169,19 +170,65 @@ func TestVerifyAllTreatsInCapCompressedAsUnverifiable(t *testing.T) {
 		Kind:      KindArtifact,
 		NameID:    1,
 		Flags:     FlagPlayerVisible,
-		Plaintext: []byte("stored bytes that are not the root"),
+		Comp:      CompZstd,
+		Plaintext: plaintext,
 	}}, WriteOptions{})
 	if err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
-	data = setRecordComp(t, data, 1, CompZstd)
-	data = setRecordRoot(t, data, 1, 0xaa)
 	b, err := Parse(data)
 	if err != nil {
 		t.Fatalf("parse compressed bundle: %v", err)
 	}
 	if errs := b.VerifyAll(); len(errs) != 0 {
 		t.Fatalf("in-cap compressed section was reported as a finding: %v", errs)
+	}
+	got, err := b.SectionPlaintext(1, nil)
+	if err != nil {
+		t.Fatalf("serve compressed section: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("decompressed plaintext does not match: got %d bytes, want %d", len(got), len(plaintext))
+	}
+	if got, err := b.SectionBytes(1); err != nil || !bytes.Equal(got, plaintext) {
+		t.Fatalf("SectionBytes on compressed section: %v", err)
+	}
+}
+
+// A corrupt compressed frame is a finding, not something VerifyAll may skip.
+func TestVerifyAllReportsCorruptCompressedFrame(t *testing.T) {
+	plaintext := bytes.Repeat([]byte("abcdefgh"), 4096)
+	m := NewManifest()
+	m.Set("id", Text("verify-corrupt-comp"))
+	m.Set("name", Text("Verify Corrupt Comp"))
+	m.Set("names", Array(Text("manifest"), Text("section")))
+	m.Set("spec", Uint(1))
+	data, err := WriteBundle(m, []Section{{
+		Kind:      KindArtifact,
+		NameID:    1,
+		Flags:     FlagPlayerVisible,
+		Comp:      CompZstd,
+		Plaintext: plaintext,
+	}}, WriteOptions{})
+	if err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+	b, err := Parse(data)
+	if err != nil {
+		t.Fatalf("parse compressed bundle: %v", err)
+	}
+	rec, _ := b.Section(1)
+	corrupt := append([]byte(nil), data...)
+	corrupt[rec.Offset] ^= 0xff
+	b2, err := Parse(corrupt)
+	if err != nil {
+		t.Fatalf("parse corrupt compressed bundle: %v", err)
+	}
+	if errs := b2.VerifyAll(); len(errs) == 0 {
+		t.Fatal("VerifyAll skipped a corrupt compressed frame")
+	}
+	if _, err := b2.SectionPlaintext(1, nil); err == nil {
+		t.Fatal("SectionPlaintext served a corrupt compressed frame")
 	}
 }
 
