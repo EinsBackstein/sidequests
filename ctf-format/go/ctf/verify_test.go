@@ -1,6 +1,7 @@
 package ctf
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"strings"
@@ -42,6 +43,38 @@ func setRecordComp(t *testing.T, data []byte, index int, comp uint8) []byte {
 	}
 	rec := h.SectionTableOff + uint64(index)*SectionRecordLen
 	out[rec+7] = comp
+	return resealTable(t, out)
+}
+
+// setRecordRoot patches one record's root and reseals the table, so a test can
+// reach the hashing path with a stored section that would otherwise match.
+func setRecordRoot(t *testing.T, data []byte, index int, fill byte) []byte {
+	t.Helper()
+	out := append([]byte(nil), data...)
+	h, err := ParseHeader(out)
+	if err != nil {
+		t.Fatalf("reparse header: %v", err)
+	}
+	rec := h.SectionTableOff + uint64(index)*SectionRecordLen
+	for i := uint64(0); i < RootLen; i++ {
+		out[rec+48+i] = fill
+	}
+	return resealTable(t, out)
+}
+
+// setRecordEncAndBigPlain patches one record's enc byte and len_plain and reseals
+// the table, so a cap check can be exercised without a decoder.
+func setRecordEncAndBigPlain(t *testing.T, data []byte, index int, enc uint8, lenPlain uint64) []byte {
+	t.Helper()
+	out := append([]byte(nil), data...)
+	h, err := ParseHeader(out)
+	if err != nil {
+		t.Fatalf("reparse header: %v", err)
+	}
+	rec := h.SectionTableOff + uint64(index)*SectionRecordLen
+	out[rec+6] = enc
+	binary.LittleEndian.PutUint32(out[rec+32:rec+36], 4096)
+	binary.LittleEndian.PutUint64(out[rec+24:rec+32], lenPlain)
 	return resealTable(t, out)
 }
 
@@ -123,18 +156,53 @@ func TestVerifyAllAcceptsPlainAndExternalSections(t *testing.T) {
 }
 
 // A compressed section inside the caps is unverifiable, not invalid: this build
-// has no zstd decoder, so the section is skipped the way the reference counts it
-// `unverifiable` (spec §5.4/§10). The caps are still checked first; the bomb
-// cases above prove that.
+// has no zstd decoder, so the section is skipped. Its stored bytes deliberately
+// do not hash to the record's root, so deleting the skip would make the root
+// check report a finding and fail this test.
 func TestVerifyAllTreatsInCapCompressedAsUnverifiable(t *testing.T) {
-	data := minimalWithSection(t, KindArtifact, FlagPlayerVisible)
+	m := NewManifest()
+	m.Set("id", Text("verify-comp"))
+	m.Set("name", Text("Verify Comp"))
+	m.Set("names", Array(Text("manifest"), Text("section")))
+	m.Set("spec", Uint(1))
+	data, err := WriteBundle(m, []Section{{
+		Kind:      KindArtifact,
+		NameID:    1,
+		Flags:     FlagPlayerVisible,
+		Plaintext: []byte("stored bytes that are not the root"),
+	}}, WriteOptions{})
+	if err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
 	data = setRecordComp(t, data, 1, CompZstd)
+	data = setRecordRoot(t, data, 1, 0xaa)
 	b, err := Parse(data)
 	if err != nil {
 		t.Fatalf("parse compressed bundle: %v", err)
 	}
 	if errs := b.VerifyAll(); len(errs) != 0 {
 		t.Fatalf("in-cap compressed section was reported as a finding: %v", errs)
+	}
+}
+
+// Spec §5.4: the caps apply to a compressed encrypted section's declared totals
+// before any key is used, so VerifyAll must not skip it on the way to the
+// encryption check.
+func TestVerifyAllChecksCapsBeforeSkippingAnEncryptedSection(t *testing.T) {
+	data := minimalWithSection(t, KindArtifact, FlagPlayerVisible)
+	data = setRecordComp(t, data, 1, CompZstd)
+	data = setRecordEncAndBigPlain(t, data, 1, 1, 1<<40)
+	b, err := Parse(data)
+	if err != nil {
+		t.Fatalf("parse encrypted compressed bundle: %v", err)
+	}
+	errs := b.VerifyAll()
+	if len(errs) != 1 {
+		t.Fatalf("VerifyAll returned %d errors, want 1: %v", len(errs), errs)
+	}
+	var ce *Error
+	if !errors.As(errs[0], &ce) || ce.Rule != "D1" {
+		t.Fatalf("want a D1 error, got %v", errs[0])
 	}
 }
 

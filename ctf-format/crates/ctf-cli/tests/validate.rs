@@ -220,6 +220,29 @@ description: \"see http://evil\\u001b[2J.invalid/\"
     );
 }
 
+/// §13 also covers the schema-error path: serde echoes the offending key, which
+/// is free-form text in the file, so a control in a key must not reach the
+/// terminal.
+#[test]
+fn an_escape_in_an_unknown_key_is_not_written_raw() {
+    let body = "\
+spec: 1
+id: escape-key
+name: Escape Key
+bad\\u001b[2Jkey: 1
+";
+    let t = TempYaml::new("escape-key", body);
+    let (_ok, _out, err) = validate(t.path(), &[]);
+    assert!(
+        !err.as_bytes().contains(&0x1b),
+        "raw escape byte reached the terminal:\n{err:?}"
+    );
+    assert!(
+        err.contains("\\u001b"),
+        "the escape should be visible as text:\n{err}"
+    );
+}
+
 /// A bidi-format mark `check_name` permits (LRM) is escaped in a description
 /// diagnostic too: it can reorder the rest of the line around the origin.
 #[test]

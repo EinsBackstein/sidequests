@@ -545,7 +545,9 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
     let doc = match ChallengeDoc::from_yaml(&text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("ctf: {path}: {e}");
+            // A schema error echoes the offending key, which is free-form text in
+            // the file; escape it before it reaches the terminal (§13).
+            eprintln!("ctf: {path}: {}", escape_terminal(&e.to_string()));
             return ExitCode::FAILURE;
         }
     };
@@ -617,7 +619,9 @@ fn run_pack(args: &PackArgs) -> ExitCode {
     let doc = match ChallengeDoc::from_yaml(&text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("ctf: {path}: {e}");
+            // A schema error echoes the offending key, which is free-form text in
+            // the file; escape it before it reaches the terminal (§13).
+            eprintln!("ctf: {path}: {}", escape_terminal(&e.to_string()));
             return ExitCode::FAILURE;
         }
     };

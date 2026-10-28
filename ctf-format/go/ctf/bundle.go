@@ -365,26 +365,32 @@ func (b *Bundle) Verify() error {
 // VerifyAll checks all plain inline sections and returns every mismatch, so an
 // operator is not left to bisect a large bundle (spec §13).
 //
-// An EXTERNAL section's bytes are absent by design, so it is skipped. An
-// encrypted section cannot be checked without the content key, a compressed
-// section of a kind this build does not implement must not be decompressed
-// (spec §10), and this build has no zstd decoder, so all three are unverifiable
-// rather than silently verified. D1 and D2 are still applied to every compressed
-// section before it is skipped: the caps are a MUST, and checking the
-// authenticated declaration needs no decoder (§5.4).
+// An EXTERNAL section's bytes are absent by design, so it is skipped. D1 and D2
+// are applied to every non-external compressed section before anything else: the
+// caps are a MUST, they need no decoder, and §5.4 makes them apply to an
+// encrypted section's declared totals too. After that, an encrypted section
+// cannot be checked without the content key, and this build has no zstd decoder,
+// so a compressed section is unverifiable and skipped rather than silently
+// verified.
 func (b *Bundle) VerifyAll() []error {
 	var errs []error
 	for _, r := range b.Sections {
-		if r.External() || r.Enc != EncNone {
+		if r.External() {
+			continue
+		}
+		if r.Comp != CompNone {
+			if err := decompressionCaps(r); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		if r.Enc != EncNone {
 			continue
 		}
 		if !r.Understood() && r.Comp != CompNone {
 			continue
 		}
 		if r.Comp != CompNone {
-			if err := decompressionCaps(r); err != nil {
-				errs = append(errs, err)
-			}
 			continue
 		}
 		stored, err := b.storedBytes(r)
