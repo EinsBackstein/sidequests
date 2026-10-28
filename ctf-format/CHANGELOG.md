@@ -30,8 +30,10 @@ is still not a suppression.
 The host never compared the generator's output block against `generate.outputs`, so
 a module could emit an undeclared artifact. The gate now rejects the run at the
 determinism stage, naming the offending output, which keeps the record's
-`generator_root`, `cross_engine`, and `runs` null. An emitted subset of the declared
-outputs remains legal.
+`generator_root`, `cross_engine`, and `runs` null. The name is guest text, so the
+diagnostic escapes control characters (§13) rather than letting a crafted module
+forge the gate's own status lines. An emitted subset of the declared outputs remains
+legal.
 
 ### Fixed — fuel is a per-run budget (§23.6, G5, G9)
 

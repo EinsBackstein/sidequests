@@ -134,9 +134,13 @@ impl core::fmt::Display for GeneratorError {
             Self::EngineDisagreement => f.write_str(
                 "the two engines produced different output for the same module and seed",
             ),
+            // The name comes from guest output, so it is escaped: a crafted module
+            // must not be able to inject a newline or terminal escape into the
+            // gate's own diagnostic stream (spec §13).
             Self::UndeclaredOutput(name) => write!(
                 f,
-                "generator named output `{name}`, which `generate.outputs` does not declare (rule G8)"
+                "generator named output `{}`, which `generate.outputs` does not declare (rule G8)",
+                name.escape_debug()
             ),
         }
     }

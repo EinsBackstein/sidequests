@@ -213,6 +213,20 @@ fn every_emitted_output_must_be_declared_by_generate_outputs() {
 }
 
 #[test]
+fn an_undeclared_output_name_cannot_inject_terminal_output() {
+    // The name is guest-controlled. §13 requires a tool that writes it to a terminal
+    // to escape control characters, or a crafted module could forge the gate's own
+    // status lines.
+    let err = GeneratorError::UndeclaredOutput("x\u{1b}[2K\n  determinism passed".to_owned());
+    let sentence = err.to_string();
+    assert!(
+        !sentence.contains('\u{1b}') && !sentence.contains('\n'),
+        "control characters are escaped: {sentence}"
+    );
+    assert!(sentence.contains("determinism passed"), "{sentence}");
+}
+
+#[test]
 fn an_emitted_subset_of_the_declared_outputs_is_legal() {
     // The rule is one-directional: fewer outputs than declared is fine.
     let report = offline_gate(
