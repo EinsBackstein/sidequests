@@ -17,9 +17,9 @@ no header, section, footer, commitment root, or signature transcript moved.
 
 The commitment root and every section root were hashed with BLAKE3 directly, so a
 bundle naming an unregistered `suite_id` parsed and `ctf verify` reported it intact.
-The reader now resolves the suite at the commitment root — the first primitive — and
-rejects an unknown id by name; `write_bundle` resolves it at entry, so
-`ctf pack --suite 99` fails rather than emitting a file its own reader refuses.
+The reader now resolves the suite before the commitment root is checked — the first
+primitive — and rejects an unknown id by name; `write_bundle` resolves it at entry,
+so `ctf pack --suite 99` fails rather than emitting a file its own reader refuses.
 
 ### Fixed — a malformed `sealed.members` no longer releases everything (§27.1)
 
@@ -52,8 +52,8 @@ control or bidi character in a legal name cannot spoof the tool's own output.
 
 `u16::try_from(...).ok()` turned `container: 70000` or `readiness.tcp: 70000` into
 an absent descriptor field, so `ctf pack` wrote a descriptor that disagreed with the
-committed manifest. The value is now visible to `validate`, which makes it a
-pack-time policy error.
+committed manifest. The projected value is now visible to `validate`, which makes it
+a pack-time policy error.
 
 ## [0.13.10] — 2026-10-28
 

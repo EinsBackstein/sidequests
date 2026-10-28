@@ -823,10 +823,10 @@ impl<'a> SectionSpec<'a> {
 /// with [`sign_bundle`] or produce a signed file directly with
 /// [`write_signed_bundle`].
 pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u8>> {
-    // §19.2: resolve the suite at entry, whether or not a section is encrypted.
-    // The footer commitment and every section root are suite-selected primitives,
-    // so writing under an unregistered id would produce a file this writer's own
-    // read-back refuses. Failing here makes `ctf pack --suite 99` fail at pack
+    // §19.2 S2/S3: resolve the suite at entry, whether or not a section is
+    // encrypted. Section roots are the suite's hash role (the footer commitment is
+    // BLAKE3 by §8.3), so writing under an unregistered id would produce a file
+    // this writer's own read-back refuses. Failing here makes `ctf pack --suite 99` fail at pack
     // time instead of emitting such a file.
     let suite = crate::suite::suite(suite_id)?;
 

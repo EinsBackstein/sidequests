@@ -2422,9 +2422,8 @@ stage_key(flag(N-1), N) = HKDF-SHA-256(
 `"ctf/stage/v1"` is 12 ASCII bytes. The key for stage *N* derives from the **flag**
 of stage *N-1*, so unlocking order is enforced by the derivation, not by platform
 logic. Stage numbers start at 1: `stage_key(_, 0)` has no previous flag and is not
-defined. The resulting 32 bytes are the `content_key` of a section whose envelope
-(§21) carries the `stage:N` context; the key is recomputed from the previous flag
-and is not delivered by that envelope (§21.3). A stage-gated section is `enc = 1`
+defined. The resulting 32 bytes are the stage-gated section's `content_key`; the
+derivation from the previous flag *is* the gate. A stage-gated section is `enc = 1`
 and `PLAYER_VISIBLE`, never `SEALED` (§5.3).
 
 ### 22.5 Rules and the entropy ceiling
@@ -3089,9 +3088,9 @@ policy checks that are the platform's, not the container's.
 
 An absent field is omitted rather than emitted as `null`. The descriptor is derived
 data: it MUST be projected from the manifest that was packed, so it cannot disagree
-with the bundle's committed bytes. A port outside `1..=65535` is a policy error
-reported by descriptor validation — and therefore by `ctf pack` — never a silently
-omitted field.
+with the bundle's committed bytes. A `runtime.ports[0].container` or `runtime.readiness.tcp`
+outside `1..=65535` is a policy error reported by descriptor validation — and
+therefore by `ctf pack` — never a silently omitted field.
 
 ### 29.2 Digest-pinned images
 
