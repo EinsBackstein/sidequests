@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "ctf-format"
-version = "0.13.9"
+version = "0.13.10"
 dependencies = [
  "aws-lc-rs",
  "blake3",
