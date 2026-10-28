@@ -102,12 +102,13 @@ pub struct PlatformDescriptor {
     ///
     /// Deliberately not serialized: it exists only so [`PlatformDescriptor::validate`]
     /// sees a value the committed manifest carries, instead of the field being
-    /// silently dropped from the descriptor (§29.1).
+    /// silently dropped from the descriptor (§29.1). Holds the value as a signed
+    /// integer so a CBOR nint is visible rather than discarded.
     #[serde(skip)]
-    pub(crate) port_out_of_range: Option<u64>,
+    pub(crate) port_out_of_range: Option<i64>,
     /// As `port_out_of_range`, for `runtime.readiness.tcp`.
     #[serde(skip)]
-    pub(crate) readiness_tcp_out_of_range: Option<u64>,
+    pub(crate) readiness_tcp_out_of_range: Option<i64>,
 }
 
 impl PlatformDescriptor {
@@ -128,21 +129,23 @@ impl PlatformDescriptor {
                     .map(|(_, v)| v)
             });
 
-        // A port outside `u16` is not representable in this shape, but it is in the
-        // manifest. Keep it as data for `validate` so the pack fails rather than
-        // emitting a descriptor that omits a port the bundle committed to (§29.1).
+        // A port outside `1..=65535` is not representable in this shape, but it is
+        // in the manifest. Keep it as data for `validate` so the pack fails rather
+        // than emitting a descriptor that omits a port the bundle committed to
+        // (§29.1). Reading as `i64` keeps a CBOR nint visible; `as_uint` alone
+        // would silently drop a negative port.
         let port_value = runtime
             .and_then(|r| r.get("ports"))
             .and_then(Value::as_array)
             .and_then(|ports| ports.first())
             .and_then(|p| p.get("container"))
-            .and_then(Value::as_uint);
-        let port_out_of_range = port_value.filter(|n| u16::try_from(*n).is_err());
+            .and_then(value_as_port);
+        let port_out_of_range = port_value.filter(|n| !(1..=65535).contains(n));
         let readiness_tcp_value = runtime
             .and_then(|r| r.get("readiness"))
             .and_then(|r| r.get("tcp"))
-            .and_then(Value::as_uint);
-        let readiness_tcp_out_of_range = readiness_tcp_value.filter(|n| u16::try_from(*n).is_err());
+            .and_then(value_as_port);
+        let readiness_tcp_out_of_range = readiness_tcp_value.filter(|n| !(1..=65535).contains(n));
 
         Self {
             slug: manifest.id().to_owned(),
@@ -154,7 +157,9 @@ impl PlatformDescriptor {
                 .and_then(|r| r.get("image"))
                 .and_then(Value::as_text)
                 .map(str::to_owned),
-            port: port_value.and_then(|n| u16::try_from(n).ok()),
+            port: port_value
+                .filter(|n| (1..=65535).contains(n))
+                .and_then(|n| u16::try_from(n).ok()),
             resources: runtime.and_then(resources_of),
             storage_size: overlay
                 .and_then(|o| o.get("storage_size"))
@@ -195,11 +200,6 @@ impl PlatformDescriptor {
         if self.port_out_of_range.is_some() {
             issues.push(PolicyIssue::new("port", "must be between 1 and 65535"));
         }
-        if let Some(port) = self.port
-            && port == 0
-        {
-            issues.push(PolicyIssue::new("port", "must be between 1 and 65535"));
-        }
         if let Some(level) = self.level
             && level < 0
         {
@@ -227,16 +227,10 @@ impl PlatformDescriptor {
                 "must be between 1 and 65535",
             ));
         }
-        if let Some(readiness) = &self.readiness {
-            if readiness.tcp == 0 {
-                issues.push(PolicyIssue::new(
-                    "readiness.tcp",
-                    "must be between 1 and 65535",
-                ));
-            }
-            if readiness.timeout.is_empty() {
-                issues.push(PolicyIssue::new("readiness.timeout", "must not be empty"));
-            }
+        if let Some(readiness) = &self.readiness
+            && readiness.timeout.is_empty()
+        {
+            issues.push(PolicyIssue::new("readiness.timeout", "must not be empty"));
         }
         issues
     }
@@ -275,10 +269,16 @@ fn resources_of(runtime: &Value) -> Option<Resources> {
 }
 
 /// Read `runtime.readiness` into the descriptor's shape.
+///
+/// A `tcp` outside `1..=65535` is not projected; `from_manifest` keeps it in
+/// `readiness_tcp_out_of_range` so validation still reports it (§29.1).
 fn readiness_of(runtime: &Value) -> Option<Readiness> {
     let r = runtime.get("readiness")?;
+    let tcp = u16::try_from(r.get("tcp").and_then(value_as_port)?)
+        .ok()
+        .filter(|port| *port != 0)?;
     Some(Readiness {
-        tcp: u16::try_from(r.get("tcp").and_then(Value::as_uint)?).ok()?,
+        tcp,
         timeout: r.get("timeout").and_then(Value::as_text)?.to_owned(),
     })
 }
@@ -290,6 +290,19 @@ fn value_as_i64(v: &Value) -> Option<i64> {
         // CBOR major type 1: the value is `-1 - n`. Computed in `i128` so
         // `-1 - i64::MAX` (i64::MIN) does not overflow on the way.
         Value::Nint(n) => i64::try_from(-1i128 - i128::from(*n)).ok(),
+        _ => None,
+    }
+}
+
+/// A CBOR integer as `i64`, saturating at the bounds.
+///
+/// A port is only compared against `1..=65535`, so saturation cannot turn an
+/// out-of-range value into an in-range one. Unlike [`value_as_i64`], an integer
+/// wider than `i64` is still visible as out of range instead of being dropped.
+fn value_as_port(v: &Value) -> Option<i64> {
+    match v {
+        Value::Uint(n) => Some(i64::try_from(*n).unwrap_or(i64::MAX)),
+        Value::Nint(n) => Some(i64::try_from(-1i128 - i128::from(*n)).unwrap_or(i64::MIN)),
         _ => None,
     }
 }

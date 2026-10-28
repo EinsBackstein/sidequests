@@ -1,6 +1,9 @@
 package ctf
 
-import "encoding/binary"
+import (
+	"crypto/rand"
+	"encoding/binary"
+)
 
 // Envelope is one hybrid-KEM key envelope (§21.1, §21.3).
 type Envelope struct {
@@ -97,50 +100,60 @@ func DecodeKeysSection(plaintext []byte) ([]Envelope, error) {
 	}
 	envs := make([]Envelope, 0, len(v.A))
 	for i, e := range v.A {
-		if e.Kind != ValueMap || len(e.M) != 4 {
-			return nil, errf(CatManifest, "EN5", "envelope %d is not a four-key map", i)
-		}
-		var env Envelope
-		var haveName, haveCtx, haveCT, haveWrapped bool
-		for _, p := range e.M {
-			if p.Key.Kind != ValueText {
-				return nil, errf(CatManifest, "EN5", "envelope %d has a non-text key", i)
-			}
-			switch p.Key.T {
-			case "name_id":
-				if p.Val.Kind != ValueUint || p.Val.U > 0xffff {
-					return nil, errf(CatManifest, "EN5", "envelope %d name_id out of range", i)
-				}
-				env.NameID = uint16(p.Val.U)
-				haveName = true
-			case "context":
-				if p.Val.Kind != ValueText {
-					return nil, errf(CatManifest, "EN5", "envelope %d context is not text", i)
-				}
-				env.Context = p.Val.T
-				haveCtx = true
-			case "ct":
-				if p.Val.Kind != ValueBytes {
-					return nil, errf(CatManifest, "EN5", "envelope %d ct is not bytes", i)
-				}
-				env.CT = p.Val.B
-				haveCT = true
-			case "wrapped":
-				if p.Val.Kind != ValueBytes {
-					return nil, errf(CatManifest, "EN5", "envelope %d wrapped is not bytes", i)
-				}
-				env.Wrapped = p.Val.B
-				haveWrapped = true
-			default:
-				return nil, errf(CatManifest, "EN5", "envelope %d has an extra key", i)
-			}
-		}
-		if !haveName || !haveCtx || !haveCT || !haveWrapped {
-			return nil, errf(CatManifest, "EN5", "envelope %d is missing a key", i)
+		env, err := decodeEnvelopeValue(e, i, CatManifest, "EN5")
+		if err != nil {
+			return nil, err
 		}
 		envs = append(envs, env)
 	}
 	return envs, nil
+}
+
+// decodeEnvelopeValue decodes the four-key §21.3 envelope map. A `keys`
+// section (EN5) and a progress payload (P1) carry the same shape.
+func decodeEnvelopeValue(e Value, i int, cat Category, rule string) (Envelope, error) {
+	if e.Kind != ValueMap || len(e.M) != 4 {
+		return Envelope{}, errf(cat, rule, "envelope %d is not a four-key map", i)
+	}
+	var env Envelope
+	var haveName, haveCtx, haveCT, haveWrapped bool
+	for _, p := range e.M {
+		if p.Key.Kind != ValueText {
+			return Envelope{}, errf(cat, rule, "envelope %d has a non-text key", i)
+		}
+		switch p.Key.T {
+		case "name_id":
+			if p.Val.Kind != ValueUint || p.Val.U > 0xffff {
+				return Envelope{}, errf(cat, rule, "envelope %d name_id out of range", i)
+			}
+			env.NameID = uint16(p.Val.U)
+			haveName = true
+		case "context":
+			if p.Val.Kind != ValueText {
+				return Envelope{}, errf(cat, rule, "envelope %d context is not text", i)
+			}
+			env.Context = p.Val.T
+			haveCtx = true
+		case "ct":
+			if p.Val.Kind != ValueBytes {
+				return Envelope{}, errf(cat, rule, "envelope %d ct is not bytes", i)
+			}
+			env.CT = p.Val.B
+			haveCT = true
+		case "wrapped":
+			if p.Val.Kind != ValueBytes {
+				return Envelope{}, errf(cat, rule, "envelope %d wrapped is not bytes", i)
+			}
+			env.Wrapped = p.Val.B
+			haveWrapped = true
+		default:
+			return Envelope{}, errf(cat, rule, "envelope %d has an extra key", i)
+		}
+	}
+	if !haveName || !haveCtx || !haveCT || !haveWrapped {
+		return Envelope{}, errf(cat, rule, "envelope %d is missing a key", i)
+	}
+	return env, nil
 }
 
 // ProgressPayload is the §24.1 shape of a progress record's payload.
@@ -157,12 +170,17 @@ func progressAAD(suiteID uint16, challenge, subject string) []byte {
 	return lp(aad, []byte(subject))
 }
 
-// SealProgress seals a progress plaintext to a new holder. The envelope's
-// name_id is 0 (§24.1).
-func SealProgress(suiteID uint16, contentKey, recipientPK []byte, challenge, subject string, plaintext []byte) (*ProgressPayload, error) {
+// SealProgress seals a progress plaintext to a new holder. The content key is a
+// fresh 32-byte key drawn per payload (§24.1, §24.2), and the envelope's
+// name_id is 0.
+func SealProgress(suiteID uint16, recipientPK []byte, challenge, subject string, plaintext []byte) (*ProgressPayload, error) {
 	suite, err := LookupSuite(suiteID)
 	if err != nil {
 		return nil, err
+	}
+	contentKey := make([]byte, 32)
+	if _, err := rand.Read(contentKey); err != nil {
+		return nil, errf(CatUsage, "", "could not draw a progress content key")
 	}
 	env, err := SealEnvelope(suiteID, VersionMajor, recipientPK, "holder", contentKey)
 	if err != nil {
@@ -179,6 +197,9 @@ func SealProgress(suiteID uint16, contentKey, recipientPK []byte, challenge, sub
 
 // OpenProgress applies P1–P3.
 func (p *ProgressPayload) Open(suiteID uint16, recipientSK []byte, challenge, subject string) ([]byte, error) {
+	if p.Envelope.NameID != 0 {
+		return nil, errf(CatUsage, "P1", "progress envelope name_id is %d, need 0 (§24.1)", p.Envelope.NameID)
+	}
 	if p.Envelope.Context != "holder" {
 		return nil, errf(CatUsage, "P2", "progress envelope context is not holder")
 	}
@@ -214,4 +235,50 @@ func (p *ProgressPayload) Encode() ([]byte, error) {
 		return nil, err
 	}
 	return encodeValue(cv)
+}
+
+// DecodeProgress applies P1 and returns the payload.
+//
+// §24.1 fixes the shape: one canonical CBOR map with exactly `envelope` and
+// `ct`, the envelope being the §21.3 four-key map, and the envelope's name_id
+// is 0 because a progress payload wraps a content key rather than a section's.
+func DecodeProgress(payload []byte) (*ProgressPayload, error) {
+	v, err := decodeCBOR(payload)
+	if err != nil {
+		return nil, err
+	}
+	if v.Kind != ValueMap || len(v.M) != 2 {
+		return nil, errf(CatCBOR, "P1", "progress payload is not a two-key map (§24.1)")
+	}
+	var p ProgressPayload
+	var haveEnv, haveCT bool
+	for _, entry := range v.M {
+		if entry.Key.Kind != ValueText {
+			return nil, errf(CatCBOR, "P1", "progress payload has a non-text key (§24.1)")
+		}
+		switch entry.Key.T {
+		case "envelope":
+			env, err := decodeEnvelopeValue(entry.Val, 0, CatCBOR, "P1")
+			if err != nil {
+				return nil, err
+			}
+			p.Envelope = env
+			haveEnv = true
+		case "ct":
+			if entry.Val.Kind != ValueBytes {
+				return nil, errf(CatCBOR, "P1", "progress payload ct is not bytes (§24.1)")
+			}
+			p.CT = entry.Val.B
+			haveCT = true
+		default:
+			return nil, errf(CatCBOR, "P1", "progress payload has an extra key (§24.1)")
+		}
+	}
+	if !haveEnv || !haveCT {
+		return nil, errf(CatCBOR, "P1", "progress payload is not a two-key map (§24.1)")
+	}
+	if p.Envelope.NameID != 0 {
+		return nil, errf(CatCBOR, "P1", "progress envelope name_id is %d, need 0 (§24.1)", p.Envelope.NameID)
+	}
+	return &p, nil
 }

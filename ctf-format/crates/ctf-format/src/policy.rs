@@ -164,10 +164,13 @@ pub fn third_party_origins(text: &str) -> Vec<String> {
         };
         let start = at + rel;
         let after_scheme = start
-            + if rest[rel..].starts_with("https://") {
-                "https://".len()
+            + if rest[rel..]
+                .get(..8)
+                .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+            {
+                8
             } else {
-                "http://".len()
+                7
             };
         let mut end = after_scheme;
         while let Some(&c) = bytes.get(end) {
@@ -193,15 +196,32 @@ pub fn third_party_origins(text: &str) -> Vec<String> {
 }
 
 /// Byte offset of the next `http://` or `https://` in `s`.
+///
+/// A URI scheme is case-insensitive (RFC 3986 §3.1), so `HTTPS://` matches. The
+/// offset points into `s`, which keeps the caller's own casing in the reported
+/// origin.
 fn find_scheme(s: &str) -> Option<usize> {
-    let https = s.find("https://");
-    let http = s.find("http://");
-    match (https, http) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
+    const HTTP: &[u8] = b"http://";
+    const HTTPS: &[u8] = b"https://";
+    let bytes = s.as_bytes();
+    for at in 0..bytes.len() {
+        let Some(rest) = bytes.get(at..) else {
+            continue;
+        };
+        if rest
+            .get(..HTTPS.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(HTTPS))
+        {
+            return Some(at);
+        }
+        if rest
+            .get(..HTTP.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(HTTP))
+        {
+            return Some(at);
+        }
     }
+    None
 }
 
 /// The runtime image from a manifest, if the author declared one.

@@ -550,18 +550,39 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
         }
     };
     let issues = doc.validate();
-    let errors = issues.iter().filter(|i| i.is_error()).count();
+    let mut errors: Vec<String> = issues
+        .iter()
+        .filter(|i| i.is_error())
+        .map(ToString::to_string)
+        .collect();
     for issue in issues.iter().filter(|i| !i.is_error()) {
         eprintln!("ctf: {path}: warning: {issue}");
     }
-    if errors == 0 {
+    // `ctf validate` is the author's pre-flight, so it runs the descriptor's
+    // policy checks too (§29.1): `ctf pack` refuses an out-of-range port or a
+    // zero PID limit, and `validate` must not report `ok` for a document pack
+    // would reject. Only project when the document is otherwise valid, so a
+    // schema error is not reported twice.
+    if errors.is_empty() {
+        match pack::descriptor_for(&doc) {
+            Ok(_) => {}
+            Err(PackError::Policy(policy_issues)) => {
+                errors.extend(policy_issues.iter().map(ToString::to_string));
+            }
+            Err(PackError::Invalid(validation_issues)) => {
+                errors.extend(validation_issues.iter().map(ToString::to_string));
+            }
+            Err(PackError::Format(e)) => errors.push(e.to_string()),
+        }
+    }
+    if errors.is_empty() {
         println!("{path}: ok");
         return ExitCode::SUCCESS;
     }
-    for issue in issues.iter().filter(|i| i.is_error()) {
-        eprintln!("ctf: {path}: {issue}");
+    for error in &errors {
+        eprintln!("ctf: {path}: {error}");
     }
-    eprintln!("ctf: {path}: {errors} problem(s) found");
+    eprintln!("ctf: {path}: {} problem(s) found", errors.len());
     ExitCode::FAILURE
 }
 

@@ -9,6 +9,28 @@ use ctf_format::policy::{self, ImageRefError};
 
 const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+/// The URI scheme is case-insensitive (RFC 3986 §3.1), so an absolute
+/// `http(s)` origin is reported at authoring time in any casing. The reported
+/// origin keeps the author's own casing.
+#[test]
+fn scheme_matching_is_case_insensitive() {
+    for text in [
+        "HTTPS://evil.example/x",
+        "Http://evil.example/x",
+        "hTtPs://evil.example/x",
+    ] {
+        let want = text.split("/x").next().unwrap();
+        assert_eq!(policy::third_party_origins(text), vec![want], "{text}");
+    }
+}
+
+/// A lookalike scheme and a relative path are still not origins.
+#[test]
+fn a_lookalike_scheme_is_not_an_origin() {
+    assert!(policy::third_party_origins("httpx://evil.example/x").is_empty());
+    assert!(policy::third_party_origins("assets/logo.png").is_empty());
+}
+
 #[test]
 fn a_digest_pinned_image_is_accepted() {
     assert!(policy::check_image_ref(&format!("ghcr.io/ctf/baby-rop@{DIGEST}")).is_ok());
