@@ -487,6 +487,13 @@ impl<'a> Bundle<'a> {
                 report.external += 1;
                 continue;
             }
+            // §5.4 D1/D2 are a MUST on the authenticated declaration, and they apply
+            // to a compressed encrypted section's declared totals before any key is
+            // used (0.13.1). Checking them before the encryption skip keeps an
+            // over-cap declaration from being counted as merely unverifiable.
+            if r.comp != Compression::None {
+                crate::compress::check_caps(r.len_plain, r.len_stored)?;
+            }
             if r.enc != crate::Encryption::None {
                 report.unverifiable += 1;
                 continue;

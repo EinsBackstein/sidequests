@@ -13,23 +13,25 @@ Fifth post-release audit round. **No byte-layout change:** `version_minor` stays
 `3`, both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and
 no header, section, footer, commitment root, or signature transcript moved.
 
-### Fixed — Go `VerifyAll` accepted compression bombs (§5.4, §10)
+### Fixed — compression caps applied before any skip (§5.4)
 
-`VerifyAll` skipped every encrypted or compressed section, so the committed
-`compressed-output-cap` and `compressed-ratio-cap` fixtures returned no findings
-instead of failing D1 or D2. It now applies both caps to every non-external
-compressed section — including an encrypted one's declared totals — before any
-decoder or key would be used. Only then does it skip a section it cannot open or
-expand; an encrypted, unknown-kind compressed, or in-cap compressed section stays
-unverifiable rather than being reported as a finding.
+Both implementations skipped a compressed section before testing its declared
+totals. Go's `VerifyAll` returned no findings for the committed
+`compressed-output-cap` and `compressed-ratio-cap` fixtures, and Rust's
+`verify_inline_sections` would have counted an over-cap encrypted section as merely
+`unverifiable`. D1/D2 are a MUST on the authenticated declaration and apply to an
+encrypted section's totals without a key, so both now run the caps on every
+non-external compressed section before the encryption or decoder skip. An encrypted
+section this build cannot open, an unknown-kind compressed section, and an in-cap
+compressed section it cannot expand stay unverifiable and are not findings.
 
-### Fixed — `ctf validate`/`ctf pack` wrote a raw control from a description (§13)
+### Fixed — `ctf validate`/`ctf pack` wrote a raw control from free-form text (§13)
 
 §13 requires free-form manifest text written to a terminal to be escaped, but the
 O2 origin quoted from `description` was printed verbatim, so a C0 ESC could clear or
-spoof the operator's terminal during preflight. Issue and error text now go through
-the same escaping as `ctf inspect`'s tables (C0/C1, DEL, and the bidi-format marks
-`check_name` permits).
+spoof the operator's terminal during preflight. Issue, schema, and error text now go
+through the same escaping as `ctf inspect`'s tables (C0/C1, DEL, and the bidi-format
+marks `check_name` permits), including the schema error that echoes an unknown key.
 
 ## [0.13.13] — 2026-10-28
 
