@@ -29,14 +29,14 @@ zstd decoder — and only a declaration that itself breaks D1 or D2 is refused.
 ### Fixed — authoring diagnostics wrote a raw control from free-form text (§13)
 
 §13 requires free-form manifest text written to a terminal to be escaped, but
-`ctf validate` and `ctf pack` printed the §29.3 origin quoted from `description`
-verbatim, `ctf run` printed the key echoed by a schema error, and the gate's
-module-read failure quoted the document's module path, so a control could clear or
-spoof the operator's terminal during preflight. Issue and error text now go through
-the same escaping as `ctf inspect`'s tables (C0/C1, DEL, and the bidi-format marks
-`check_name` permits). A schema error's key is escaped rather than relying on the
-parser, and so is the quoted module path: `check_path` rejects C0 and bidi marks but
-not every C1 control.
+several diagnostics passed it through: `ctf validate` and `ctf pack` printed the
+§29.3 origin quoted from `description`, `ctf run` and `ctf verify` printed the key
+echoed by a schema error, the gate's module-read failure quoted the document's
+module path, and `ctf release` printed the destination built from a sealed member's
+name. All of them now escape with the same character set `ctf inspect` uses (C0/C1,
+DEL, and the bidi-format marks `check_name` permits) instead of trusting the parser or
+validation to have removed the control — a module name, for instance, is only
+required to be non-empty.
 
 ## [0.13.13] — 2026-10-28
 

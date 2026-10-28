@@ -840,7 +840,9 @@ fn run_release(args: &ReleaseArgs) -> ExitCode {
     for asset in &release.assets {
         let dest = Path::new(&args.out).join(&asset.member.name);
         if let Err(e) = std::fs::write(&dest, &asset.bytes) {
-            eprintln!("ctf: {}: {e}", dest.display());
+            // `member.name` is free-form manifest text; the destination embeds it,
+            // so escape it before it reaches the terminal (§13).
+            eprintln!("ctf: {}: {e}", escape_terminal(&dest.display().to_string()));
             return ExitCode::FAILURE;
         }
     }
@@ -1135,10 +1137,9 @@ impl DocumentModules {
         };
         let path = self.dir.join(name);
         std::fs::read(&path).map(Some).map_err(|e| {
-            // The module name comes from the authoring document, so the path this
-            // quotes is free-form text; escape it before it reaches the terminal
-            // (§13). `check_path` rejects C0 and bidi marks but not every C1
-            // control, which is why this cannot rely on validation alone.
+            // The module name comes from the authoring document and is only required
+            // to be non-empty, so the path this quotes may contain any control
+            // character; escape it before it reaches the terminal (§13).
             eprintln!(
                 "ctf: the offline gate could not run: `{}`: {e}",
                 escape_terminal(&path.display().to_string())
@@ -1446,7 +1447,12 @@ fn gate_record_for_bundle(
             // The artifact is stable and path-free (spec §25.6.1, S12): the detail
             // names the authoring file, so it goes to stderr and never into the
             // record.
-            eprintln!("ctf: the offline gate could not run: {e}");
+            // The detail may quote free-form text from the authoring document, so
+            // it is escaped for the terminal (§13).
+            eprintln!(
+                "ctf: the offline gate could not run: {}",
+                escape_terminal(&e.to_string())
+            );
             return unverified(
                 "the offline gate could not run: the authoring inputs were rejected".to_owned(),
             );
@@ -1624,7 +1630,12 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
         },
         Ok(None) => None,
         Err(e) => {
-            eprintln!("ctf: the offline gate could not run: {e}");
+            // The detail may quote free-form text from the authoring document, so
+            // it is escaped for the terminal (§13).
+            eprintln!(
+                "ctf: the offline gate could not run: {}",
+                escape_terminal(&e.to_string())
+            );
             return Err(
                 "the offline gate could not run: the bundle's generator section is unreadable"
                     .to_owned(),
@@ -1639,7 +1650,12 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
         },
         Ok(None) => None,
         Err(e) => {
-            eprintln!("ctf: the offline gate could not run: {e}");
+            // The detail may quote free-form text from the authoring document, so
+            // it is escaped for the terminal (§13).
+            eprintln!(
+                "ctf: the offline gate could not run: {}",
+                escape_terminal(&e.to_string())
+            );
             return Err(
                 "the offline gate could not run: the bundle's solver section is unreadable"
                     .to_owned(),
