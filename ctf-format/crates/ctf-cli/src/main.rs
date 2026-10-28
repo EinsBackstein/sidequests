@@ -545,7 +545,9 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
     let doc = match ChallengeDoc::from_yaml(&text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("ctf: {path}: {e}");
+            // A schema error echoes the offending key, which is free-form text in
+            // the file; escape it before it reaches the terminal (§13).
+            eprintln!("ctf: {path}: {}", escape_terminal(&e.to_string()));
             return ExitCode::FAILURE;
         }
     };
@@ -553,10 +555,13 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
     let mut errors: Vec<String> = issues
         .iter()
         .filter(|i| i.is_error())
-        .map(ToString::to_string)
+        .map(|i| escape_terminal(&i.to_string()))
         .collect();
     for issue in issues.iter().filter(|i| !i.is_error()) {
-        eprintln!("ctf: {path}: warning: {issue}");
+        eprintln!(
+            "ctf: {path}: warning: {}",
+            escape_terminal(&issue.to_string())
+        );
     }
     // `ctf validate` is the author's pre-flight, so it runs the descriptor's
     // policy checks too (§29.1): `ctf pack` refuses an out-of-range port or a
@@ -567,12 +572,20 @@ fn run_validate(args: &ValidateArgs) -> ExitCode {
         match pack::descriptor_for(&doc) {
             Ok(_) => {}
             Err(PackError::Policy(policy_issues)) => {
-                errors.extend(policy_issues.iter().map(ToString::to_string));
+                errors.extend(
+                    policy_issues
+                        .iter()
+                        .map(|i| escape_terminal(&i.to_string())),
+                );
             }
             Err(PackError::Invalid(validation_issues)) => {
-                errors.extend(validation_issues.iter().map(ToString::to_string));
+                errors.extend(
+                    validation_issues
+                        .iter()
+                        .map(|i| escape_terminal(&i.to_string())),
+                );
             }
-            Err(PackError::Format(e)) => errors.push(e.to_string()),
+            Err(PackError::Format(e)) => errors.push(escape_terminal(&e.to_string())),
         }
     }
     if errors.is_empty() {
@@ -606,14 +619,19 @@ fn run_pack(args: &PackArgs) -> ExitCode {
     let doc = match ChallengeDoc::from_yaml(&text) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("ctf: {path}: {e}");
+            // A schema error echoes the offending key, which is free-form text in
+            // the file; escape it before it reaches the terminal (§13).
+            eprintln!("ctf: {path}: {}", escape_terminal(&e.to_string()));
             return ExitCode::FAILURE;
         }
     };
     // Warnings do not block packing (spec §7.8); report them before the bundle so
     // an author sees them even on success.
     for issue in doc.warnings() {
-        eprintln!("ctf: {path}: warning: {issue}");
+        eprintln!(
+            "ctf: {path}: warning: {}",
+            escape_terminal(&issue.to_string())
+        );
     }
     // Artifact `source` paths are relative to the authoring document, not to the
     // operator's shell (spec §7.8). A bare filename has no parent, so `.` is the
@@ -626,18 +644,18 @@ fn run_pack(args: &PackArgs) -> ExitCode {
         Ok(f) => f,
         Err(PackError::Invalid(issues)) => {
             for issue in &issues {
-                eprintln!("ctf: {path}: {issue}");
+                eprintln!("ctf: {path}: {}", escape_terminal(&issue.to_string()));
             }
             return ExitCode::FAILURE;
         }
         Err(PackError::Policy(issues)) => {
             for issue in &issues {
-                eprintln!("ctf: {path}: {issue}");
+                eprintln!("ctf: {path}: {}", escape_terminal(&issue.to_string()));
             }
             return ExitCode::FAILURE;
         }
         Err(PackError::Format(e)) => {
-            eprintln!("ctf: {path}: {e}");
+            eprintln!("ctf: {path}: {}", escape_terminal(&e.to_string()));
             return ExitCode::FAILURE;
         }
     };
@@ -822,7 +840,9 @@ fn run_release(args: &ReleaseArgs) -> ExitCode {
     for asset in &release.assets {
         let dest = Path::new(&args.out).join(&asset.member.name);
         if let Err(e) = std::fs::write(&dest, &asset.bytes) {
-            eprintln!("ctf: {}: {e}", dest.display());
+            // `member.name` is free-form manifest text; the destination embeds it,
+            // so escape it before it reaches the terminal (§13).
+            eprintln!("ctf: {}: {e}", escape_terminal(&dest.display().to_string()));
             return ExitCode::FAILURE;
         }
     }
@@ -866,12 +886,12 @@ fn run_gate(args: &RunArgs) -> ExitCode {
         Ok(s) => s,
         Err(GateSetupError::Issues(issues)) => {
             for issue in &issues {
-                eprintln!("ctf: {path}: {issue}");
+                eprintln!("ctf: {path}: {}", escape_terminal(&issue.to_string()));
             }
             return ExitCode::FAILURE;
         }
         Err(GateSetupError::Message(message)) => {
-            eprintln!("ctf: {path}: {message}");
+            eprintln!("ctf: {path}: {}", escape_terminal(&message));
             return ExitCode::FAILURE;
         }
     };
@@ -1117,9 +1137,12 @@ impl DocumentModules {
         };
         let path = self.dir.join(name);
         std::fs::read(&path).map(Some).map_err(|e| {
+            // The module name comes from the authoring document and is only required
+            // to be non-empty, so the path this quotes may contain any control
+            // character; escape it before it reaches the terminal (§13).
             eprintln!(
                 "ctf: the offline gate could not run: `{}`: {e}",
-                path.display()
+                escape_terminal(&path.display().to_string())
             );
             format!(
                 "the offline gate could not run: the authoring document's {what} module could not \
@@ -1424,7 +1447,12 @@ fn gate_record_for_bundle(
             // The artifact is stable and path-free (spec §25.6.1, S12): the detail
             // names the authoring file, so it goes to stderr and never into the
             // record.
-            eprintln!("ctf: the offline gate could not run: {e}");
+            // The detail may quote free-form text from the authoring document, so
+            // it is escaped for the terminal (§13).
+            eprintln!(
+                "ctf: the offline gate could not run: {}",
+                escape_terminal(&e.to_string())
+            );
             return unverified(
                 "the offline gate could not run: the authoring inputs were rejected".to_owned(),
             );
@@ -1602,7 +1630,12 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
         },
         Ok(None) => None,
         Err(e) => {
-            eprintln!("ctf: the offline gate could not run: {e}");
+            // The detail may quote free-form text from the authoring document, so
+            // it is escaped for the terminal (§13).
+            eprintln!(
+                "ctf: the offline gate could not run: {}",
+                escape_terminal(&e.to_string())
+            );
             return Err(
                 "the offline gate could not run: the bundle's generator section is unreadable"
                     .to_owned(),
@@ -1617,7 +1650,12 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
         },
         Ok(None) => None,
         Err(e) => {
-            eprintln!("ctf: the offline gate could not run: {e}");
+            // The detail may quote free-form text from the authoring document, so
+            // it is escaped for the terminal (§13).
+            eprintln!(
+                "ctf: the offline gate could not run: {}",
+                escape_terminal(&e.to_string())
+            );
             return Err(
                 "the offline gate could not run: the bundle's solver section is unreadable"
                     .to_owned(),
@@ -2950,6 +2988,62 @@ fn flag_names(f: SectionFlags) -> String {
     }
 }
 
+/// Escape the characters that can act on the operator's terminal (spec §13).
+///
+/// `name`, `category`, `description`, and mirror URLs are free-form text, and a
+/// diagnostic that echoes one is still a terminal write. C0/C1 controls and DEL
+/// can execute or repaint; Unicode format characters (Category Cf) and the line
+/// and paragraph separators (Zl/Zp) can hide or reorder text without being
+/// controls at all — a zero-width space in a name is enough to make two different
+/// strings look identical. Each becomes its visible `escape_default` form;
+/// everything else is copied unchanged.
+fn escape_terminal(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() || is_format_or_separator(c) {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
+}
+
+/// Every assigned Unicode format character (Category Cf) plus the line and
+/// paragraph separators (Zl/Zp), none of which are `char::is_control`.
+///
+/// `check_name` already rejects the bidi marks in this set (§7.2), but a
+/// description or an artifact name is free-form, and a hand-built bundle need not
+/// have passed any validator. The list is the Cf inventory: a new Unicode
+/// assignment would need to be added here, which is why it is spelled out rather
+/// than inferred from `is_whitespace` (that would also catch ordinary spaces).
+fn is_format_or_separator(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061c}'
+            | '\u{06dd}'
+            | '\u{070f}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
+}
+
 /// Truncate to `n` characters for a fixed-width column, escaping control
 /// characters first (spec §13).
 ///
@@ -2959,21 +3053,7 @@ fn flag_names(f: SectionFlags) -> String {
 /// letting it act on the operator's terminal; escaping after would count the escape
 /// sequence against the column budget.
 fn truncate(s: &str, n: usize) -> String {
-    let mut escaped = String::with_capacity(s.len());
-    for c in s.chars() {
-        // C0/C1 controls, and the bidi-format marks `check_name` does not reject
-        // (LRM, RLM, ALM): all of them can move or hide text around a table cell.
-        if c.is_control()
-            || matches!(
-                c,
-                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-            )
-        {
-            escaped.extend(c.escape_default());
-        } else {
-            escaped.push(c);
-        }
-    }
+    let escaped = escape_terminal(s);
     if escaped.chars().count() <= n {
         return escaped;
     }

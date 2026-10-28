@@ -364,10 +364,33 @@ func (b *Bundle) Verify() error {
 
 // VerifyAll checks all plain inline sections and returns every mismatch, so an
 // operator is not left to bisect a large bundle (spec §13).
+//
+// An EXTERNAL section's bytes are absent by design, so it is skipped. D1 and D2
+// are applied to every non-external compressed section before anything else: the
+// caps are a MUST, they need no decoder, and §5.4 makes them apply to an
+// encrypted section's declared totals too. After that, an encrypted section
+// cannot be checked without the content key, and this build has no zstd decoder,
+// so a compressed section is unverifiable and skipped rather than silently
+// verified.
 func (b *Bundle) VerifyAll() []error {
 	var errs []error
 	for _, r := range b.Sections {
-		if r.External() || r.Enc != EncNone || r.Comp != CompNone {
+		if r.External() {
+			continue
+		}
+		if r.Comp != CompNone {
+			if err := decompressionCaps(r); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		if r.Enc != EncNone {
+			continue
+		}
+		// Spec §10 forbids decompressing a kind this build does not implement, and
+		// this build has no zstd decoder at all, so any compressed section is
+		// unverifiable once its caps have been checked above.
+		if r.Comp != CompNone {
 			continue
 		}
 		stored, err := b.storedBytes(r)

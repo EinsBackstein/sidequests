@@ -381,6 +381,46 @@ fn a_bidi_format_mark_in_a_name_is_escaped() {
     );
 }
 
+/// §13: not every character that spoofs a table is a control. A zero-width format
+/// character or a line separator can hide or split text, and `check_name` permits
+/// both, so the inspector escapes them too.
+#[test]
+fn a_zero_width_format_character_in_a_name_is_escaped() {
+    let name = "evil\u{200b}verify PASSED\u{2028}x";
+    let m = Manifest::build("chal", "Title", &["manifest", name], vec![]).unwrap();
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &m.encode().unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"x",
+            ),
+        ],
+    )
+    .unwrap();
+    let t = TempFile::new("format-name");
+    std::fs::write(t.path(), &file).unwrap();
+
+    let (ok, out) = inspect(t.path(), &[]);
+    assert!(ok, "{out}");
+    assert!(
+        !out.contains('\u{200b}') && !out.contains('\u{2028}'),
+        "raw format character reached the terminal:\n{out:?}"
+    );
+    assert!(
+        out.contains("\\u{200b}") && out.contains("\\u{2028}"),
+        "the format characters should be visible as text:\n{out}"
+    );
+}
+
 /// The escaping applies only to control characters: an ordinary name is printed
 /// exactly as authored.
 #[test]

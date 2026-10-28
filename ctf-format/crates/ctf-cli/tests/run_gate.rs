@@ -502,3 +502,28 @@ fn run_reports_an_unrecognised_determinism_mode_as_unverified() {
     assert!(record.contains("\"generator_root\": null"), "{record}");
     assert!(record.contains("\"runs\": null"), "{record}");
 }
+
+/// §13: `ctf run` reads the same authoring document, and a schema error echoes the
+/// offending key. That key is free-form text, so a control in it must be escaped
+/// here too rather than reaching the operator's terminal.
+#[test]
+fn run_escapes_a_control_in_an_unknown_key() {
+    let dir = TempDir::new("escape-schema");
+    let source = dir.path("escape.yaml");
+    std::fs::write(
+        &source,
+        "spec: 1\nid: escape-run\nname: Escape Run\n\"bad\\e[2Jkey\": 1\n",
+    )
+    .unwrap();
+
+    let (_ok, stdout, stderr) = run(&["run", &source, "--secret", &"00".repeat(32)]);
+    let both = format!("{stdout}{stderr}");
+    assert!(
+        !both.as_bytes().contains(&0x1b),
+        "raw escape byte reached the terminal: {both:?}"
+    );
+    assert!(
+        stderr.contains("\\u{1b}"),
+        "the escape should be visible as text: {stderr}"
+    );
+}

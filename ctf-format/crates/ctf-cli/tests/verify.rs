@@ -1285,9 +1285,12 @@ fn a_generator_section_under_another_name_is_not_gated() {
     std::fs::write(&bundle, write_bundle(1, &specs).unwrap()).unwrap();
 
     let document = dir.path("decoy-missing.yaml");
+    // The missing module's name carries a C1 control. A module name is only
+    // required to be non-empty, so the path the failure message quotes must be
+    // escaped rather than handed to the terminal raw (§13).
     let text = std::fs::read_to_string(&source)
         .unwrap()
-        .replace("decoy-gen.wasm", "missing-generator.wasm");
+        .replace("decoy-gen.wasm", "\"missing\\u0085generator.wasm\"");
     std::fs::write(&document, text).unwrap();
 
     let (code, stdout, stderr) = run(&[
@@ -1301,6 +1304,14 @@ fn a_generator_section_under_another_name_is_not_gated() {
     assert_eq!(
         code, 2,
         "an undeclared section is not the gate's generator:\n{stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains('\u{85}'),
+        "raw C1 control in the module path:\n{stderr:?}"
+    );
+    assert!(
+        stderr.contains("\\u{85}"),
+        "the module path is escaped:\n{stderr}"
     );
     let artifact = parse(&stdout);
     assert_eq!(artifact["status"], "unverified");
@@ -1883,5 +1894,39 @@ fn run_with_a_bundle_reports_a_policy_issue_without_changing_the_verdict() {
     assert!(
         stderr.contains("policy: runtime.image:"),
         "the policy issue must name the key on stderr:\n{stderr}"
+    );
+}
+
+/// §13: the gate-setup failure path quotes the authoring document's schema error,
+/// which echoes the offending key. A control in that key must not reach the
+/// terminal, and the record itself stays path-free (S12).
+#[test]
+fn a_schema_error_in_the_challenge_document_is_escaped() {
+    let dir = TempDir::new("escape-verify");
+    let path = dir.path("chal.ctf");
+    std::fs::write(&path, minimal_bundle()).unwrap();
+    let document = dir.path("escape.yaml");
+    std::fs::write(
+        &document,
+        "spec: 1\nid: escape-verify\nname: Escape Verify\n\"bad\\e[2Jkey\": 1\n",
+    )
+    .unwrap();
+
+    let (_code, stdout, stderr) = run(&[
+        "verify",
+        &path,
+        "--challenge",
+        &document,
+        "--secret",
+        &"00".repeat(32),
+    ]);
+    let both = format!("{stdout}{stderr}");
+    assert!(
+        !both.as_bytes().contains(&0x1b),
+        "raw escape byte reached the terminal: {both:?}"
+    );
+    assert!(
+        stderr.contains("\\u{1b}"),
+        "the escape should be visible as text: {stderr}"
     );
 }

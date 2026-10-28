@@ -7,6 +7,39 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.14] — 2026-10-28
+
+Fifth post-release audit round. **No byte-layout change:** `version_minor` stays
+`3`, both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and
+no header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — compression caps applied before any skip (§5.4)
+
+Both implementations skipped a compressed section before testing its declared
+totals. Go's `VerifyAll` returned no findings for the committed
+`compressed-output-cap` and `compressed-ratio-cap` fixtures, and Rust's
+`verify_inline_sections` would have counted an over-cap encrypted section as merely
+`unverifiable`. D1/D2 are a MUST on the authenticated declaration and apply to an
+encrypted section's totals without a key, so both now run the caps on every
+non-external compressed section before the encryption or decoder skip. Each then
+skips only what it cannot open or expand — an encrypted section without a key, an
+unknown-kind compressed section, or, in Go, any compressed section, since it has no
+zstd decoder — and only a declaration that itself breaks D1 or D2 is refused.
+
+### Fixed — authoring diagnostics wrote a raw control from free-form text (§13)
+
+§13 requires free-form manifest text written to a terminal to be escaped, but
+several diagnostics passed it through: `ctf validate` and `ctf pack` printed the
+§29.3 origin quoted from `description`, `ctf run` and `ctf verify` printed the key
+echoed by a schema error, the gate's module-read failure quoted the document's
+module path, and `ctf release` printed the destination built from a sealed member's
+name. All of them now escape with the same character set `ctf inspect` uses — C0/C1
+controls, DEL, Unicode format characters (zero-width and bidi marks among them), and
+line/paragraph separators — instead of trusting the parser or validation to have
+removed the hazard; a module name, for instance, is only required to be non-empty.
+The inspector's table cells now escape a zero-width mark the same way, since a
+`check_name`-valid name can carry one.
+
 ## [0.13.13] — 2026-10-28
 
 Fourth post-release audit round. **No byte-layout change:** `version_minor` stays

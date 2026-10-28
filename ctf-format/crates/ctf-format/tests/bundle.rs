@@ -106,6 +106,54 @@ fn mark_encrypted(file: &mut [u8], i: usize) {
     file[footer..footer + 32].copy_from_slice(&root);
 }
 
+/// §5.4 D1/D2 are unconditional: a compressed section's declared totals are checked
+/// before any key is used, so an encrypted over-cap declaration must not be hidden
+/// behind the encryption skip in the verification pass.
+#[test]
+fn an_over_cap_encrypted_compressed_section_is_rejected_before_the_encryption_skip() {
+    // A zero-filled, single-chunk artifact: shrinking `len_stored` to zero leaves
+    // only zero bytes unclaimed, so the padding rule still passes and the file
+    // reaches the verification pass. One chunk means the writer emitted no index,
+    // so changing `len_plain` cannot move a region either.
+    let file = write_bundle(
+        SUITE,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &Manifest::minimal("verify-comp", "Verify Comp", &["manifest", "chal"])
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                &[0u8; 4000][..],
+            )
+            .chunked(4096),
+        ],
+    )
+    .unwrap();
+    let mut file = file;
+    let header = Header::parse(&file).unwrap();
+    let table = header.section_table_off as usize;
+    let rec = table + SECTION_RECORD_LEN;
+    file[rec + 7] = 1; // OFF_COMP, Compression::Zstd
+    // `len_stored = 0` with `len_plain = 4000` is an infinite ratio, so D2 rejects
+    // it without needing a decoder or a key.
+    file[rec + 16..rec + 24].copy_from_slice(&0u64.to_le_bytes());
+    mark_encrypted(&mut file, 1);
+
+    let b = Bundle::parse(&file).unwrap();
+    assert!(matches!(
+        b.verify_inline_sections(),
+        Err(Error::CompressionRatioExceeded { .. })
+    ));
+}
+
 /// Make the section at table index `i` `SEALED` **and** `AEAD-STREAM`, re-rooting the
 /// commitment so the file still opens. R21 requires the pair, so a sealed section
 /// the phase-1 writer cannot emit has to be built by hand.
