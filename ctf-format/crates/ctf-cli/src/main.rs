@@ -3009,8 +3009,8 @@ fn escape_terminal(s: &str) -> String {
     escaped
 }
 
-/// Every Unicode format character (Category Cf) plus the line/paragraph
-/// separators (Zl/Zp), which are not `char::is_control`.
+/// Every assigned Unicode format character (Category Cf) plus the line and
+/// paragraph separators (Zl/Zp), none of which are `char::is_control`.
 ///
 /// `check_name` already rejects the bidi marks in this set (§7.2), but a
 /// description or an artifact name is free-form, and a hand-built bundle need not
@@ -3030,7 +3030,8 @@ fn is_format_or_separator(c: char) -> bool {
             | '\u{180e}'
             | '\u{200b}'..='\u{200f}'
             | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
             | '\u{feff}'
             | '\u{fff9}'..='\u{fffb}'
             | '\u{110bd}'
