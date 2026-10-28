@@ -2493,6 +2493,9 @@ u32_le flag_len; flag bytes (UTF-8)
 `count` is the number of named outputs; the flag follows the last output. A block
 that ends early, has trailing bytes, names a duplicate output, names an output not
 declared by `generate.outputs` (§7.6), or carries invalid UTF-8 is rejected. The
+enforcement point for the declaration rule is a host that holds the declarations —
+the ingest gate of §25; a runtime that carries only the module cannot compare names
+and is not that enforcement point. The
 encoding is canonical: one value has exactly one byte string, so the output root
 below is injective.
 
@@ -2548,12 +2551,14 @@ A profile-1 host MUST configure the engine so that all of the following hold:
 | Mode | Meaning |
 |---|---|
 | `strict` | A generator is required and MUST pass the gate below. |
-| `flag_only` | No generator exists. `wasm` and `outputs` MUST be absent. Per-subject flags still derive from the event secret (§22); this is the default path and covers most challenges (design §8). |
+| `flag_only` | No generator exists. `wasm` and `outputs` MUST be absent. Per-subject flags still derive from the event secret (§22); this is the default path and covers most challenges (design §8). An offline gate is `unverified`, because there is no generator to run (§25.6). |
 | `none` | A generator is declared, but reproducibility is not required and the gate is not run. Used for one-shot artifact generation. Because §25.5's first step *is* the determinism gate, a bundle in this mode cannot be gated, and the offline gate reports `unverified` rather than running a stage the mode forbids (§25.6). |
 
 A `generate.determinism` whose value is not one of those three is not a mode: the
 gate cannot tell whether it may run, so it reports `unverified` rather than reading
-the value as absent and running a stage the author did not ask for.
+the unknown value as a request to run. §7.6 requires the key, so a bundle that
+declares a generator without one is malformed; absent, the gate runs the stage,
+because the only mode a generator can then be gated under is `strict`.
 
 ### 23.8 Rules
 
@@ -2722,9 +2727,10 @@ A solver that does not recover the derived flag blocks publication.
 A bundle is `unverified`, never `passed`, when any of the following holds: it
 declares `runtime` (solving needs a booted instance, §32); its `verify.offline`
 declaration is false or absent; it declares no generator or no solver; or its
-`generate.determinism` is `none` or `flag_only`, or is not a mode this document
-defines (§23.7), so §25.5's first stage — the determinism gate — must not run or
-cannot be known to be permitted. An honest `unverified` is a usable state; a
+`generate.determinism` is `none`, or is not a mode this document defines (§23.7),
+so §25.5's first stage — the determinism gate — must not run, or cannot be known to
+be permitted. (`flag_only` is covered by the absent generator above: §7.6 makes
+`wasm` and `outputs` absent in that mode.) An honest `unverified` is a usable state; a
 false `passed` is worse than no gate at all (design §3).
 
 These are the **bundle's** declarations — `runtime`, `verify.offline`,
@@ -2738,8 +2744,8 @@ and a `SEALED` section MUST be encrypted (R21), so a gate that holds no key for 
 bundle's solver cannot run it and reports `unverified`; the reference implementation
 holds none. When more than one condition holds, the record MAY name any of them.
 
-`unverified` is the state for a gate that was **not run**, because an input it needs
-is absent. A gate that ran and could not complete a stage — a module that failed the
+`unverified` is the state for a gate that was **not run**: either an input it needs
+is absent, or a declaration forbids the gate. A gate that ran and could not complete a stage — a module that failed the
 determinism check or could not be sandboxed — is `failed`, not `unverified`, and S9
 requires the stage to be named. The distinction is the difference between "there was
 nothing to run" and "it ran and broke".
@@ -2769,7 +2775,9 @@ commitment root.
 
 `generator_root`, `cross_engine`, and `runs` are `null` when the gate did not run,
 or when the §25.5 determinism stage did not complete; once that stage completes, a
-later solver-stage failure keeps them. `runs` is the number of primary-engine runs.
+later solver-stage failure keeps them. A block that G8 rejects is a determinism-stage
+failure: the runs happened, but the block they produced is not one the declarations
+permit, so those three fields are `null`. `runs` is the number of primary-engine runs.
 `cross_engine` is `true` when the second-engine cross-check ran and agreed, `false`
 when the second engine cannot load the module's feature set (G10's exemption,
 §23.8), and `null` when the determinism stage did not complete (including two engines
