@@ -40,6 +40,6 @@ pub use host::{EngineKind, Generator, GeneratorError, Limits};
 pub use second::second_engine_supported;
 pub use seed_source::{
     DATA_PATH, FLAG_ENV, FLAG_PATH, SEED_ENV, SEED_PATH, SeedError, check_flag, parse_seed,
-    resolve_flag, resolve_seed, seed_from_env, seed_from_file,
+    resolve_flag, resolve_seed, resolve_seed_with, seed_from_env, seed_from_file,
 };
 pub use solver::Solver;

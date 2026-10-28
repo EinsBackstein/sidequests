@@ -73,7 +73,17 @@ func Parse(data []byte) (*Bundle, error) {
 		return nil, err
 	}
 
-	// Step 6: commitment root.
+	// Step 6: the first point a primitive is needed is the commitment root, so
+	// this is where suite_id is resolved through the registry. §19.2 S3: an id
+	// absent from it is rejected here, naming the suite. §19.2 S1 still holds
+	// because ParseHeader never consults the registry, so a header-only read of
+	// an unknown suite succeeds.
+	if _, err := LookupSuite(h.SuiteID); err != nil {
+		return nil, err
+	}
+
+	// Step 6: commitment root. Every registered suite selects BLAKE3, and §8.3
+	// fixes the commitment construction, so the root is computed directly.
 	if err := b.checkCommitment(tableStart, tableEnd); err != nil {
 		return nil, err
 	}
