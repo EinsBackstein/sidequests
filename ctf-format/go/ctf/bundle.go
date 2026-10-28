@@ -387,9 +387,9 @@ func (b *Bundle) VerifyAll() []error {
 		if r.Enc != EncNone {
 			continue
 		}
-		if !r.Understood() && r.Comp != CompNone {
-			continue
-		}
+		// Spec §10 forbids decompressing a kind this build does not implement, and
+		// this build has no zstd decoder at all, so any compressed section is
+		// unverifiable once its caps have been checked above.
 		if r.Comp != CompNone {
 			continue
 		}

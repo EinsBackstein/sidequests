@@ -220,16 +220,17 @@ description: \"see http://evil\\u001b[2J.invalid/\"
     );
 }
 
-/// §13 also covers the schema-error path: serde echoes the offending key, which
-/// is free-form text in the file, so a control in a key must not reach the
-/// terminal.
+/// §13 also covers the schema-error path: the offending key is free-form text in
+/// the file, so a control in it must not reach the terminal. The key is written
+/// as a YAML double-quoted scalar with `\e`, which the parser resolves to a real
+/// ESC — a literal backslash-`u` escape would test nothing.
 #[test]
-fn an_escape_in_an_unknown_key_is_not_written_raw() {
+fn a_control_in_an_unknown_key_is_not_written_raw() {
     let body = "\
 spec: 1
 id: escape-key
 name: Escape Key
-bad\\u001b[2Jkey: 1
+\"bad\\e[2Jkey\": 1
 ";
     let t = TempYaml::new("escape-key", body);
     let (_ok, _out, err) = validate(t.path(), &[]);
@@ -238,7 +239,7 @@ bad\\u001b[2Jkey: 1
         "raw escape byte reached the terminal:\n{err:?}"
     );
     assert!(
-        err.contains("\\u001b"),
+        err.contains("\\u{1b}"),
         "the escape should be visible as text:\n{err}"
     );
 }
