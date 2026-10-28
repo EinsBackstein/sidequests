@@ -163,6 +163,12 @@ pub fn flag_with_bytes(seed: &[u8; 32], bytes: usize) -> String {
 /// enters as a fixed-width `u32_le`, so `stage:1` followed by `stage:11` cannot
 /// collide with `stage:11` followed by `stage:1`.
 pub fn stage_key(previous_flag: &str, stage: u32) -> Result<[u8; 32], SuiteError> {
+    // DF4 (spec §22.4): stage *N*'s key is derived from stage *N-1*'s flag, so
+    // there is no previous flag at zero and no defined key. Stage numbering starts
+    // at 1, matching the Go implementation.
+    if stage == 0 {
+        return Err(SuiteError::InvalidStage);
+    }
     let info = stage.to_le_bytes();
     let mut key = [0u8; KEY_LEN];
     HkdfSha256::new().derive(previous_flag.as_bytes(), STAGE_LABEL, &info, &mut key)?;

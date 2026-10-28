@@ -2929,11 +2929,31 @@ fn flag_names(f: SectionFlags) -> String {
     }
 }
 
+/// Truncate to `n` characters for a fixed-width column, escaping control
+/// characters first (spec §13).
+///
+/// A manifest `name` may contain C1 controls such as U+0085 — `check_name` rejects
+/// C0 and DEL, but not every Unicode control — and a table cell is still a terminal
+/// write. Escaping before truncating makes the injected text visible instead of
+/// letting it act on the operator's terminal; escaping after would count the escape
+/// sequence against the column budget.
 fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_owned();
+    let mut escaped = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
     }
-    s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
+    if escaped.chars().count() <= n {
+        return escaped;
+    }
+    escaped
+        .chars()
+        .take(n.saturating_sub(1))
+        .collect::<String>()
+        + "…"
 }
 
 fn hexstr(b: &[u8]) -> String {

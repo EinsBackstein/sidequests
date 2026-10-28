@@ -106,6 +106,13 @@ impl<'a> Bundle<'a> {
             });
         }
 
+        // §19.2 S2/S3: the first point a primitive is needed is the commitment
+        // root, so this is where `suite_id` is resolved through the registry. An id
+        // absent from it is rejected here, naming the suite; §19.2 S1 is preserved
+        // because nothing earlier in this function (or in `Header::parse`) consults
+        // the registry.
+        crate::suite::suite(header.suite_id)?;
+
         // 6. The commitment root, over the header and table bytes exactly as they
         //    appear in the file — not as re-serialized from the parsed structs,
         //    which would hash what this build believes rather than what is there.
@@ -123,7 +130,7 @@ impl<'a> Bundle<'a> {
             .iter()
             .find(|r| r.kind == SectionKind::Manifest)
             .ok_or(Error::ManifestCount { got: 0 })?;
-        let bytes = Self::verified_bytes(file, record)?;
+        let bytes = Self::verified_bytes(file, record, header.suite_id)?;
         let manifest = Manifest::decode(&bytes)?;
         manifest.validate_against(&sections)?;
 
@@ -224,7 +231,7 @@ impl<'a> Bundle<'a> {
                 what: "a SEALED section's plaintext is not readable in this version",
             });
         }
-        Self::verified_bytes(self.file, record)
+        Self::verified_bytes(self.file, record, self.header.suite_id)
     }
 
     /// A section's chunk index, verified against the section's `root`.
@@ -430,7 +437,12 @@ impl<'a> Bundle<'a> {
             }
         }
 
-        if blake3::hash(&plain).as_bytes() != &record.root {
+        // §19.2 S2: the registry, not a hard-coded primitive, decides the hash.
+        // Every registered suite selects BLAKE3 today, so this is the same digest.
+        let digest = crate::suite::suite(self.header.suite_id)?
+            .hash()
+            .hash(&plain);
+        if digest != record.root {
             return Err(Error::SectionRootMismatch {
                 name_id: record.name_id,
             });
@@ -484,7 +496,7 @@ impl<'a> Bundle<'a> {
                 report.unverifiable += 1;
                 continue;
             }
-            match Self::verified_bytes(self.file, r) {
+            match Self::verified_bytes(self.file, r, self.header.suite_id) {
                 Ok(_) => report.verified += 1,
                 // A root mismatch is the finding, not a reason to stop: the point of
                 // the pass is to tell an operator *which* sections are bad, and a
@@ -519,7 +531,11 @@ impl<'a> Bundle<'a> {
     /// Consequence: [`Bundle::verify_inline_sections`] verifies uncompressed
     /// unknown-kind sections and counts them as verified, while
     /// [`Bundle::section_bytes`] refuses to hand them to a caller.
-    fn verified_bytes(file: &'a [u8], record: &SectionRecord) -> Result<Cow<'a, [u8]>> {
+    fn verified_bytes(
+        file: &'a [u8],
+        record: &SectionRecord,
+        suite_id: u16,
+    ) -> Result<Cow<'a, [u8]>> {
         if record.flags.contains(SectionFlags::EXTERNAL) {
             return Err(Error::Inconsistent {
                 what: "an EXTERNAL section's bytes are not in the file",
@@ -549,7 +565,10 @@ impl<'a> Bundle<'a> {
             Compression::None => Cow::Borrowed(stored),
             Compression::Zstd => Cow::Owned(compress::decompress(stored, record.len_plain)?),
         };
-        if blake3::hash(&plain).as_bytes() != &record.root {
+        // §19.2 S2: the section root is whatever the resolved suite's hash role
+        // produces; the registry decides, not a hard-coded primitive.
+        let digest = crate::suite::suite(suite_id)?.hash().hash(&plain);
+        if digest != record.root {
             return Err(Error::SectionRootMismatch {
                 name_id: record.name_id,
             });
@@ -803,6 +822,13 @@ impl<'a> SectionSpec<'a> {
 /// with [`sign_bundle`] or produce a signed file directly with
 /// [`write_signed_bundle`].
 pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u8>> {
+    // §19.2: resolve the suite at entry, whether or not a section is encrypted.
+    // The footer commitment and every section root are suite-selected primitives,
+    // so writing under an unregistered id would produce a file this writer's own
+    // read-back refuses. Failing here makes `ctf pack --suite 99` fail at pack
+    // time instead of emitting such a file.
+    let suite = crate::suite::suite(suite_id)?;
+
     if sections.len() > crate::MAX_SECTIONS as usize {
         return Err(Error::TooManySections {
             got: sections.len() as u32,
@@ -816,7 +842,7 @@ pub fn write_bundle(suite_id: u16, sections: &[SectionSpec<'_>]) -> Result<Vec<u
     // those sections sit in the file (spec §21.3).
     let any_encryption = sections.iter().any(|s| s.encryption.is_some());
     let aead: Option<&'static dyn crate::suite::Aead> = if any_encryption {
-        Some(crate::suite::suite(suite_id)?.aead()?)
+        Some(suite.aead()?)
     } else {
         None
     };

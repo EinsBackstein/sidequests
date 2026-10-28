@@ -98,6 +98,16 @@ pub struct PlatformDescriptor {
     /// The referrer policy the platform serves the challenge under (ticket 68).
     /// Always [`policy::DEFAULT_REFERRER_POLICY`].
     pub referrer_policy: String,
+    /// A `runtime.ports[0].container` this struct's `u16` cannot represent.
+    ///
+    /// Deliberately not serialized: it exists only so [`PlatformDescriptor::validate`]
+    /// sees a value the committed manifest carries, instead of the field being
+    /// silently dropped from the descriptor (§29.1).
+    #[serde(skip)]
+    pub(crate) port_out_of_range: Option<u64>,
+    /// As `port_out_of_range`, for `runtime.readiness.tcp`.
+    #[serde(skip)]
+    pub(crate) readiness_tcp_out_of_range: Option<u64>,
 }
 
 impl PlatformDescriptor {
@@ -118,6 +128,22 @@ impl PlatformDescriptor {
                     .map(|(_, v)| v)
             });
 
+        // A port outside `u16` is not representable in this shape, but it is in the
+        // manifest. Keep it as data for `validate` so the pack fails rather than
+        // emitting a descriptor that omits a port the bundle committed to (§29.1).
+        let port_value = runtime
+            .and_then(|r| r.get("ports"))
+            .and_then(Value::as_array)
+            .and_then(|ports| ports.first())
+            .and_then(|p| p.get("container"))
+            .and_then(Value::as_uint);
+        let port_out_of_range = port_value.filter(|n| u16::try_from(*n).is_err());
+        let readiness_tcp_value = runtime
+            .and_then(|r| r.get("readiness"))
+            .and_then(|r| r.get("tcp"))
+            .and_then(Value::as_uint);
+        let readiness_tcp_out_of_range = readiness_tcp_value.filter(|n| u16::try_from(*n).is_err());
+
         Self {
             slug: manifest.id().to_owned(),
             name: manifest.name().to_owned(),
@@ -128,13 +154,7 @@ impl PlatformDescriptor {
                 .and_then(|r| r.get("image"))
                 .and_then(Value::as_text)
                 .map(str::to_owned),
-            port: runtime
-                .and_then(|r| r.get("ports"))
-                .and_then(Value::as_array)
-                .and_then(|ports| ports.first())
-                .and_then(|p| p.get("container"))
-                .and_then(Value::as_uint)
-                .and_then(|n| u16::try_from(n).ok()),
+            port: port_value.and_then(|n| u16::try_from(n).ok()),
             resources: runtime.and_then(resources_of),
             storage_size: overlay
                 .and_then(|o| o.get("storage_size"))
@@ -151,6 +171,8 @@ impl PlatformDescriptor {
                 .map(str::to_owned),
             readiness: runtime.and_then(readiness_of),
             referrer_policy: policy::DEFAULT_REFERRER_POLICY.to_owned(),
+            port_out_of_range,
+            readiness_tcp_out_of_range,
         }
     }
 
@@ -169,6 +191,9 @@ impl PlatformDescriptor {
             && let Err(e) = policy::check_image_ref(image)
         {
             issues.push(PolicyIssue::new(policy::RUNTIME_IMAGE_KEY, e.to_string()));
+        }
+        if self.port_out_of_range.is_some() {
+            issues.push(PolicyIssue::new("port", "must be between 1 and 65535"));
         }
         if let Some(port) = self.port
             && port == 0
@@ -195,6 +220,12 @@ impl PlatformDescriptor {
             && ttl.is_empty()
         {
             issues.push(PolicyIssue::new("ttl", "must not be empty"));
+        }
+        if self.readiness_tcp_out_of_range.is_some() {
+            issues.push(PolicyIssue::new(
+                "readiness.tcp",
+                "must be between 1 and 65535",
+            ));
         }
         if let Some(readiness) = &self.readiness {
             if readiness.tcp == 0 {

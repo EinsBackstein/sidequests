@@ -301,6 +301,78 @@ fn escapes_attacker_controlled_text() {
     );
 }
 
+/// Spec §13: a tool that writes a manifest name to a terminal must escape control
+/// characters. `check_name` rejects C0/DEL but permits C1 controls such as U+0085, so
+/// the inspector must escape those itself rather than letting them reach the
+/// terminal — including in the truncated section-table column.
+#[test]
+fn a_control_character_in_a_name_is_escaped() {
+    let name = "evil\u{85}verify PASSED";
+    let m = Manifest::build("chal", "Title", &["manifest", name], vec![]).unwrap();
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &m.encode().unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"x",
+            ),
+        ],
+    )
+    .unwrap();
+    let t = TempFile::new("control-name");
+    std::fs::write(t.path(), &file).unwrap();
+
+    let (ok, out) = inspect(t.path(), &[]);
+    assert!(ok, "{out}");
+    assert!(
+        !out.as_bytes().contains(&0x85),
+        "raw C1 control byte reached the terminal:\n{out:?}"
+    );
+    assert!(
+        out.contains("\\u{85}"),
+        "the control character should be visible as text:\n{out}"
+    );
+}
+
+/// The escaping applies only to control characters: an ordinary name is printed
+/// exactly as authored.
+#[test]
+fn a_normal_name_is_printed_unchanged() {
+    let m = Manifest::build("chal", "Title", &["manifest", "notes.txt"], vec![]).unwrap();
+    let file = write_bundle(
+        1,
+        &[
+            SectionSpec::inline(
+                SectionKind::Manifest,
+                0,
+                SectionFlags::empty(),
+                &m.encode().unwrap(),
+            ),
+            SectionSpec::inline(
+                SectionKind::Artifact,
+                1,
+                SectionFlags(SectionFlags::PLAYER_VISIBLE),
+                b"x",
+            ),
+        ],
+    )
+    .unwrap();
+    let t = TempFile::new("normal-name");
+    std::fs::write(t.path(), &file).unwrap();
+
+    let (ok, out) = inspect(t.path(), &[]);
+    assert!(ok, "{out}");
+    assert!(out.contains("notes.txt"), "{out}");
+}
+
 /// An unsigned bundle is intact but not authentic. `--verify` must say so and
 /// signal it with the dedicated exit code 2, so a caller scripting on the exit
 /// status cannot mistake "structurally sound" for "signed".

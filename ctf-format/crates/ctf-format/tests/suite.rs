@@ -11,7 +11,11 @@
     clippy::panic
 )]
 
-use ctf_format::{AeadId, HashId, Header, KdfId, KemId, Role, SignatureId, SuiteError, suite};
+use ctf_format::{
+    AeadId, Bundle, Error, HEADER_LEN, HashId, Header, KdfId, KemId, Manifest, Role, SectionFlags,
+    SectionKind, SectionSpec, SignatureId, SuiteError, footer::commitment_root, suite,
+    write_bundle,
+};
 
 #[test]
 fn known_suites_resolve_with_one_algorithm_per_role() {
@@ -102,5 +106,74 @@ fn header_parse_does_not_reject_an_unknown_suite() {
     assert!(matches!(
         suite(h.suite_id),
         Err(SuiteError::UnknownSuite { .. })
+    ));
+}
+
+/// A minimal, structurally valid bundle whose `suite_id` is `suite_id` and whose
+/// commitment root covers that header. The writer refuses an unknown suite, so the
+/// bytes are built with a registered one and re-rooted after the header is edited.
+fn bundle_naming_suite(suite_id: u16) -> Vec<u8> {
+    let manifest = Manifest::minimal("suite-check", "Suite Check", &["manifest"])
+        .unwrap()
+        .encode()
+        .unwrap();
+    let mut file = write_bundle(
+        1,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &manifest,
+        )],
+    )
+    .unwrap();
+    file[16..18].copy_from_slice(&suite_id.to_le_bytes());
+    let header = Header::parse(&file).unwrap();
+    let (start, end) = header.table_range().unwrap();
+    let root = commitment_root(
+        &file[..HEADER_LEN as usize],
+        &file[start as usize..end as usize],
+    );
+    let footer = header.footer_off as usize;
+    file[footer..footer + 32].copy_from_slice(&root);
+    file
+}
+
+/// §19.2 S2/S3: the reader resolves `suite_id` at the first primitive, which is the
+/// commitment root. A structurally valid bundle naming an unregistered suite must be
+/// refused with the suite named — not reported intact.
+#[test]
+fn parse_refuses_a_bundle_naming_an_unknown_suite() {
+    let file = bundle_naming_suite(99);
+    let err = Bundle::parse(&file).unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Suite(SuiteError::UnknownSuite { id: 99 })
+    ));
+    assert!(err.to_string().contains("unknown crypto suite 99"), "{err}");
+}
+
+/// The writer's parse-back would refuse the file, so the writer refuses it first:
+/// `ctf pack --suite 99` must fail at pack time rather than emit a bundle its own
+/// reader rejects.
+#[test]
+fn write_bundle_refuses_an_unknown_suite() {
+    let manifest = Manifest::minimal("suite-check", "Suite Check", &["manifest"])
+        .unwrap()
+        .encode()
+        .unwrap();
+    let err = write_bundle(
+        99,
+        &[SectionSpec::inline(
+            SectionKind::Manifest,
+            0,
+            SectionFlags::empty(),
+            &manifest,
+        )],
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        Error::Suite(SuiteError::UnknownSuite { id: 99 })
     ));
 }

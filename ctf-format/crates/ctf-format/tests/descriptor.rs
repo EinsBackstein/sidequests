@@ -129,6 +129,73 @@ fn a_negative_level_is_read_from_the_overlay() {
     }
 }
 
+fn runtime_doc(tag: &str, port: u64, readiness_tcp: u64) -> ChallengeDoc {
+    let yaml = format!(
+        r#"
+spec: 1
+id: {tag}
+name: "Runtime"
+runtime:
+  image: "ghcr.io/ctf/{tag}@{DIGEST}"
+  ports: [{{ container: {port}, protocol: tcp }}]
+  resources: {{ cpu: "0.5", memory: "256Mi", pids: 64 }}
+  instancing: per_team
+  ttl: 30m
+  readiness: {{ tcp: {readiness_tcp}, timeout: 30s }}
+"#
+    );
+    ChallengeDoc::from_yaml(&yaml).unwrap()
+}
+
+/// §29.1: the descriptor is projected from the committed manifest. A port the
+/// descriptor's `u16` cannot represent must stay visible to `validate` instead of
+/// being silently dropped, so the pack fails rather than emitting a descriptor that
+/// disagrees with the bundle.
+#[test]
+fn an_out_of_range_container_port_fails_the_pack() {
+    let doc = runtime_doc("big-port", 70_000, 80);
+    match pack::pack(&doc) {
+        Err(ctf_format::pack::PackError::Policy(issues)) => {
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].key(), "port");
+            assert_eq!(issues[0].message(), "must be between 1 and 65535");
+        }
+        other => panic!("expected a policy refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_out_of_range_readiness_port_fails_the_pack() {
+    let doc = runtime_doc("big-readiness", 80, 70_000);
+    match pack::pack(&doc) {
+        Err(ctf_format::pack::PackError::Policy(issues)) => {
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].key(), "readiness.tcp");
+            assert_eq!(issues[0].message(), "must be between 1 and 65535");
+        }
+        other => panic!("expected a policy refusal, got {other:?}"),
+    }
+}
+
+/// The same projection still carries a representable port exactly, and a manifest
+/// with no runtime still omits `port`/`readiness` rather than inventing them.
+#[test]
+fn a_representable_port_projects_and_no_runtime_omits_both() {
+    let doc = runtime_doc("ok-port", 1337, 1337);
+    let descriptor = pack::descriptor_for(&doc).unwrap();
+    assert_eq!(descriptor.port, Some(1337));
+    assert_eq!(descriptor.readiness.as_ref().unwrap().tcp, 1337);
+    assert!(descriptor.validate().is_empty());
+
+    let minimal = ChallengeDoc::from_yaml("spec: 1\nid: no-runtime\nname: No Runtime\n").unwrap();
+    let descriptor = pack::descriptor_for(&minimal).unwrap();
+    assert!(descriptor.port.is_none());
+    assert!(descriptor.readiness.is_none());
+    let json = descriptor.to_json().unwrap();
+    assert!(!json.contains("\"port\""), "{json}");
+    assert!(!json.contains("\"readiness\""), "{json}");
+}
+
 #[test]
 fn a_custom_namespace_is_honored() {
     let doc = ChallengeDoc::from_yaml(

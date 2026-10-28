@@ -443,12 +443,15 @@ fn the_verify_report_lists_every_mismatch() {
 /// root.
 ///
 /// The test asserts the *commitment* is what rejects each mutation, not merely that
-/// something did. A loop over offsets that trips `BadMagic` or `UnknownFlagBits`
-/// first would pass for any rejection and evidence nothing, so the offsets below are
-/// the two no earlier rule constrains: `version_minor` is informational (§2.3) and
-/// `suite_id` is not validated at parse time. Each must reach step 6 and fail with
-/// `RootMismatch { at: "commitment root" }`. A separate assertion shows the mutation
+/// something did. The offsets below are the ones no earlier rule constrains:
+/// `version_minor` is informational (§2.3), and `suite_id` is now resolved just
+/// before step 6 (§19.2 S2/S3), so a *registered but different* suite still reaches
+/// the commitment and is rejected there. A separate assertion shows the mutation
 /// actually moves the root, so the two are not the same fact restated.
+///
+/// An unregistered `suite_id` is the one case that no longer reaches step 6: §19.2
+/// requires the reader to reject it where the primitive is needed, naming the suite,
+/// which is the more useful diagnostic than a root mismatch.
 #[test]
 fn a_flipped_header_byte_breaks_the_commitment() {
     let file = minimal_bundle();
@@ -457,9 +460,11 @@ fn a_flipped_header_byte_breaks_the_commitment() {
     let table = &file[start as usize..end as usize];
     let original = commitment_root(&file[..HEADER_LEN as usize], table);
 
-    for off in [10usize, 16] {
-        let mut tampered = file.clone();
-        tampered[off] ^= 1;
+    let mut version_minor = file.clone();
+    version_minor[10] ^= 1;
+    let mut other_suite = file.clone();
+    other_suite[16] = 2; // suite 2 is registered; only the commitment disagrees.
+    for tampered in [version_minor, other_suite] {
         let err = Bundle::parse(&tampered).unwrap_err();
         assert!(
             matches!(
@@ -468,14 +473,21 @@ fn a_flipped_header_byte_breaks_the_commitment() {
                     at: "commitment root"
                 }
             ),
-            "header offset {off} must reach the commitment check, got {err}"
+            "a registered header mutation must reach the commitment check, got {err}"
         );
         assert_ne!(
             commitment_root(&tampered[..HEADER_LEN as usize], table),
             original,
-            "flipping header offset {off} must move the commitment root"
+            "the mutation must move the commitment root"
         );
     }
+
+    let mut unknown_suite = file.clone();
+    unknown_suite[16] = 0;
+    assert!(matches!(
+        Bundle::parse(&unknown_suite),
+        Err(Error::Suite(ctf_format::SuiteError::UnknownSuite { id: 0 }))
+    ));
 }
 
 #[test]
