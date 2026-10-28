@@ -7,6 +7,40 @@ versioning is [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the major version is `0`, the on-disk byte layout is **not** frozen and any
 minor release may break it.
 
+## [0.13.13] — 2026-10-28
+
+Fourth post-release audit round. **No byte-layout change:** `version_minor` stays
+`3`, both goldens are byte-identical (`minimal.ctf` 4344 B, `demo.ctf` 18328 B), and
+no header, section, footer, commitment root, or signature transcript moved.
+
+### Fixed — the Go §24 helper reused a caller-supplied content key
+
+`SealProgress` took the content key as an argument, so two payloads could be sealed
+under the same key with §24.2's all-zero nonce. It now draws a fresh 32-byte key per
+payload, `Open` refuses an envelope whose `name_id` is not `0`, and a new
+`DecodeProgress` enforces §24.1's exactly-`envelope`/`ct` shape.
+
+### Fixed — a negative projected port vanished (§29.1)
+
+The descriptor projection read `runtime.ports[0].container` and
+`runtime.readiness.tcp` with an unsigned accessor, so a CBOR nint was silently
+dropped and the range check never ran. Any integer outside `1..=65535` — including a
+negative one — is now the policy error §29.1 names, reported by descriptor
+validation and therefore by `ctf pack`.
+
+### Fixed — an uppercase scheme skipped the origin warning (§29.3 O2)
+
+The scan matched `http://` and `https://` literally, so `HTTPS://evil.example` was
+not reported. A URI scheme is case-insensitive (RFC 3986 §3.1); matching is now
+case-insensitive while the reported origin keeps the author's casing.
+
+### Fixed — `ctf validate` skipped the descriptor policy checks
+
+`validate` is documented as a schema-and-policy pre-flight, but it ran only
+`ChallengeDoc::validate`, so an out-of-range port, an out-of-range readiness port,
+or `resources.pids: 0` reported `ok` and exited 0 while `ctf pack` refused the same
+document. It now runs the descriptor policy pass too.
+
 ## [0.13.12] — 2026-10-28
 
 Third post-release audit round. **No byte-layout change:** `version_minor` stays
