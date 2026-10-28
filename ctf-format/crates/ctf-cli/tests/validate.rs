@@ -56,6 +56,66 @@ id: whos-that-bird
 name: \"Who's That Bird\"
 ";
 
+/// A document with a full `runtime` block; `container`, `readiness_tcp`, and
+/// `pids` are the values the descriptor's policy checks look at.
+fn runtime_doc(tag: &str, container: u64, readiness_tcp: u64, pids: u64) -> String {
+    format!(
+        "\
+spec: 1
+id: {tag}
+name: Runtime
+runtime:
+  image: \"ghcr.io/ctf/{tag}@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"
+  ports: [{{ container: {container}, protocol: tcp }}]
+  resources: {{ cpu: \"0.5\", memory: \"256Mi\", pids: {pids} }}
+  instancing: per_team
+  ttl: 30m
+  readiness: {{ tcp: {readiness_tcp}, timeout: 30s }}
+"
+    )
+}
+
+/// `ctf validate` runs the same descriptor policy checks `ctf pack` does
+/// (design §10), so an out-of-range port is reported here rather than only at
+/// pack time.
+#[test]
+fn an_out_of_range_container_port_is_a_validate_error() {
+    let body = runtime_doc("validate-port", 70_000, 1337, 64);
+    let t = TempYaml::new("port-range", &body);
+    let (ok, out, err) = validate(t.path(), &[]);
+    assert!(!ok, "an out-of-range container port must fail: {out}{err}");
+    assert!(err.contains("port"), "the key must be named: {err}");
+    assert!(err.contains("must be between 1 and 65535"), "{err}");
+}
+
+#[test]
+fn an_out_of_range_readiness_port_is_a_validate_error() {
+    let body = runtime_doc("validate-readiness", 1337, 70_000, 64);
+    let t = TempYaml::new("readiness-range", &body);
+    let (ok, out, err) = validate(t.path(), &[]);
+    assert!(!ok, "an out-of-range readiness port must fail: {out}{err}");
+    assert!(err.contains("readiness.tcp"), "{err}");
+    assert!(err.contains("must be between 1 and 65535"), "{err}");
+}
+
+#[test]
+fn a_zero_pid_limit_is_a_validate_error() {
+    let body = runtime_doc("validate-pids", 1337, 1337, 0);
+    let t = TempYaml::new("pids-zero", &body);
+    let (ok, out, err) = validate(t.path(), &[]);
+    assert!(!ok, "a zero PID limit must fail: {out}{err}");
+    assert!(err.contains("resources.pids"), "{err}");
+}
+
+#[test]
+fn a_valid_runtime_document_still_exits_zero() {
+    let body = runtime_doc("validate-runtime-ok", 1337, 1337, 64);
+    let t = TempYaml::new("runtime-ok", &body);
+    let (ok, out, err) = validate(t.path(), &[]);
+    assert!(ok, "valid runtime document rejected: {out}{err}");
+    assert!(out.contains("ok"), "{out}");
+}
+
 #[test]
 fn a_valid_document_exits_zero() {
     let t = TempYaml::new("valid", MINIMAL);

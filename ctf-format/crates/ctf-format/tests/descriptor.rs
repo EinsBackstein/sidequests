@@ -196,6 +196,106 @@ fn a_representable_port_projects_and_no_runtime_omits_both() {
     assert!(!json.contains("\"readiness\""), "{json}");
 }
 
+/// Build a manifest whose `runtime` declaration carries an arbitrary CBOR
+/// integer, so a negative port can reach the descriptor exactly as it would
+/// from the wire.
+fn runtime_manifest(
+    container: ctf_format::cbor::Value,
+    readiness_tcp: ctf_format::cbor::Value,
+) -> ctf_format::Manifest {
+    use ctf_format::cbor::Value;
+    ctf_format::Manifest::build(
+        "neg-port",
+        "Neg Port",
+        &["manifest"],
+        vec![(
+            Value::Text("runtime".into()),
+            Value::Map(vec![
+                (
+                    Value::Text("ports".into()),
+                    Value::Array(vec![Value::Map(vec![
+                        (Value::Text("container".into()), container),
+                        (Value::Text("protocol".into()), Value::Text("tcp".into())),
+                    ])]),
+                ),
+                (
+                    Value::Text("readiness".into()),
+                    Value::Map(vec![
+                        (Value::Text("tcp".into()), readiness_tcp),
+                        (Value::Text("timeout".into()), Value::Text("30s".into())),
+                    ]),
+                ),
+            ]),
+        )],
+    )
+    .unwrap()
+}
+
+/// §29.1: a negative `runtime.ports[0].container` is outside `1..=65535`, so it
+/// is a policy error, never a silently omitted field.
+#[test]
+fn a_negative_container_port_is_out_of_range() {
+    let manifest = runtime_manifest(
+        ctf_format::cbor::Value::Nint(0),
+        ctf_format::cbor::Value::Uint(1337),
+    );
+    let descriptor =
+        ctf_format::PlatformDescriptor::from_manifest(&manifest, DEFAULT_PLATFORM_NAMESPACE);
+    let issues = descriptor.validate();
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.key() == "port" && i.message() == "must be between 1 and 65535"),
+        "expected a port range issue, got {issues:?}"
+    );
+}
+
+/// As above, for `runtime.readiness.tcp`.
+#[test]
+fn a_negative_readiness_port_is_out_of_range() {
+    let manifest = runtime_manifest(
+        ctf_format::cbor::Value::Uint(1337),
+        ctf_format::cbor::Value::Nint(0),
+    );
+    let descriptor =
+        ctf_format::PlatformDescriptor::from_manifest(&manifest, DEFAULT_PLATFORM_NAMESPACE);
+    let issues = descriptor.validate();
+    assert!(
+        issues
+            .iter()
+            .any(|i| i.key() == "readiness.tcp" && i.message() == "must be between 1 and 65535"),
+        "expected a readiness.tcp range issue, got {issues:?}"
+    );
+}
+
+/// `0` and `65536` sit just outside `1..=65535`; each reports one issue, and
+/// neither is projected into the `u16` field.
+#[test]
+fn a_zero_or_too_large_port_reports_exactly_one_issue() {
+    use ctf_format::cbor::Value;
+    for raw in [Value::Uint(0), Value::Uint(65536)] {
+        let port_manifest = runtime_manifest(raw.clone(), Value::Uint(1337));
+        let port_descriptor = ctf_format::PlatformDescriptor::from_manifest(
+            &port_manifest,
+            DEFAULT_PLATFORM_NAMESPACE,
+        );
+        assert!(port_descriptor.port.is_none());
+        let issues = port_descriptor.validate();
+        assert_eq!(issues.len(), 1, "port {raw:?}: {issues:?}");
+        assert_eq!(issues[0].key(), "port");
+
+        let readiness_manifest = runtime_manifest(Value::Uint(1337), raw.clone());
+        let readiness_descriptor = ctf_format::PlatformDescriptor::from_manifest(
+            &readiness_manifest,
+            DEFAULT_PLATFORM_NAMESPACE,
+        );
+        assert!(readiness_descriptor.readiness.is_none());
+        let issues = readiness_descriptor.validate();
+        assert_eq!(issues.len(), 1, "readiness {raw:?}: {issues:?}");
+        assert_eq!(issues[0].key(), "readiness.tcp");
+    }
+}
+
 #[test]
 fn a_custom_namespace_is_honored() {
     let doc = ChallengeDoc::from_yaml(
