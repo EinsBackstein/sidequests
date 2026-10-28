@@ -1058,6 +1058,13 @@ struct GateSetup {
     runtime_declared: bool,
     /// Whether the gate's manifest declares `verify.offline`.
     offline_declared: bool,
+    /// The `generate.determinism` mode the gate will use (§23.7): the document's, or
+    /// the bundle's when one is supplied. `None` is absent, which does not suppress
+    /// the gate.
+    determinism: Option<ctf_generator::DeterminismMode>,
+    /// The output names `generate.outputs` declares (§7.6, G8), likewise. Every name
+    /// the generator emits must be a member.
+    declared_outputs: Vec<String>,
     /// The authoring document's modules, deferred. Set only when a bundle supplies
     /// the declarations: resolving them eagerly would let the document's filesystem
     /// state fail a bundle that carries its own module sections (§25.6).
@@ -1277,6 +1284,24 @@ fn load_gate_setup_inner(
         .map_err(|e| GateSetupError::Message(format!("--secret: {e}")))?;
     let expected = derive::flag(&seed);
 
+    // §23.7/G8: the document's declarations, unless a bundle supplies them (then
+    // [`apply_bundle_declarations`] overwrites both before a gate runs).
+    let (determinism, declared_outputs) = match source {
+        DeclarationSource::Document => {
+            let generate = doc.generate.as_ref();
+            let determinism = generate
+                .map(|g| g.determinism.as_str())
+                .and_then(ctf_generator::DeterminismMode::parse);
+            let declared_outputs = generate
+                .map(|g| g.outputs.iter().map(|o| o.name.clone()).collect())
+                .unwrap_or_default();
+            (determinism, declared_outputs)
+        }
+        // The bundle's declarations decide (§25.6). These placeholders are never
+        // used: every bundle path applies the bundle's values first.
+        DeclarationSource::Bundle => (None, Vec::new()),
+    };
+
     Ok(GateSetup {
         doc_id: doc.id.clone(),
         doc_version: doc.version,
@@ -1288,6 +1313,8 @@ fn load_gate_setup_inner(
         expected,
         runtime_declared: doc.runtime.is_some(),
         offline_declared: doc.verify.as_ref().is_some_and(|v| v.offline),
+        determinism,
+        declared_outputs,
         document_modules,
     })
 }
@@ -1321,6 +1348,8 @@ fn run_setup_gate(
             expected_flag: &setup.expected,
             runtime_declared: setup.runtime_declared,
             offline_declared: setup.offline_declared,
+            determinism: setup.determinism,
+            declared_outputs: &setup.declared_outputs,
         },
         &ctf_generator::Limits::default(),
     )
@@ -1441,6 +1470,27 @@ fn apply_bundle_declarations(bundle: &Bundle<'_>, setup: &mut GateSetup) -> Resu
     // the module at 1 and could report `passed` for a version the bundle never
     // declared. The reason is fixed and path-free (S12).
     let generate = bundle.manifest.declaration("generate");
+    // §23.7: the bundle's determinism mode decides whether a gate exists. Absent —
+    // or text this build does not know — is not a suppression: the gate runs. This
+    // overrides the document's value unconditionally (§25.6).
+    setup.determinism = generate
+        .and_then(|generate| generate.get("determinism"))
+        .and_then(Value::as_text)
+        .and_then(ctf_generator::DeterminismMode::parse);
+    // G8/§23.3: the declared output names are the bundle's too. An absent list
+    // declares no output, so a module that names one is rejected rather than passed
+    // on the document's say-so.
+    setup.declared_outputs = generate
+        .and_then(|generate| generate.get("outputs"))
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|output| output.get("name").and_then(Value::as_text))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let bundle_version = |key: &str| bundle_declared_version(generate, key);
     setup.interface = match bundle_version("interface") {
         Ok(version) => match declared_version(version, ctf_generator::abi::ensure_interface) {

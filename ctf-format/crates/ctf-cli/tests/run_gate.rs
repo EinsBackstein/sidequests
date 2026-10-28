@@ -91,6 +91,37 @@ fn generator_wasm(block: &[u8]) -> Vec<u8> {
     wat::parse_str(&src).unwrap()
 }
 
+/// A generator whose output changes with its own call count (rule G9): each call
+/// writes its call number over the block byte at `mutate_at`. Used to prove the
+/// gate did not run.
+fn stateful_generator_wasm(block: &[u8], mutate_at: usize) -> Vec<u8> {
+    let src = format!(
+        r#"(module
+  (memory (export "memory") 1)
+  (global $n (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (func (export "ctf_alloc") (param i32) (result i32) i32.const 8192)
+  (func (export "ctf_generate") (param i32 i32) (result i32)
+    i32.const {}
+    i32.const 65
+    global.get $n
+    i32.add
+    i32.store8
+    global.get $n
+    i32.const 1
+    i32.add
+    global.set $n
+    i32.const 1024)
+  (func (export "ctf_output_len") (result i32) i32.const {})
+)
+"#,
+        escape(block),
+        1024 + mutate_at,
+        block.len()
+    );
+    wat::parse_str(&src).unwrap()
+}
+
 /// A solver that ignores its input and answers a fixed flag.
 fn solver_wasm(flag: &str) -> Vec<u8> {
     let block = solver_block(flag);
@@ -275,6 +306,65 @@ fn run_persists_an_unverified_status_distinctly() {
         record.contains("\"generator_root\": null"),
         "an unverified run has no root: {record}"
     );
+}
+
+/// Spec §23.7: `determinism: none` declares that reproducibility is not required,
+/// so `ctf run` must not run the gate. The module varies across calls, so a gate
+/// run would report `failed`; observing `unverified` proves it did not run.
+#[test]
+fn run_does_not_run_the_gate_for_determinism_none() {
+    let dir = TempDir::new("determinism-none");
+    let secret = "00".repeat(32);
+    let (_seed, expected) = reference(&secret);
+    let block = generator_block(&expected, &[("artifact.bin", b"artifact bytes")]);
+    // The first artifact's data begins after the count, the name length and name,
+    // and the data length.
+    let data_at = 4 + 4 + "artifact.bin".len() + 4;
+    std::fs::write(
+        dir.path("none-gen.wasm"),
+        stateful_generator_wasm(&block, data_at),
+    )
+    .unwrap();
+    std::fs::write(dir.path("none-solver.wasm"), solver_wasm(&expected)).unwrap();
+    let source = dir.path("none.yaml");
+    std::fs::write(
+        &source,
+        format!(
+            "spec: 1\nid: {ID}\nname: Gate Test\nflag: derived\n\
+             generate:\n  wasm: none-gen.wasm\n  determinism: none\n  outputs:\n    \
+             - {{ name: artifact.bin, player_visible: true }}\n\
+             verify:\n  solver: none-solver.wasm\n  expect: flag\n  offline: true\n"
+        ),
+    )
+    .unwrap();
+
+    let status = dir.path("none.status.json");
+    let (ok, stdout, stderr) = run(&["run", &source, "--secret", &secret, "--status", &status]);
+    assert!(ok, "`none` is not a failure: {stdout}{stderr}");
+    assert!(
+        stdout.contains("gate          unverified"),
+        "status: {stdout}"
+    );
+    assert!(
+        stdout.contains("determinism not run"),
+        "the condition is named: {stdout}"
+    );
+    assert!(
+        !stderr.contains("not deterministic"),
+        "the gate must not have run: {stderr}"
+    );
+
+    let record = std::fs::read_to_string(&status).unwrap();
+    assert!(
+        record.contains("\"status\": \"unverified\""),
+        "record: {record}"
+    );
+    assert!(
+        record.contains("determinism: none"),
+        "the record says why: {record}"
+    );
+    assert!(record.contains("\"generator_root\": null"), "{record}");
+    assert!(record.contains("\"runs\": null"), "{record}");
 }
 
 /// Spec §25.6/S10: `--bundle` names the bundle the record describes. A document for
