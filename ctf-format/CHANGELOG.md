@@ -33,10 +33,12 @@ several diagnostics passed it through: `ctf validate` and `ctf pack` printed the
 §29.3 origin quoted from `description`, `ctf run` and `ctf verify` printed the key
 echoed by a schema error, the gate's module-read failure quoted the document's
 module path, and `ctf release` printed the destination built from a sealed member's
-name. All of them now escape with the same character set `ctf inspect` uses (C0/C1,
-DEL, and the bidi-format marks `check_name` permits) instead of trusting the parser or
-validation to have removed the control — a module name, for instance, is only
-required to be non-empty.
+name. All of them now escape with the same character set `ctf inspect` uses — C0/C1
+controls, DEL, Unicode format characters (zero-width and bidi marks among them), and
+line/paragraph separators — instead of trusting the parser or validation to have
+removed the hazard; a module name, for instance, is only required to be non-empty.
+The inspector's table cells now escape a zero-width mark the same way, since a
+`check_name`-valid name can carry one.
 
 ## [0.13.13] — 2026-10-28
 
