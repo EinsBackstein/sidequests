@@ -46,7 +46,7 @@ the start; only the absence of both is "not injected".
 ### Fixed — the runtime host always ran the determinism gate (§23.7)
 
 The ingest gate honoured `none`, but `ctf-generator` always ran two G9 runs, so a
-`none` challenge could not start at all. The runtime now takes the mode from its
+`none` challenge whose generator varies per call could not start. The runtime now takes the mode from its
 operator with `--determinism <strict|none|flag_only>`: `strict` is the default and
 unchanged, `none` runs the module once without a comparison, and `flag_only` is
 refused because it declares no generator. §23.7 states the default.

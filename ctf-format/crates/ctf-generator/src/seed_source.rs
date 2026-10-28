@@ -55,9 +55,16 @@ impl core::fmt::Display for SeedError {
 impl core::error::Error for SeedError {}
 
 /// The seed from `CTF_SEED`, as 64 lowercase hex digits.
+///
+/// Only an *absent* environment variable is [`SeedError::Missing`]. A present
+/// value that is not Unicode is malformed, not absent: falling through to the
+/// mount would generate from a seed the orchestrator did not inject (§26 I3).
 pub fn seed_from_env() -> Result<[u8; 32], SeedError> {
-    let value = std::env::var(SEED_ENV).map_err(|_| SeedError::Missing)?;
-    parse_seed(value.trim())
+    match std::env::var(SEED_ENV) {
+        Ok(value) => parse_seed(value.trim()),
+        Err(std::env::VarError::NotPresent) => Err(SeedError::Missing),
+        Err(std::env::VarError::NotUnicode(_)) => Err(SeedError::BadValue("CTF_SEED is not UTF-8")),
+    }
 }
 
 /// The seed from a file: either 32 raw bytes, or 64 hex digits.

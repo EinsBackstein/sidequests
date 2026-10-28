@@ -193,6 +193,44 @@ fn an_explicit_seed_file_is_read_when_the_environment_is_absent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// §26 I3: a present but non-Unicode `CTF_SEED` is malformed, not absent. It must
+/// not fall through to the explicit mount, which would generate from a seed the
+/// orchestrator did not inject.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_environment_seed_does_not_fall_through_to_the_file() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = scratch("seed-env-not-utf8");
+    let module = write_module(&dir, SEED_REVEALING);
+    let seed_file = dir.join("seed");
+    std::fs::write(&seed_file, [0x5au8; 32]).unwrap();
+    let out = dir.join("data");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ctf-generator"))
+        .arg("--module")
+        .arg(&module)
+        .arg("--out")
+        .arg(&out)
+        .arg("--seed-file")
+        .arg(&seed_file)
+        .env_remove("CTF_FLAG")
+        .env("CTF_SEED", OsString::from_vec(vec![0xff, 0xfe]))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a malformed CTF_SEED must fail the start, not fall back to the mount"
+    );
+    assert!(
+        stderr(&output).contains("not UTF-8"),
+        "the failure must name the malformed seed: {}",
+        stderr(&output)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// §26 I4: `CTF_FLAG` present but empty is an injected value, not "no value". The
 /// generator emits `abc`, so an empty injected flag is a mismatch and the
 /// challenge must not start.
