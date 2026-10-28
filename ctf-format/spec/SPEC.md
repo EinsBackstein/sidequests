@@ -2730,8 +2730,8 @@ declaration is false or absent; it declares no generator or no solver; or its
 `generate.determinism` is `none`, or is not a mode this document defines (§23.7),
 so §25.5's first stage — the determinism gate — must not run, or cannot be known to
 be permitted. (`flag_only` is covered by the absent generator above: §7.6 makes
-`wasm` and `outputs` absent in that mode.) An honest `unverified` is a usable state; a
-false `passed` is worse than no gate at all (design §3).
+`wasm` and `outputs` absent in that mode.) An honest `unverified` is a usable
+state; a false `passed` is worse than no gate at all (design §3).
 
 These are the **bundle's** declarations — `runtime`, `verify.offline`,
 `generate.wasm`, and `verify.solver` in its manifest (§7.6) — not the authoring
@@ -2745,9 +2745,9 @@ bundle's solver cannot run it and reports `unverified`; the reference implementa
 holds none. When more than one condition holds, the record MAY name any of them.
 
 `unverified` is the state for a gate that was **not run**: either an input it needs
-is absent, or a declaration forbids the gate. A gate that ran and could not complete a stage — a module that failed the
-determinism check or could not be sandboxed — is `failed`, not `unverified`, and S9
-requires the stage to be named. The distinction is the difference between "there was
+is absent, or a declaration forbids the gate. A gate that ran and could not complete
+a stage — a module that failed the determinism check or could not be sandboxed — is
+`failed`, not `unverified`, and S9 requires the stage to be named. The distinction is the difference between "there was
 nothing to run" and "it ran and broke".
 
 A conforming gate MUST name each stage of §25.5 that it ran, and for a `failed` or
