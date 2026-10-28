@@ -1285,9 +1285,12 @@ fn a_generator_section_under_another_name_is_not_gated() {
     std::fs::write(&bundle, write_bundle(1, &specs).unwrap()).unwrap();
 
     let document = dir.path("decoy-missing.yaml");
+    // The missing module's name carries a C1 control. `check_path` accepts it (it
+    // rejects C0 and bidi marks only), so the path the failure message quotes must
+    // be escaped rather than handed to the terminal raw (§13).
     let text = std::fs::read_to_string(&source)
         .unwrap()
-        .replace("decoy-gen.wasm", "missing-generator.wasm");
+        .replace("decoy-gen.wasm", "\"missing\\u0085generator.wasm\"");
     std::fs::write(&document, text).unwrap();
 
     let (code, stdout, stderr) = run(&[
@@ -1301,6 +1304,14 @@ fn a_generator_section_under_another_name_is_not_gated() {
     assert_eq!(
         code, 2,
         "an undeclared section is not the gate's generator:\n{stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains('\u{85}'),
+        "raw C1 control in the module path:\n{stderr:?}"
+    );
+    assert!(
+        stderr.contains("\\u{85}"),
+        "the module path is escaped:\n{stderr}"
     );
     let artifact = parse(&stdout);
     assert_eq!(artifact["status"], "unverified");

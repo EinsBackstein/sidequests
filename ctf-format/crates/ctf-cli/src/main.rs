@@ -1135,9 +1135,13 @@ impl DocumentModules {
         };
         let path = self.dir.join(name);
         std::fs::read(&path).map(Some).map_err(|e| {
+            // The module name comes from the authoring document, so the path this
+            // quotes is free-form text; escape it before it reaches the terminal
+            // (§13). `check_path` rejects C0 and bidi marks but not every C1
+            // control, which is why this cannot rely on validation alone.
             eprintln!(
                 "ctf: the offline gate could not run: `{}`: {e}",
-                path.display()
+                escape_terminal(&path.display().to_string())
             );
             format!(
                 "the offline gate could not run: the authoring document's {what} module could not \
